@@ -259,7 +259,7 @@ fn describe(
     let mut values = BTreeMap::new();
     let (operation, inputs, vector_parameter) = match block.block_type.as_str() {
         "Constant" => (Operation::Source, 0, Some(("Value", "1"))),
-        "Ground" | "Clock" | "Step" | "Sin" => (Operation::Source, 0, None),
+        "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" => (Operation::Source, 0, None),
         "Gain" => {
             let matrix = match block
                 .param("Multiplication")

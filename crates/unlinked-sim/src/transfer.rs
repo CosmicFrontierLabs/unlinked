@@ -392,7 +392,7 @@ pub(super) fn validate_discrete_coupling(graph: &Graph, sources: &[String]) -> R
     }
     while let Some((node, origin)) = queue.pop_front() {
         match kinds.get(node) {
-            Some(Kind::UnitDelay { .. }) => continue,
+            Some(Kind::UnitDelay { .. } | Kind::RateDelay { .. }) => continue,
             Some(Kind::Integrator { .. }) => return Err(block_error(origin,
                 "direct-feedthrough discrete output reaches continuous state without an explicit UnitDelay hold; this mixed-rate coupling is unsupported")),
             _ => {}
