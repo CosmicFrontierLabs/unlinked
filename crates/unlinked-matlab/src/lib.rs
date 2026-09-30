@@ -1,5 +1,8 @@
-//! A deliberately restricted MATLAB/Octave scalar-to-Rust transpiler.
+//! MATLAB/Octave real scalar, matrix and character-array frontends targeting Rust.
 //! Parsing and transpilation do not execute source code or launch a compiler.
+pub mod array_runtime;
+mod arrays;
+pub use arrays::{eval_array_expr, transpile_arrays};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -578,18 +581,29 @@ fn declarations(body: &[Stmt], args: &[String]) -> String {
         .collect()
 }
 
-/// Translate scalar scripts and local single-output functions into a standalone
-/// Rust program. Unsupported syntax and unbound variables produce diagnostics.
+/// Translate supported scripts and local functions into a standalone Rust program.
+/// Selects the scalar or array frontend from the source features. Unsupported
+/// syntax and statically unknown variables produce diagnostics.
 /// This function does not execute code. Semantic diagnostics currently use line 1.
 pub fn transpile(source: &str) -> Result<String, Error> {
-    transpile_inner(source, false)
+    if arrays::selects_array_frontend(source) {
+        arrays::transpile_arrays(source, false)
+    } else {
+        transpile_inner(source, false)
+    }
 }
 
-/// Translate a function file into a Rust library or module. Each MATLAB function
-/// `name` becomes `pub fn f_name(...) -> f64`; scripts are rejected in this mode.
+/// Translate a function file into a Rust library or module; scripts are rejected.
+/// Scalar-only functions export `f_name(f64, ...) -> f64`. Array-feature programs
+/// export `f_name(Vec<Value>) -> ArrayResult<Vec<Value>>` for dynamic shapes and
+/// multiple outputs. See [`transpile_arrays`] and [`array_runtime::Value`].
 /// The output can be passed to `rustc --crate-type=lib --emit=llvm-ir,link`.
 pub fn transpile_library(source: &str) -> Result<String, Error> {
-    transpile_inner(source, true)
+    if arrays::selects_array_frontend(source) {
+        arrays::transpile_arrays(source, true)
+    } else {
+        transpile_inner(source, true)
+    }
 }
 
 fn transpile_inner(source: &str, library: bool) -> Result<String, Error> {

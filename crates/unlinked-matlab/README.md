@@ -1,6 +1,7 @@
 # unlinked-matlab
 
-Dependency-free scalar MATLAB/Octave frontend for Rust and LLVM. The library
+Dependency-free MATLAB/Octave frontend for supported real scalar, matrix and
+character-array programs targeting Rust and LLVM. The library
 parses input and generates source; it never executes input, launches a compiler,
 loads files, or provides operating-system builtins. It is suitable for use from a
 WASM application or a server.
@@ -35,7 +36,7 @@ for uploaded programs. Production execution needs process isolation, resource
 limits and a job queue. Generated functions can recurse; a bounded individual
 range does not bound total runtime or output.
 
-## Supported subset
+## Original scalar frontend
 
 - Real `f64` scalar literals, scientific notation, named variables and `%` comments.
 - Assignments terminated by newline or semicolon and explicit `disp(expression)`.
@@ -55,9 +56,10 @@ range does not bound total runtime or output.
 - `eval_expr(source, workspace)` evaluates the same scalar expression subset
   directly against a `BTreeMap<String, f64>` for model block parameters.
 
-## Deliberate limitations
+## Original scalar-frontend limitations
 
-This is not a complete MATLAB compatibility implementation. Arrays, complex
+This is not a complete MATLAB compatibility implementation. In the original
+scalar frontend, arrays, complex
 numbers, indexing, strings, cells, structures, matrix operators, scripts calling
 other files, anonymous functions, closures, classes, multiple outputs, `while`,
 `break`, `return`, `global`, `persistent` and built-in shadowing are unsupported.
@@ -89,3 +91,94 @@ Logical-conversion behavior follows [MathWorks logical documentation](https://ww
 Floating-point modulo handling is informed by [GNU Octave arithmetic documentation](https://docs.octave.org/latest/Utility-Functions.html).
 The differential test is a compatibility check for the listed subset, not a claim
 of full MATLAB or Octave conformance.
+
+## Real matrix and character-array frontend
+
+`transpile` and `transpile_library` now select a native array frontend for matrix
+literals, ranges assigned as values, indexed variables/parameters, character
+literals, array builtins, elementwise/matrix operators, or `while`/`break`/
+`continue`/`return`. Sources requiring only the original scalar subset retain its
+primitive `f64` function ABI. `transpile_arrays(source, library)` explicitly selects
+the array frontend for any supported program. Selection does not execute input or
+silently substitute an unknown function.
+
+This frontend generates ordinary Rust control flow and function calls backed by
+a dependency-free value runtime. It does not embed a MATLAB source interpreter,
+invoke Octave, or execute operating-system commands. The generated Rust can be
+compiled to a native executable or LLVM IR with the same `rustc` workflow.
+
+```rust
+use std::collections::BTreeMap;
+use unlinked_matlab::{eval_array_expr, array_runtime::Value};
+let workspace = BTreeMap::from([("gain".into(), Value::scalar(2.0))]);
+let vector = eval_array_expr("gain * [1; 2; 3]", &workspace)?;
+assert_eq!((vector.rows, vector.cols), (3, 1));
+assert_eq!(vector.data, vec![2.0, 4.0, 6.0]);
+# Ok::<(), unlinked_matlab::Error>(())
+```
+
+`eval_array_expr(source, &BTreeMap<String, Value>)` evaluates only pure parameter
+expressions. It cannot print, open files, spawn processes, execute scripts, or call
+user functions. Scalar `eval_expr` remains unchanged for existing simulation
+callers. Pure array evaluation additionally caps aggregate intermediate values at
+eight million elements and estimated numeric work at twenty million operations
+per expression; these budgets prevent repeated large subexpressions from evading
+the individual array limits. `Value` exposes `rows`, `cols`, `data` in **column-major** order, and
+`kind` (`Numeric`, `Logical`, or `Character`). `Value::new`, `Value::row`, and
+`Value::scalar` construct inputs; `validate` checks externally constructed values.
+
+Array-library exports use `pub fn f_name(args: Vec<Value>) ->
+ArrayResult<Vec<Value>>`. Arguments follow declaration order, and results follow
+the declared output list. This ABI supports dynamic shapes and multiple outputs.
+Function calls share statement/loop and recursion budgets. Function outputs not
+assigned on the executed path return an error. Scalar-only library exports retain
+the earlier `f_name(f64, ...) -> f64` ABI.
+
+Supported array behavior:
+
+- Real, two-dimensional matrices/vectors, `[]`, row/column concatenation, scalar
+  expansion and two-dimensional implicit expansion for elementwise operators.
+- Column-major one-based indexing, two-subscript Cartesian indexing, logical
+  masks, `end`, `:`, and colon ranges; indexed assignments, scalar expansion,
+  vector growth and explicit two-dimensional growth. Deletion remains unsupported.
+- Matrix multiplication, transpose (`'` and `.'` for real values), square
+  nonsingular left/right division, integer square-matrix powers, and `.*`, `./`,
+  `.\`, `.^`. Complex results and general matrix functions fail explicitly.
+- MATLAB whitespace-sensitive matrix literals, `%` comments and `...` line
+  continuations. Character literals support doubled apostrophes and ASCII only.
+- `if` / `elseif` / `else`, `for` over columns, `while`, `break`, `continue`, local
+  functions, `return`, and multiple output assignment. Empty array-loop ranges
+  correctly assign an empty loop variable; the older scalar-only range path
+  still rejects this array-valued result explicitly.
+- Scalar/elementwise math from the original frontend plus `log2`, `rem`,
+  `isnan`, `isinf`, `isfinite`; `zeros`, `ones`, `eye`, `reshape`, `size`, `length`,
+  `numel`, `isempty`, `linspace`, `diag`, `sum`, `prod`, `all`, `any`, `min`, `max`,
+  vector `norm`/`dot`/`sort`, `find`, `transpose`, and `strcmp`.
+- `disp`, scalar `num2str`, `fprintf`, `sprintf`, `error`, and `assert` for locally
+  compiled programs. Formatting supports `%g`, `%f`, `%e`, `%d`/`%i`, `%s`, `%%`,
+  bounded width/precision, and newline/tab/carriage-return/backslash escapes.
+  Numeric display/formatting aims at useful values, not byte-for-byte MATLAB
+  command-window formatting. `fprintf` accepts a format string, never a file ID.
+
+Array-subset limits are 256 KiB source, 16384 tokens per source, 512 tokens and
+256 operators per expression, 64 parser/call nesting levels, one million elements
+per array/dimension, one million executed statements/loop iterations, ten million
+operations per matrix multiplication/solve, and four MB per formatted string.
+These are finite guardrails, **not** a total CPU/memory sandbox: callers executing
+compiled programs still need process-level isolation and resource limits.
+
+Unsupported array features include complex/sparse/N-dimensional arrays, cell and
+structure values, object classes, function handles, closures, globals, script
+loading, file/process/network functions, automatic command-window echo,
+`nargin`/`nargout`, arbitrary integer types, matrix-index deletion, linear growth
+of a non-vector matrix, non-square least-squares solves, fractional matrix powers,
+and indexing a temporary expression directly. Assign it to a variable first.
+
+When Octave is available, tests compare 42 fixed array expressions against both
+pure evaluation and generated Rust, including array shapes and column-major
+values. With `UNLINKED_TEST_CASES` set, nine licensed corpus function files compile
+and match Octave across eleven cases: rotation, skew matrices, binary/linear
+search, palindrome detection, bubble sort, Euclidean distance, factorial and
+Fibonacci. Tests also exercise generated loops/multiple outputs, index/runtime
+errors, parser fuzz cases and execution budgets. Missing optional prerequisites
+produce explicit skips; a configured missing corpus is an error.
