@@ -251,9 +251,20 @@ pub async fn read_upload(file: web_sys::File) -> ApiResult<Vec<u8>> {
 }
 
 /// Store `bytes` as a new version of the file at `path` (creating it if new).
-pub async fn upload(project: Uuid, path: &str, message: &str, bytes: &[u8]) -> ApiResult<FileInfo> {
+/// When `base` is given the upload only succeeds while that version is
+/// still the file's latest; otherwise the server answers 409.
+pub async fn upload(
+    project: Uuid,
+    path: &str,
+    message: &str,
+    bytes: &[u8],
+    base: Option<Uuid>,
+) -> ApiResult<FileInfo> {
+    let base = base
+        .map(|b| format!("&base_version={b}"))
+        .unwrap_or_default();
     let url = format!(
-        "/api/projects/{project}/files?path={}&message={}",
+        "/api/projects/{project}/files?path={}&message={}{base}",
         encode(path),
         encode(message)
     );

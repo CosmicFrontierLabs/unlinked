@@ -3,6 +3,7 @@
 //! Blocks are found by the containing system's path and the block name
 //! (MDL lines refer to blocks by name).
 
+use super::Resolved;
 use crate::{ImportError, MAX_DEPTH, MAX_NODES};
 use unlinked_model::edit::Edit;
 use unlinked_model::Rect;
@@ -420,8 +421,8 @@ fn format_rect(p: &Rect) -> String {
 }
 
 /// `name` is the block's current name (the edit refers to it by id).
-fn apply_edit(file: &mut MdlFile, edit: &Edit, name: &str) -> Result<(), ImportError> {
-    let path = edit.system();
+fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError> {
+    let (edit, path, name) = (&resolved.edit, &resolved.system, resolved.block.as_str());
     let sys = file
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
@@ -483,10 +484,10 @@ fn apply_edit(file: &mut MdlFile, edit: &Edit, name: &str) -> Result<(), ImportE
     Ok(())
 }
 
-pub fn apply(text: &str, edits: &[(Edit, String)]) -> Result<String, ImportError> {
+pub(super) fn apply(text: &str, edits: &[Resolved]) -> Result<String, ImportError> {
     let mut file = parse(text)?;
-    for (edit, name) in edits {
-        apply_edit(&mut file, edit, name)?;
+    for resolved in edits {
+        apply_edit(&mut file, resolved)?;
     }
     Ok(file.to_text())
 }
@@ -496,6 +497,15 @@ mod tests {
     use super::*;
 
     const SRC: &str = "Model {\n  Name\t\"m\"\n  System {\n    Name\t\"m\"\n    Block {\n      BlockType\tGain\n      Name\t\"g\"\n      Position\t[10, 10, 40, 40]\n      Gain\t\"2\"\n    }\n    Block {\n      BlockType\tOutport\n      Name\t\"out\"\n      Position\t[100, 10, 130, 40]\n    }\n    Line {\n      SrcBlock\t\"g\"\n      SrcPort\t1\n      Points\t[20, 0]\n      DstBlock\t\"out\"\n      DstPort\t1\n    }\n  }\n}\n";
+
+    /// An edit to block `name` in the root system.
+    fn at_root(edit: Edit, name: &str) -> Resolved {
+        Resolved {
+            edit,
+            system: vec![],
+            block: name.into(),
+        }
+    }
 
     #[test]
     fn unmodified_roundtrip_is_identical() {
@@ -509,7 +519,7 @@ mod tests {
             id: "x".into(),
             position: Rect::new(20.0, 20.0, 50.0, 50.0),
         };
-        let out = apply(SRC, &[(mv, "g".into())]).unwrap();
+        let out = apply(SRC, &[at_root(mv, "g")]).unwrap();
         assert!(out.contains("Position\t[20, 20, 50, 50]"));
         assert!(!out.contains("Points"));
 
@@ -518,7 +528,7 @@ mod tests {
             id: "x".into(),
             name: "gain \"one\"".into(),
         };
-        let out = apply(SRC, &[(rn, "g".into())]).unwrap();
+        let out = apply(SRC, &[at_root(rn, "g")]).unwrap();
         assert!(out.contains("Name\t\"gain \\\"one\\\"\""));
         assert!(out.contains("SrcBlock\t\"gain \\\"one\\\"\""));
 
@@ -528,14 +538,15 @@ mod tests {
             name: "Gain".into(),
             value: "K*3".into(),
         };
-        let out = apply(SRC, &[(sp, "g".into())]).unwrap();
+        let out = apply(SRC, &[at_root(sp, "g")]).unwrap();
         assert!(out.contains("Gain\t\"K*3\""));
 
         let del = Edit::DeleteBlock {
             system: vec![],
             id: "x".into(),
+            disconnect: unlinked_model::edit::DisconnectPolicy::Disconnect,
         };
-        let out = apply(SRC, &[(del, "out".into())]).unwrap();
+        let out = apply(SRC, &[at_root(del, "out")]).unwrap();
         assert!(!out.contains("\"out\""));
         assert!(
             !out.contains("Line {"),
@@ -553,7 +564,7 @@ mod tests {
             name: "Gain".into(),
             value: "5".into(),
         };
-        let out = apply(src, &[(sp, "g".into())]).unwrap();
+        let out = apply(src, &[at_root(sp, "g")]).unwrap();
         assert_eq!(out, src.replace("Gain\t\"2\"", "Gain\t\"5\""));
     }
 
@@ -568,7 +579,7 @@ mod tests {
                 name: "Inputs".into(),
                 value: value.into(),
             };
-            apply(src, &[(e, "g".into())]).unwrap()
+            apply(src, &[at_root(e, "g")]).unwrap()
         };
         assert!(sp("3").contains("Inputs\t3\n"));
         let out = sp("3\n    }\n    Block {\n      Name\t\"evil\"");
@@ -587,7 +598,7 @@ mod tests {
             name: "b".into(),
             value: "7".into(),
         };
-        let out = apply(src, &[(sp, "s".into())]).unwrap();
+        let out = apply(src, &[at_root(sp, "s")]).unwrap();
         assert!(out.contains("MaskValueString\t\"1|7\""));
     }
 }

@@ -2,7 +2,7 @@
 //! the IR obtained by applying the same edits to the imported model.
 
 use std::path::{Path, PathBuf};
-use unlinked_model::edit::Edit;
+use unlinked_model::edit::{apply_batch, DisconnectPolicy, Edit};
 use unlinked_model::{Model, Rect};
 
 fn corpus_dir() -> Option<PathBuf> {
@@ -78,6 +78,28 @@ fn edits_for(model: &Model) -> Vec<Edit> {
         edits.push(Edit::DeleteBlock {
             system: vec![],
             id: b.id.clone(),
+            disconnect: DisconnectPolicy::Disconnect,
+        });
+    }
+    // Inside a chart-free subsystem, renamed earlier in the same batch:
+    // the nested edit must still find it by ID.
+    let sub = model.root.blocks.iter().find(|b| {
+        !owns_chart(model, &b.name)
+            && b.subsystem.as_ref().is_some_and(|s| !s.blocks.is_empty())
+            && !edits.iter().any(|e| e.block() == &b.id)
+    });
+    if let Some(sub) = sub {
+        let inner = &sub.subsystem.as_ref().unwrap().blocks[0];
+        edits.push(Edit::RenameBlock {
+            system: vec![],
+            id: sub.id.clone(),
+            name: format!("{} (edited)", sub.name),
+        });
+        edits.push(Edit::SetParameter {
+            system: vec![sub.id.clone()],
+            id: inner.id.clone(),
+            name: "Description".into(),
+            value: "nested edit".into(),
         });
     }
     edits
@@ -155,8 +177,23 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
 
         let edits = edits_for(&original);
         let mut expected = original.clone();
-        for e in &edits {
-            e.apply(&mut expected).unwrap();
+        apply_batch(&mut expected, &edits).unwrap();
+
+        // Deleting a connected block without consent to disconnect fails
+        // and writes nothing.
+        if let Some(Edit::DeleteBlock { system, id, .. }) =
+            edits.iter().find(|e| matches!(e, Edit::DeleteBlock { .. }))
+        {
+            let reject = Edit::DeleteBlock {
+                system: system.clone(),
+                id: id.clone(),
+                disconnect: DisconnectPolicy::Reject,
+            };
+            if unlinked_import::patch::apply_edits(&name, &bytes, &[reject]).is_ok() {
+                failures.push(format!(
+                    "{name}: rejected delete of connected block succeeded"
+                ));
+            }
         }
         match unlinked_import::patch::apply_edits(&name, &bytes, &edits) {
             Ok(patched) => match unlinked_import::import(&name, &patched) {

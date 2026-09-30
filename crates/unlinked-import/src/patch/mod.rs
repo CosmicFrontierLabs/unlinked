@@ -9,7 +9,17 @@ mod mdl;
 mod slx;
 
 use crate::{decode_text, import, ImportError};
-use unlinked_model::edit::Edit;
+use unlinked_model::edit::{system_names, Edit};
+
+/// An edit with the names its targets have in the file at that point of
+/// the batch.
+struct Resolved {
+    edit: Edit,
+    /// Subsystem block names from the root.
+    system: Vec<String>,
+    /// Name of the edited block.
+    block: String,
+}
 
 /// Apply `edits` in order to the model in `bytes`, returning the new file.
 ///
@@ -18,24 +28,32 @@ use unlinked_model::edit::Edit;
 /// anything is written.
 pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u8>, ImportError> {
     let mut model = import(filename, bytes)?;
-    let mut named = Vec::with_capacity(edits.len());
-    for edit in edits {
-        let path: Vec<&str> = edit.system().iter().map(String::as_str).collect();
-        let name = model
+    let mut resolved = Vec::with_capacity(edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        // Files locate systems and blocks by name, so resolve the edit's
+        // IDs against the model as earlier edits in the batch left it.
+        let failed = |message: String| ImportError::Edit(format!("edit {index}: {message}"));
+        let system = system_names(&model, edit.system())
+            .ok_or_else(|| failed(format!("no subsystem at {:?}", edit.system())))?;
+        let path: Vec<&str> = system.iter().map(String::as_str).collect();
+        let block = model
             .system_at(&path)
             .and_then(|s| s.block(edit.block()))
             .map(|b| b.name.clone())
-            .ok_or_else(|| ImportError::Edit(format!("block {} not found", edit.block())))?;
-        edit.apply(&mut model)
-            .map_err(|e| ImportError::Edit(e.to_string()))?;
-        named.push((edit.clone(), name));
+            .ok_or_else(|| failed(format!("block {} not found", edit.block())))?;
+        edit.apply(&mut model).map_err(|e| failed(e.to_string()))?;
+        resolved.push(Resolved {
+            edit: edit.clone(),
+            system,
+            block,
+        });
     }
 
     if bytes.starts_with(b"PK\x03\x04") {
-        return slx::apply(bytes, edits);
+        return slx::apply(bytes, &resolved);
     }
     let utf8 = std::str::from_utf8(bytes).is_ok();
-    let text = mdl::apply(&decode_text(bytes), &named)?;
+    let text = mdl::apply(&decode_text(bytes), &resolved)?;
     if utf8 {
         Ok(text.into_bytes())
     } else {

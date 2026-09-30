@@ -149,6 +149,12 @@ pub struct UploadQuery {
     path: String,
     #[serde(default)]
     message: String,
+    /// The version an edit started from. When given, the upload succeeds
+    /// only if that is still the file's latest version; otherwise it is
+    /// refused with 409 so another user's newer version is never
+    /// overwritten.
+    #[serde(default)]
+    base_version: Option<Uuid>,
 }
 
 /// Store the request body as a new version of the file at `path`.
@@ -174,6 +180,25 @@ pub async fn upload(
                     .for_update()
                     .first(conn)
                     .optional()?;
+                // The file row is locked above, so no other upload can add
+                // a version between this check and the insert below.
+                if let Some(base) = query.base_version {
+                    let Some(file) = &existing else {
+                        return Err(ApiError::Conflict(format!(
+                            "{path} was deleted or renamed after this edit started"
+                        )));
+                    };
+                    let (latest_id, latest_version) = file_versions::table
+                        .filter(file_versions::file_id.eq(file.id))
+                        .order(file_versions::version.desc())
+                        .select((file_versions::id, file_versions::version))
+                        .first::<(Uuid, i32)>(conn)?;
+                    if latest_id != base {
+                        return Err(ApiError::Conflict(format!(
+                            "{path} changed after this edit started; the latest version is v{latest_version}"
+                        )));
+                    }
+                }
                 let file = match existing {
                     Some(file) => file,
                     None => diesel::insert_into(files::table)
