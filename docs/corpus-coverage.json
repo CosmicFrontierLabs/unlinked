@@ -418,7 +418,7 @@
       "name": "spherical_wrist",
       "path": "icub/wrist_mk2_1/spherical_wrist.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 1364: MATLAB Function chart requires an unmasked, unconditional MATLAB Function subsystem",
+      "simulation_compile_error": "block 2819: commented or commented-through blocks are unsupported",
       "systems": 90,
       "version": "R2024b"
     },
@@ -522,7 +522,7 @@
       "name": "IP_SwingUp_Design",
       "path": "pendulum/IP_SwingUp_Design.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 70: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 191: commented or commented-through blocks are unsupported",
       "systems": 10,
       "version": "R2018a"
     },
@@ -741,5 +741,6 @@
       "chart": "PID Control/ud",
       "result": "Original imported scalar MATLAB Function executed with explicit inputs and checked against its piecewise formula. Full enclosing model is not executed."
     }
-  ]
+  ],
+  "implementation_revision": "8653349f2d53176d002ea7dc029df5cbf1efd857"
 }
