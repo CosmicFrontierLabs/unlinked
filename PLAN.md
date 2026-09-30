@@ -1,197 +1,142 @@
-# Unlinked — Plan
+# Unlinked — Plan and status
 
-Unlinked is a web-based, pure-Rust clone of Simulink: open existing `.slx` /
-`.mdl` models in the browser, render them faithfully, and (eventually) simulate
-them. A second deliverable is a MATLAB/Octave → Rust (and later LLVM)
-transpiler, which also doubles as the expression evaluator Simulink block
-parameters need.
+Unlinked is a web-based, pure-Rust tool for Simulink models. It opens existing
+`.slx` / `.mdl` files in the browser, renders and edits them, versions them
+per organization, and simulates a **bounded, explicitly rejected-otherwise
+subset** of Simulink. It also includes a MATLAB/Octave → Rust transpiler
+(LLVM IR via `rustc`), whose evaluator doubles as the block-parameter and
+init-script interpreter.
+
+It is not a full Simulink or MATLAB replacement. Anything outside the
+supported subsets fails with an explicit diagnostic rather than an
+approximation; the roadmap below lists what is not supported yet.
 
 The backbone is [single-binary-rust-website](https://github.com/meawoppl/single-binary-rust-website):
-Axum backend + Yew/Trunk frontend embedded with `memory-serve`, Diesel/Postgres
-with embedded migrations, typed WebSockets via `ws-bridge`, one Docker image.
-
-Owners: **claude** (web app, auth/orgs, import, render, frontend) and
-**codex** (test corpus, simulation, MATLAB). Every change lands as a PR on a
-`meawoppl/<topic>` branch and is reviewed by the other agent.
+an Axum backend with the Yew/Trunk frontend embedded via `memory-serve`,
+Diesel/Postgres with embedded migrations, typed WebSockets via `ws-bridge`,
+and a single Docker image.
 
 ## Workspace layout
 
 ```
-Cargo.toml                 # workspace: backend, frontend, shared, crates/*
 shared/                    # HTTP/WS API types (serde), shared by backend + frontend
-backend/                   # Axum server, OAuth, orgs, file storage, sim jobs
-frontend/                  # Yew SPA: file browser, diagram viewer/editor, scopes
+backend/                   # Axum: OAuth, orgs/projects, versioned files, sim jobs
+frontend/                  # Yew SPA: viewer/editor, compare, simulate, transpile
 crates/
-  unlinked-model/          # Model IR (serde only, wasm-safe)            [claude]
-  unlinked-import/         # .slx (OPC zip + XML) and .mdl (text) → IR  [claude]
-  unlinked-render/         # IR → SVG scene (pure, wasm-safe, testable) [claude]
-  unlinked-cli/            # `unlinked` binary: info/render/sim/transpile [both]
-  unlinked-matlab/         # MATLAB lexer/parser/AST, evaluator, Rust codegen [codex]
-  unlinked-sim/            # block library, scheduler, solvers          [codex]
+  unlinked-model/          # Model IR, Stateflow IR, diff, edits (wasm-safe)
+  unlinked-import/         # .slx / .mdl → IR; lossless patching of edits back
+  unlinked-render/         # IR → SVG, diagrams and Stateflow charts (wasm-safe)
+  unlinked-matlab/         # MATLAB lexer/parser, bounded evaluator, Rust codegen
+  unlinked-sim/            # graph lowering, scheduler, solvers
+  unlinked-cli/            # `unlinked info | render | sim | transpile`
 ```
 
-Rules:
+Model, import, render, matlab and sim all build for `wasm32-unknown-unknown`;
+the browser parses, renders, diffs, edits and transpiles locally. Test models
+live in the separate [unlinked-test-cases](https://github.com/meawoppl/unlinked-test-cases)
+repo (30 third-party models, 1 synthetic model and 9 `.m` scripts), read
+from `UNLINKED_TEST_CASES`; corpus tests skip when it is absent and run in
+CI. Per-model import, render and simulation coverage is tracked in
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
-- `unlinked-model`, `unlinked-import`, `unlinked-render`, `unlinked-matlab` and
-  `unlinked-sim` must build for `wasm32-unknown-unknown` so the browser can
-  parse, render and run small simulations locally. Anything native-only (LLVM
-  via `inkwell`, threads, filesystem) sits behind a cargo feature or a separate
-  crate.
-- The backend is the source of truth for stored files; the frontend receives the
-  parsed IR as JSON (`shared` types wrap `unlinked_model::Model`).
-- Crate dependencies flow one way:
-  `model ← import ← render`, `model ← sim ← matlab (evaluator)`,
-  `backend/frontend/cli ← all`.
+## Delivered
 
-## Test corpus — `../unlinked-test-cases`
+### Import and IR
+- SLX (OPC zip, split `systems/*.xml` parts, `System Ref` resolution) and
+  legacy MDL (including windows-1252 files and embedded OPC tails), with byte,
+  node and nesting budgets. All 31 corpus models import and render.
+- Blocks, lines with branches, masks (both mask formats), library links,
+  annotations, solver configuration and model workspace.
+- Stateflow charts and MATLAB Function blocks (`stateflow.xml` and the split
+  `stateflow/` layout, and the MDL `Stateflow` section): states, transitions,
+  junctions, MATLAB code, data declarations and raw timing metadata.
 
-A separate repo ([meawoppl/unlinked-test-cases](https://github.com/meawoppl/unlinked-test-cases))
-holds openly licensed third-party models, so licensing stays clean and the main
-repo stays small.
+### Rendering and viewing
+- SVG rendering of every corpus diagram level (common block glyphs, masks'
+  simple display text, ports, routed lines), light and dark themes.
+- Stateflow charts and subcharts; MATLAB Function code listings.
+- Browser viewer: pan/zoom, subsystem/chart drill-down, tree, breadcrumbs,
+  block inspector. Local files are parsed in the browser and never uploaded.
 
-```
-fixtures/<source>/...        # .slx / .mdl / .m copied byte-for-byte from upstream
-fixtures/synthetic/...       # hand-written models with analytic expected outputs
-licenses/                    # upstream license texts
-manifest.json                # per fixture: source repo + pinned revision, license,
-                             # sha256, Simulink release, block types, coverage
-                             # (import/render/sim/transpile), expected outputs
-scripts/corpus.py            # verify hashes/licenses; refresh pinned upstreams
-```
+### Web application
+- OAuth (Google, GitHub) with PKCE and server-checked flow expiry; dev mode.
+- Organizations, projects, per-project roles (viewer / editor / owner), org
+  default access, audit log. Authorization goes through one access layer;
+  resources without a role answer 404.
+- Versioned file storage: immutable versions, history, download, rename,
+  soft delete, upload limits.
+- Version comparison: structural diff of blocks (added, removed, parameters,
+  layout, appearance, ports, library links), wiring, configuration,
+  workspace and charts. Block changes are highlighted on the diagram; the
+  other changes, including charts, are listed in the change summary.
+- Diagram editing: move, rename, re-parameterize and delete blocks, saved as a
+  new version by patching the original file rather than regenerating it.
+  Untouched SLX parts and a no-op save are byte-identical; an edited XML part
+  keeps its unmodeled content but may reserialize attribute quoting.
 
-The main repo reads the corpus from `UNLINKED_TEST_CASES` (default
-`../unlinked-test-cases`). Corpus tests skip (not fail) when the directory is
-absent so a plain `cargo test` works anywhere; CI checks the corpus out
-alongside and runs them for real.
+### Simulation
+- Bounded, version-pinned simulation jobs over HTTP and a WebSocket stream,
+  with per-user and global caps, quotas, cancellation, deadlines and stored
+  results. Live plots use [rizzma](https://crates.io/crates/rizzma) with
+  labeled time and value axes; traces export as CSV.
+- Solvers: Euler, RK4, adaptive Dormand–Prince 5(4).
+- Blocks: sources (Constant, Clock, Step, Sine), Gain, Bias, Sum, Product,
+  Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
+  operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
+  TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
+  matrix signals lowered to scalars. The authoritative list and its limits are
+  in [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
+- Multirate discrete scheduling on integer sample ticks (held values between
+  hits and through solver stages), and local Goto/From routing.
+- Pure scalar MATLAB Function charts execute through a bounded function
+  interpreter; anything stateful, non-scalar, complex, variable-size or with
+  its own scheduling is rejected.
+- Root inputs can be bound explicitly (`unlinked sim --input-value`).
+- Coverage: all 31 corpus models import and render. With no inputs or
+  overrides only the synthetic reference model compiles for simulation; the
+  AutoLayout models run with explicit root inputs, and a real MATLAB Function
+  block runs in isolation. See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
+- Workspace from expressions and from a same-project `.m` init script, chosen
+  in the Simulate tab, pinned to its version and evaluated by the bounded
+  interpreter; explicit workspace entries override init values.
 
-## Model IR (`unlinked-model`)
+### MATLAB / Octave
+- Array-first evaluator and Rust code generator for a bounded subset: real
+  matrices, indexing, control flow, local functions, common builtins. Checked
+  against Octave on the corpus scripts. LLVM IR comes from compiling the
+  generated Rust with `rustc` (CLI only); there is no in-process LLVM backend.
+- In-browser MATLAB → Rust page, also available as a tab on project `.m`
+  files.
+- Details: [`crates/unlinked-matlab/README.md`](crates/unlinked-matlab/README.md).
 
-Simulink concepts mapped 1:1 so render and sim share a single representation:
+## Roadmap (not supported yet)
 
-- `Model { name, source, simulink_version, config: SimConfig, root: System, workspace }`
-- `System { blocks, lines, annotations }` — one diagram level
-- `Block { id, block_type, name, position: Rect, orientation, mirrored, ports: PortCounts,
-  parameters: BTreeMap<String,String>, mask, library_source, subsystem: Option<Box<System>>, style }`
-- `Line { name, src, points, dst, branches }` with recursive `Branch`es
-- `Endpoint { block: BlockId, port: PortRef { kind, index } }`
+These are deliberately out of scope today and are rejected when encountered:
 
-Parameters stay as raw MATLAB expression strings in the IR; evaluation is the
-simulator's job (via `unlinked-matlab`'s evaluator against the model workspace
-and mask scopes). `System::connections()` flattens line trees to
-`(src, dst)` pairs for the simulator.
+- **Stateflow execution** of state charts (states, transitions, events, temporal
+  logic). Charts import, render and diff, but only pure scalar MATLAB Function
+  charts simulate.
+- **Whole-model coverage**: most real corpus models still need unsupported
+  blocks, masks, libraries or external inputs before they can run.
+- **General masks and toolboxes**: mask initialization code, masked library
+  internals that need MathWorks libraries, Simscape and other toolboxes.
+- **Full MATLAB language**: cells, structs, classes, function handles, strings
+  beyond character arrays, file and OS builtins, `eval`-style dynamic code.
+- **Simulation semantics**: zero-crossing detection, variable-step solvers
+  other than Dormand–Prince, algebraic loop solving, triggered/enabled and
+  function-call subsystems, buses, MIMO state-space, fixed-point types,
+  multi-instance model references.
+- **Editing**: adding blocks, drawing lines, renaming/deleting blocks that
+  own Stateflow charts, and editing chart contents.
+- **Scale-out**: simulation caps are per backend instance.
 
-## Import (`unlinked-import`)
-
-- **SLX** (R2012a+): OPC zip. `simulink/blockdiagram.xml` holds the model and,
-  in newer releases, `simulink/systems/system_<sid>.xml` holds each subsystem.
-  Parse with `zip` + `quick-xml`; resolve `<System Ref=...>` across parts.
-  Stateflow lives in `simulink/stateflow.xml` (or, in newer releases,
-  `simulink/stateflow/machine.xml` plus one `chart_<id>.xml` per chart) and
-  in the MDL `Stateflow` section; both become `Model::charts`, matched to
-  their block by path (`Model::chart_at`).
-- **MDL**: nested `Key { ... }` text format with quoted strings and implicit
-  string concatenation. Hand-written tokenizer → generic tree → IR. Old files
-  lack `SID`; synthesize ids from the block path.
-- Library links (`Reference` blocks with `SourceBlock`) render using a built-in
-  appearance table for common libraries; unknown ones show as masked boxes.
-- Unknown elements are preserved in `parameters` so nothing is silently lost.
-
-## Rendering (`unlinked-render` + frontend)
-
-`unlinked-render` turns a `System` into a backend-agnostic scene (shapes,
-text, polylines, ports) and serializes to SVG. The same code produces:
-
-- server-side thumbnails and `unlinked render` CLI output,
-- golden-file snapshot tests over the corpus,
-- the frontend diagram (Yew renders the scene as inline SVG with pan/zoom,
-  click-to-open subsystems, breadcrumbs, hover tooltips for parameters).
-
-Block glyphs cover the common library (Gain triangle, Sum circle, Integrator
-`1/s`, Transfer Fcn fraction, Scope, In/Outport ovals, Mux/Demux bars,
-Constant, Product, Saturation, Switch, From/Goto tags, SubSystem, Stateflow
-chart box). Everything else renders as a labeled box with port stubs. Masked
-blocks render their mask display text when simple (`disp`, `fprintf` of a
-literal), otherwise a box.
-
-## Simulation (`unlinked-sim`) — codex
-
-1. Flatten the hierarchy (virtual subsystems, Goto/From, Mux/Demux bus
-   expansion) into a dataflow graph.
-2. Evaluate block parameters with `unlinked-matlab`.
-3. Sort execution (direct feedthrough), detect algebraic loops.
-4. Sample-time propagation: continuous, discrete, inherited, multirate.
-5. Solvers: fixed-step ode1/ode2/ode3/ode4/ode5, variable-step ode23/ode45
-   (Dormand–Prince) with zero-crossing detection.
-6. Block library behind a `Block` trait (outputs / update / derivatives).
-7. Logging: Scope / To Workspace / Outport signals → typed traces.
-
-The backend runs simulations as jobs and streams traces to the browser over
-the WebSocket; small models may also run in-browser via wasm.
-
-## MATLAB/Octave transpiler (`unlinked-matlab`) — codex
-
-- Lexer handling transpose-vs-quote, command syntax, `...` continuations,
-  `%{ %}` block comments, `end` in indexing.
-- Parser → AST (scripts, functions, nested/local functions, classdef later).
-- Evaluator (tree-walking interpreter) over a `Value` type (double matrices,
-  logical, char, cell, struct, function handles) — used for block parameters
-  and as the transpiler's reference oracle.
-- Type/shape inference → Rust code generation against a small runtime crate;
-  LLVM backend (`inkwell`) behind a feature once the Rust path is stable.
-- Tests compare evaluator/transpiled output against Octave-generated
-  expectations stored in the corpus.
-
-## Web application
-
-### Auth
-
-OAuth2 login (Google + GitHub, pattern from agent-portal) using the `oauth2`
-crate; signed session cookie via `tower-cookies`. `--dev-mode` bypasses OAuth
-with a local dev user. Allowed email domains are configurable
-(`ALLOWED_EMAIL_DOMAINS`) so a deployment can be locked to one organization.
-
-### Organizations and sharing
-
-- `users` — identity from OAuth (provider, subject, email, name, avatar).
-- `organizations`, `org_members (role: owner | admin | member)`.
-- `projects` — owned by an org; `project_members` for per-project roles
-  (`viewer | editor | owner`); org members inherit a default role.
-- `files` — a path within a project (models, `.m` scripts, data).
-- `file_versions` — immutable content blobs (bytea, sha256, size, author,
-  message); the IR is re-derived on demand and cached.
-- `sim_runs` — requested simulations with status and stored traces.
-- `audit_log` — who did what, for organizations that care.
-
-Every API handler authorizes through one `Access` extractor that resolves the
-caller's role on the target project.
-
-### Frontend
-
-Routes: `/` (projects), `/p/:project` (file browser + upload),
-`/p/:project/f/*path` (diagram viewer; later editor + scopes),
-`/orgs/:org` (members), `/login`.
-
-### Conventions (inherited from the template)
-
-- All API/WS types in `shared`, with a serde roundtrip test per type.
-- Migrations embedded and applied at startup; names checked by
-  `scripts/check-migration-names.sh`.
-- `build_app(state)` tested in-process with `tower::ServiceExt::oneshot`; DB
-  tests run against a real Postgres when `DATABASE_URL` is set.
-- CI: lint, audit, fmt, clippy (`-Dwarnings`), test, release build, container.
-- Squash-merge PRs with automerge once checks pass.
-
-## Milestones
-
-| # | Milestone | Owner |
-|---|-----------|-------|
-| M0 | Template bootstrap, workspace layout, PLAN.md | claude |
-| M1 | Corpus repo with ≥30 permissively licensed models + manifest | codex |
-| M2 | IR + SLX/MDL import; every corpus model parses | claude |
-| M3 | SVG renderer + golden tests; `unlinked render` CLI | claude |
-| M4 | OAuth, orgs, projects, file upload/versioning, diagram viewer | claude |
-| M5 | MATLAB lexer/parser/evaluator; block parameter evaluation | codex |
-| M6 | Simulation engine: core blocks + fixed/variable-step solvers | codex |
-| M7 | Sim runs from the UI with scope plots streamed over WS | both |
-| M8 | MATLAB → Rust transpiler; LLVM backend | codex |
-| M9 | Diagram editing (move/connect/add blocks, save back to SLX) | claude |
+## Conventions
+- Work lands as reviewed PRs on `meawoppl/<topic>` branches; squash merge once
+  CI (fmt, clippy `-Dwarnings`, tests with Postgres and the corpus, audit,
+  release build, container) is green.
+- All API/WS types live in `shared` with serde round-trip tests; migrations
+  are embedded and applied at startup.
+- Untrusted input (models, scripts, edits) is bounded by explicit size and
+  work budgets on both the browser and server paths. Server simulation jobs
+  also have cooperative deadlines and cancellation; browser import and
+  transpilation have no wall-clock deadline.
