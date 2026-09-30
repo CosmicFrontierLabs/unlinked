@@ -153,7 +153,18 @@ pub fn start(
                         }
                     })?;
                     for (name, value) in values {
-                        model.workspace.insert(name, parameter_literal(&value)?);
+                        if value.kind == unlinked_matlab::array_runtime::ValueKind::Character
+                            || value.data.is_empty()
+                        {
+                            // Text labels and cleared temporaries are not numeric parameters.
+                            // Remove any old binding so a model referencing one fails instead
+                            // of silently using a stale model-workspace value.
+                            model.workspace.remove(&name);
+                            continue;
+                        }
+                        let literal = parameter_literal(&value)
+                            .map_err(|error| format!("init variable {name}: {error}"))?;
+                        model.workspace.insert(name, literal);
                     }
                 }
                 model.workspace.extend(workspace);
