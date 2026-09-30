@@ -234,7 +234,7 @@ impl Value {
                 .max()
                 .map_or(self.data.len(), |i| (i + 1).max(self.data.len()));
             if required > self.data.len() {
-                if !self.is_vector() && !self.data.is_empty() {
+                if !self.is_vector() && (self.rows != 0 || self.cols != 0) {
                     return Err(
                         "linear indexed growth of non-vector matrices is unsupported".into(),
                     );

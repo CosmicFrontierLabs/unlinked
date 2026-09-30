@@ -173,3 +173,56 @@ fn pure_initialization_scripts_match_octave() {
         assert_eq!(actual.data, &data[2..], "{script}");
     }
 }
+
+#[test]
+fn empty_matrix_linear_growth_matches_octave_errors() {
+    let cases = [
+        (0, 0, true),
+        (0, 1, true),
+        (1, 0, true),
+        (2, 1, true),
+        (1, 2, true),
+        (2, 0, false),
+        (3, 0, false),
+    ];
+    let octave_available = Command::new("octave").arg("--version").output().is_ok();
+    for (rows, cols, allowed) in cases {
+        let source = format!("x=zeros({rows},{cols});x(3)=1;");
+        let ours = eval_script(&source, &BTreeMap::new());
+        assert_eq!(ours.is_ok(), allowed, "{source}");
+        if octave_available {
+            let probe = format!(
+                "try;{source}fprintf('OK %d %d ',rows(x),columns(x));fprintf('%.17g ',x(:));catch;fprintf('ERROR');end;"
+            );
+            let result = Command::new("octave")
+                .args(["--quiet", "--no-gui", "--eval", &probe])
+                .output()
+                .unwrap();
+            assert!(result.status.success());
+            let text = String::from_utf8(result.stdout).unwrap();
+            if let Ok(workspace) = ours {
+                let array = &workspace["x"];
+                let expected = text
+                    .strip_prefix("OK ")
+                    .expect("Octave should accept shared subset")
+                    .split_whitespace()
+                    .map(|n| n.parse::<f64>().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    (array.rows, array.cols),
+                    (expected[0] as usize, expected[1] as usize),
+                    "{source}"
+                );
+                assert_eq!(array.data, expected[2..], "{source}");
+            } else {
+                assert_eq!(text, "ERROR", "{source}");
+            }
+        }
+    }
+    if !octave_available {
+        eprintln!("Octave unavailable; growth error differential skipped");
+    }
+    // General non-vector linear growth remains outside the supported subset,
+    // including zero-row shapes accepted by some Octave versions.
+    assert!(eval_script("x=zeros(0,2);x(3)=1;", &BTreeMap::new()).is_err());
+}
