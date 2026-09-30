@@ -21,8 +21,6 @@ use yew::prelude::*;
 pub struct EditorProps {
     pub project_id: Uuid,
     pub file_id: Uuid,
-    /// The file's path in the project; also used to detect the format.
-    pub path: String,
     /// The version shown, which edits start from.
     pub base: Base,
     pub can_edit: bool,
@@ -35,6 +33,10 @@ pub struct EditorProps {
 /// A file version edits apply to.
 #[derive(Clone, PartialEq)]
 pub struct Base {
+    /// The file's path at this version; saves go here, and it also tells
+    /// the patcher the format. Refreshed with the base, since the file may
+    /// have been renamed.
+    pub path: String,
     pub version_id: Uuid,
     pub version: i32,
     pub model: Rc<Model>,
@@ -58,6 +60,7 @@ async fn latest_base(project_id: Uuid, file_id: Uuid) -> Result<Base, String> {
         .map_err(|e| e.to_string())?;
     let model = unlinked_import::import(&info.path, &bytes).map_err(|e| e.to_string())?;
     Ok(Base {
+        path: info.path,
         version_id: info.latest.id,
         version: info.latest.version,
         model: Rc::new(model),
@@ -72,8 +75,10 @@ pub fn model_editor(props: &EditorProps) -> Html {
     let pending = use_state(Vec::<Edit>::new);
     let working = use_state(|| props.base.model.clone());
     let error = use_state(|| None::<String>);
-    // Set when a save was refused because the file changed meanwhile.
-    let stale = use_state(|| false);
+    // Why the last save was refused because the file changed meanwhile.
+    // Kept apart from `error`, which later edits clear, so the recovery
+    // action stays visible until the user reapplies or discards.
+    let stale = use_state(|| None::<String>);
     let message = use_state(String::new);
     let busy = use_state(|| false);
     // Cleared on unmount so a request finishing afterwards neither updates
@@ -119,7 +124,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
             pending.set(Vec::new());
             working.set(base.model.clone());
             error.set(None);
-            stale.set(false);
+            stale.set(None);
         })
     };
     let undo = {
@@ -154,14 +159,14 @@ pub fn model_editor(props: &EditorProps) -> Html {
             working.clone(),
             base.clone(),
         );
-        let (project_id, path, on_saved) =
-            (props.project_id, props.path.clone(), props.on_saved.clone());
+        let (project_id, on_saved) = (props.project_id, props.on_saved.clone());
         Callback::from(move |_: MouseEvent| {
             let edits = (*pending).clone();
             if edits.is_empty() {
                 return;
             }
-            let patched = match unlinked_import::patch::apply_edits(&path, &base.bytes, &edits) {
+            let patched = match unlinked_import::patch::apply_edits(&base.path, &base.bytes, &edits)
+            {
                 Ok(b) => b,
                 Err(e) => {
                     error.set(Some(e.to_string()));
@@ -178,9 +183,8 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 message.trim().to_string()
             };
             busy.set(true);
-            let (mounted, path, busy, error, stale, editing, pending, working, on_saved, message) = (
+            let (mounted, busy, error, stale, editing, pending, working, on_saved, message) = (
                 mounted.clone(),
-                path.clone(),
                 busy.clone(),
                 error.clone(),
                 stale.clone(),
@@ -192,8 +196,14 @@ pub fn model_editor(props: &EditorProps) -> Html {
             );
             let base = (*base).clone();
             spawn_local(async move {
-                let result =
-                    api::upload(project_id, &path, &msg, &patched, Some(base.version_id)).await;
+                let result = api::upload(
+                    project_id,
+                    &base.path,
+                    &msg,
+                    &patched,
+                    Some(base.version_id),
+                )
+                .await;
                 if !*mounted.borrow() {
                     return;
                 }
@@ -208,8 +218,8 @@ pub fn model_editor(props: &EditorProps) -> Html {
                         on_saved.emit(());
                     }
                     Err(e) if e.status == 409 => {
-                        stale.set(true);
-                        error.set(Some(e.message));
+                        stale.set(Some(e.message));
+                        error.set(None);
                     }
                     Err(e) => error.set(Some(e.to_string())),
                 }
@@ -260,7 +270,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                         )));
                         working.set(Rc::new(model));
                         base.set(latest);
-                        stale.set(false);
+                        stale.set(None);
                     }
                     Err(e) => error.set(Some(format!(
                         "Your edits do not apply to v{}: {e}. Discard them, or keep editing and save a copy by downloading.",
@@ -296,7 +306,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 <button onclick={undo} disabled={count == 0 || *busy}>{ "Undo" }</button>
                 <button onclick={discard} disabled={*busy}>{ "Discard" }</button>
                 <input placeholder="Change message" value={(*message).clone()} oninput={set_message} disabled={*busy} />
-                <button class="primary" onclick={save} disabled={count == 0 || *busy || *stale}>
+                <button class="primary" onclick={save} disabled={count == 0 || *busy || stale.is_some()}>
                     { if *busy { "Working…" } else { "Save as new version" } }
                 </button>
             </div>
@@ -311,13 +321,14 @@ pub fn model_editor(props: &EditorProps) -> Html {
     html! {
         <>
             { toolbar }
-            if let Some(e) = &*error {
+            if let Some(reason) = &*stale {
                 <div class="edit-bar error">
-                    { e }
-                    if *stale {
-                        <button onclick={reapply} disabled={*busy}>{ "Reapply my edits on the latest version" }</button>
-                    }
+                    { reason }
+                    <button onclick={reapply} disabled={*busy}>{ "Reapply my edits on the latest version" }</button>
                 </div>
+            }
+            if let Some(e) = &*error {
+                <div class="edit-bar error">{ e }</div>
             }
             <DiagramView {model} fit_key={props.fit_key.clone()}
                 on_edit={(*editing && !*busy).then(|| on_edit.clone())} />

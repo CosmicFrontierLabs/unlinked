@@ -615,9 +615,9 @@ pub struct FileProps {
 }
 
 enum Content {
-    /// The imported model with the file's path, and the exact version it
-    /// was read from (the base edits are saved against).
-    Model(Rc<unlinked_model::Model>, String, Base),
+    /// The imported model and the exact version it was read from (the
+    /// base edits are saved against).
+    Model(Rc<unlinked_model::Model>, Base),
     Text(String),
     Binary,
 }
@@ -669,12 +669,13 @@ pub fn file_page(props: &FileProps) -> Html {
                     Ok(m) => {
                         let model = Rc::new(m);
                         let base = Base {
+                            path: info.path,
                             version_id,
                             version,
                             model: model.clone(),
                             bytes: Rc::new(bytes),
                         };
-                        Content::Model(model, info.path, base)
+                        Content::Model(model, base)
                     }
                     Err(e) => {
                         return Err(ApiError {
@@ -808,7 +809,7 @@ pub fn file_page(props: &FileProps) -> Html {
     let body = view(&content, |c: &Content| match c {
         // Keyed by model identity so a new version remounts the viewer with
         // fresh navigation state instead of keeping a stale subsystem path.
-        Content::Model(m, path, base) => html! {
+        Content::Model(m, base) => html! {
             <>
                 <div class="tabs">
                     { tab_button(Tab::Diagram, "Diagram") }
@@ -817,7 +818,7 @@ pub fn file_page(props: &FileProps) -> Html {
                 if *tab == Tab::Diagram {
                     // Keyed by the loaded model so a different version
                     // remounts with fresh navigation and edit state.
-                    <ModelEditor key={format!("{:p}", Rc::as_ptr(m))} {project_id} {file_id} path={path.clone()}
+                    <ModelEditor key={format!("{:p}", Rc::as_ptr(m))} {project_id} {file_id}
                         base={base.clone()} can_edit={editor}
                         fit_key={AttrValue::from(format!("{:p}", Rc::as_ptr(m)))}
                         on_saved={on_saved.clone()} />
