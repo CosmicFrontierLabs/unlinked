@@ -308,3 +308,111 @@ code {
     color: var(--teal);
     white-space: nowrap;
 }
+
+.page.narrow {
+    max-width: 480px;
+}
+
+.page.wide {
+    max-width: 1200px;
+}
+
+.login-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-top: 1.5rem;
+}
+
+.avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+}
+
+.inline-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 1rem 0;
+}
+
+ul.plain {
+    list-style: none;
+    padding: 0;
+    margin: 0.5rem 0 0;
+}
+
+h2 {
+    margin-top: 2rem;
+    color: var(--purple);
+}
+
+table.audit code {
+    color: var(--muted);
+}
+
+.file-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.file-bar .spacer {
+    flex: 1;
+}
+
+.file-bar .error {
+    margin: 0;
+}
+
+.file-body {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+}
+
+.file-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: auto;
+}
+
+.history {
+    width: 260px;
+    overflow: auto;
+    padding: 0.75rem 1rem;
+    border-left: 1px solid var(--border);
+    background: var(--bg-alt);
+}
+
+.history h4 {
+    margin: 0 0 0.5rem;
+    color: var(--purple);
+}
+
+ul.versions {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+ul.versions li {
+    padding: 0.35rem 0.4rem;
+    border-radius: 4px;
+}
+
+ul.versions li.active {
+    background: var(--panel);
+}
+
+pre.source {
+    margin: 0;
+    padding: 1rem;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    white-space: pre;
+}
