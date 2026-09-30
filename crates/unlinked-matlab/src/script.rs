@@ -27,6 +27,7 @@ pub fn eval_script_with_budget(
     workspace: &Environment,
     budget: &mut ArrayBudget,
 ) -> Result<Environment, Error> {
+    budget.operations(1).map_err(|e| error(1, e))?;
     let resident = validate_workspace(workspace).map_err(|e| error(1, e))?;
     budget.value(resident).map_err(|e| error(1, e))?;
     let tokens = lex(source)?;
@@ -81,6 +82,9 @@ fn validate_name(name: &str) -> Result<(), String> {
 }
 fn validate_value(value: &Value) -> Result<(), String> {
     value.validate()?;
+    if value.rows > MAX_VALUE_ELEMENTS || value.cols > MAX_VALUE_ELEMENTS {
+        return Err("initialization variable dimensions exceed 1024".into());
+    }
     if value.data.len() > MAX_VALUE_ELEMENTS {
         return Err("initialization variable exceeds 1024 elements".into());
     }
@@ -215,7 +219,7 @@ impl Interpreter<'_> {
                         return Err("one or two array indices required".into());
                     }
                     let mut value = self.env.get(name).cloned().unwrap_or_else(Value::empty);
-                    self.budget.value(value.data.len())?;
+                    self.budget.shaped_value(&value)?;
                     let mut indices = Vec::new();
                     for (dimension, arg) in args.iter().enumerate() {
                         indices.push(if matches!(arg, Expr::All) {
@@ -230,7 +234,7 @@ impl Interpreter<'_> {
                         });
                     }
                     value.assign(&indices, &rhs)?;
-                    self.budget.value(value.data.len())?;
+                    self.budget.shaped_value(&value)?;
                     self.store(name, value)?;
                 }
                 Stmt::If(branches, other) => {
@@ -253,7 +257,7 @@ impl Interpreter<'_> {
                     } else {
                         for column in values.columns() {
                             self.tick()?;
-                            self.budget.value(column.data.len())?;
+                            self.budget.shaped_value(&column)?;
                             self.store(name, column)?;
                             if self.body(body)? == Flow::Break {
                                 break;
