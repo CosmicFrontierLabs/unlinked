@@ -98,5 +98,13 @@ jobs:
       - name: Build frontend (required for backend embed)
         run: cd frontend && trunk build
 
+      - name: Check out test corpus
+        uses: actions/checkout@v7
+        with:
+          repository: meawoppl/unlinked-test-cases
+          path: unlinked-test-cases
+
       - name: Run tests
         run: cargo test --workspace --locked
+        env:
+          UNLINKED_TEST_CASES: ${{ github.workspace }}/unlinked-test-cases
