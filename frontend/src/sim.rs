@@ -39,6 +39,10 @@ pub struct SimProps {
     /// Version number to simulate (pinned by the server).
     pub version: i32,
     pub config: SimConfig,
+    /// Original root Inport IDs and display names.
+    pub inputs: Vec<(String, String)>,
+    #[prop_or_default]
+    pub has_random_sources: bool,
     /// Names of the model's root Outport blocks, plotted by default.
     pub outports: Vec<String>,
 }
@@ -332,6 +336,7 @@ async fn stream(
 pub fn simulation_panel(props: &SimProps) -> Html {
     let options = use_state(|| defaults(&props.config));
     let workspace = use_state(String::new);
+    let inputs = use_state(BTreeMap::<String, String>::new);
     let state = use_state(|| RunState::Idle);
     let ctl = use_mut_ref(Controller::default);
     // Bumped whenever the plot must be rebuilt (new data set or selection).
@@ -398,6 +403,8 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         );
         let (file_id, version) = (props.file_id, props.version);
         let outports = props.outports.clone();
+        let input_ports = props.inputs.clone();
+        let inputs = inputs.clone();
         let init_script = init_script.clone();
         Callback::from(move |_: MouseEvent| {
             let init_script = *init_script;
@@ -408,9 +415,19 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     return;
                 }
             };
+            if let Some((_, name)) = input_ports
+                .iter()
+                .find(|(id, _)| inputs.get(id).is_none_or(|v| v.trim().is_empty()))
+            {
+                state.set(RunState::Error(format!(
+                    "Enter an explicit constant value for root input {name}."
+                )));
+                return;
+            }
             let request = SimulationRequest {
                 options: (*options).clone(),
                 workspace: ws_vars,
+                inputs: (*inputs).clone(),
                 version: Some(version),
                 init_script: init_script.map(|(file_id, version)| SimulationInitScript {
                     file_id,
@@ -637,10 +654,13 @@ pub fn simulation_panel(props: &SimProps) -> Html {
 
     html! {
         <div class="sim-panel">
+            if props.has_random_sources {
+                <p class="sim-notice">{ "Random sources are reproducible in Unlinked, but use a different random sequence from Simulink." }</p>
+            }
             <div class="sim-form">
                 <label>{ "Start" }<input type="number" step="any" value={o.start.to_string()} oninput={set_num(|o, v| o.start = v)} /></label>
                 <label>{ "Stop" }<input type="number" step="any" value={o.stop.to_string()} oninput={set_num(|o, v| o.stop = v)} /></label>
-                <label>{ "Output step" }<input type="number" step="any" value={o.step.to_string()} oninput={set_num(|o, v| o.step = v)} /></label>
+                <label title="For discrete blocks, this step must divide each sample period by an integer. Choose a shorter stop time if the server sample limit is exceeded.">{ "Output step" }<input type="number" step="any" value={o.step.to_string()} oninput={set_num(|o, v| o.step = v)} /></label>
                 <label>{ "Solver" }
                     <select onchange={set_solver}>
                         { for [Solver::Rk45, Solver::Rk4, Solver::Euler].into_iter().map(|s| html! {
@@ -658,6 +678,22 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 <label class="grow">{ "Workspace overrides (NAME = EXPR per line)" }
                     <textarea rows="2" value={(*workspace).clone()} oninput={set_workspace} placeholder="K = 2\nw = 2*pi*5" />
                 </label>
+                if !props.inputs.is_empty() {
+                    <fieldset class="sim-inputs">
+                        <legend>{ "Root inputs (constant throughout the run)" }</legend>
+                        <p>{ "Enter a numeric expression for each input. Workspace variables are available; values are never filled automatically." }</p>
+                        { for props.inputs.iter().map(|(id, name)| {
+                            let (inputs, id) = (inputs.clone(), id.clone());
+                            let value = inputs.get(&id).cloned().unwrap_or_default();
+                            let oninput = Callback::from(move |e: InputEvent| {
+                                let mut values = (*inputs).clone();
+                                values.insert(id.clone(), e.target_unchecked_into::<HtmlInputElement>().value());
+                                inputs.set(values);
+                            });
+                            html! { <label>{ name }<input type="text" {value} {oninput} placeholder="Required constant expression" disabled={running} /></label> }
+                        }) }
+                    </fieldset>
+                }
                 <div class="sim-actions">
                     if running {
                         <button onclick={cancel}>{ "Cancel" }</button>

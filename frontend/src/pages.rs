@@ -799,6 +799,8 @@ pub fn file_page(props: &FileProps) -> Html {
                         on_saved={on_saved.clone()} />
                 } else if let Some(version) = shown_version {
                     <SimulationPanel key={version} {project_id} {file_id} {version} config={m.config.clone()}
+                        has_random_sources={m.walk().iter().any(|(_, sys)| sys.blocks.iter().any(|b| matches!(b.block_type.as_str(), "RandomNumber" | "UniformRandomNumber")))}
+                        inputs={m.root.blocks.iter().filter(|b| b.block_type == "Inport").map(|b| (b.id.0.clone(), b.name.clone())).collect::<Vec<_>>()}
                         outports={m.root.blocks.iter().filter(|b| b.block_type == "Outport").map(|b| b.name.clone()).collect::<Vec<_>>()} />
                 }
             </>

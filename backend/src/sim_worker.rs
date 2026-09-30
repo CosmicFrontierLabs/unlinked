@@ -101,11 +101,11 @@ pub fn start(
     reservation: Reservation,
     filename: String,
     bytes: Vec<u8>,
-    mut options: Options,
-    workspace: std::collections::BTreeMap<String, String>,
+    request: shared::SimulationRequest,
     init_script: Option<String>,
     complete: impl FnOnce(&Result<Trace, Failure>, &Options) -> Result<(), String> + Send + 'static,
 ) -> Result<Worker, String> {
+    let mut options = request.options;
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("model exceeds 16 MiB upload limit".into());
     }
@@ -167,8 +167,31 @@ pub fn start(
                         model.workspace.insert(name, literal);
                     }
                 }
-                model.workspace.extend(workspace);
-                let graph = unlinked_sim::compile(&model, &options).map_err(|e| e.to_string())?;
+                model.workspace.extend(request.workspace);
+                let expressions = request
+                    .inputs
+                    .iter()
+                    .map(|(id, expression)| (id.as_str().into(), expression.clone()))
+                    .collect();
+                let inputs = unlinked_sim::evaluate_inputs_with_budget(
+                    &model,
+                    &expressions,
+                    &mut evaluation_budget,
+                )
+                .map_err(|e| {
+                    if cancelled.load(Ordering::Relaxed) {
+                        Failure {
+                            message: "simulation cancelled".into(),
+                            cancelled: true,
+                        }
+                    } else if began.elapsed() > std::time::Duration::from_secs(30) {
+                        Failure::from("simulation deadline exceeded")
+                    } else {
+                        Failure::from(e.to_string())
+                    }
+                })?;
+                let graph = unlinked_sim::compile_with_inputs(&model, &options, &inputs)
+                    .map_err(|e| e.to_string())?;
                 options.max_internal_steps = options
                     .max_internal_steps
                     .min(10_000)
@@ -292,6 +315,62 @@ fn parameter_literal(value: &unlinked_matlab::array_runtime::Value) -> Result<St
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn root_inputs_are_explicit_and_evaluated_after_workspace_overrides() {
+        use std::collections::BTreeMap;
+        let source = std::str::from_utf8(include_bytes!(
+            "../../crates/unlinked-cli/tests/fixtures/scalar.mdl"
+        ))
+        .unwrap()
+        .replace("BlockType Constant", "BlockType Inport");
+        for (inputs, expected) in [
+            (BTreeMap::new(), None),
+            (BTreeMap::from([("2".into(), "1".into())]), None),
+            (BTreeMap::from([("1".into(), "K/2".into())]), Some(9.0)),
+        ] {
+            let mut worker = start(
+                reserve(uuid::Uuid::new_v4()).unwrap(),
+                "input.mdl".into(),
+                source.as_bytes().to_vec(),
+                shared::SimulationRequest {
+                    options: Options {
+                        stop: 0.1,
+                        step: 0.1,
+                        ..Default::default()
+                    },
+                    workspace: BTreeMap::from([("K".into(), "6".into())]),
+                    inputs,
+                    version: None,
+                    init_script: None,
+                },
+                Some("K=4;".into()),
+                move |result, _| {
+                    if let Some(expected) = expected {
+                        assert_eq!(result.as_ref().unwrap().signals["2"], vec![expected; 2]);
+                    } else {
+                        assert!(result.is_err());
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let mut terminal = false;
+            while let Some(event) = worker.events.recv().await {
+                match event {
+                    Event::Completed => {
+                        assert!(expected.is_some());
+                        terminal = true;
+                    }
+                    Event::Failed(_) => {
+                        assert!(expected.is_none());
+                        terminal = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(terminal);
+        }
+    }
+    #[tokio::test]
     async fn streams_named_bounded_samples_and_persists_before_completion() {
         let completed = Arc::new(AtomicBool::new(false));
         let flag = completed.clone();
@@ -299,12 +378,17 @@ mod tests {
             reserve(uuid::Uuid::new_v4()).unwrap(),
             "scalar.mdl".into(),
             include_bytes!("../../crates/unlinked-cli/tests/fixtures/scalar.mdl").to_vec(),
-            Options {
-                stop: 0.2,
-                step: 0.1,
-                ..Default::default()
+            shared::SimulationRequest {
+                options: Options {
+                    stop: 0.2,
+                    step: 0.1,
+                    ..Default::default()
+                },
+                workspace: Default::default(),
+                inputs: Default::default(),
+                version: None,
+                init_script: None,
             },
-            Default::default(),
             None,
             move |result, _options| {
                 assert!(result.is_ok());
@@ -346,12 +430,17 @@ mod cancellation_tests {
             reserve(uuid::Uuid::new_v4()).unwrap(),
             "scalar.mdl".into(),
             include_bytes!("../../crates/unlinked-cli/tests/fixtures/scalar.mdl").to_vec(),
-            Options {
-                stop: 2.0,
-                step: 0.0001,
-                ..Default::default()
+            shared::SimulationRequest {
+                options: Options {
+                    stop: 2.0,
+                    step: 0.0001,
+                    ..Default::default()
+                },
+                workspace: Default::default(),
+                inputs: Default::default(),
+                version: None,
+                init_script: None,
             },
-            Default::default(),
             Some("while true; x=1; end".into()),
             move |result, _options| {
                 assert!(result.as_ref().unwrap_err().cancelled);

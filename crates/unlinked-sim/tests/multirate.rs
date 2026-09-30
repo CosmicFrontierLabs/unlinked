@@ -297,3 +297,113 @@ fn nearly_aligned_stop_cannot_add_an_extra_discrete_update() {
     };
     assert_eq!(simulate_model(&m, &rounding).unwrap().time.len(), 10);
 }
+
+#[test]
+fn zero_order_hold_samples_now_and_holds_through_continuous_stages() {
+    let m = model(
+        vec![
+            block("clock", "Clock", &[]),
+            block("hold", "ZeroOrderHold", &[("SampleTime", "0.3")]),
+            block("integral", "Integrator", &[("InitialCondition", "0")]),
+        ],
+        vec![line("clock", 1, "hold", 1), line("hold", 1, "integral", 1)],
+    );
+    for solver in [Solver::Euler, Solver::Rk4, Solver::Rk45] {
+        let t = simulate_model(
+            &m,
+            &Options {
+                solver,
+                ..options()
+            },
+        )
+        .unwrap();
+        close(
+            &t.signals["hold"],
+            &[0., 0., 0., 0.3, 0.3, 0.3, 0.6, 0.6, 0.6, 0.9],
+        );
+        close(
+            &t.signals["integral"],
+            &[0., 0., 0., 0., 0.03, 0.06, 0.09, 0.15, 0.21, 0.27],
+        );
+    }
+}
+
+#[test]
+fn zero_order_hold_preserves_vector_values_and_rejects_algebraic_feedback() {
+    let m = model(
+        vec![
+            block("source", "Constant", &[("Value", "[2 -3]")]),
+            block("hold", "ZeroOrderHold", &[("SampleTime", "0.2")]),
+        ],
+        vec![line("source", 1, "hold", 1)],
+    );
+    let t = simulate_model(&m, &options()).unwrap();
+    close(&t.signals["hold[1]"], &[2.; 10]);
+    close(&t.signals["hold[2]"], &[-3.; 10]);
+    for (value, rank) in [("[1 2;3 4]", "on"), ("[1 2]", "off")] {
+        let mut matrix = m.clone();
+        matrix.root.blocks[0]
+            .parameters
+            .insert("Value".into(), value.into());
+        matrix.root.blocks[0]
+            .parameters
+            .insert("VectorParams1D".into(), rank.into());
+        assert!(compile(&matrix, &options())
+            .unwrap_err()
+            .to_string()
+            .contains("one-dimensional vector"));
+    }
+    let feedback = model(
+        vec![block("hold", "ZeroOrderHold", &[("SampleTime", "0.2")])],
+        vec![line("hold", 1, "hold", 1)],
+    );
+    assert!(compile(&feedback, &options())
+        .unwrap_err()
+        .to_string()
+        .contains("unresolved signal shape"));
+}
+
+#[test]
+fn random_array_parameters_broadcast_without_changing_equal_seed_streams() {
+    let m = model(
+        vec![
+            block(
+                "random",
+                "RandomNumber",
+                &[
+                    ("Mean", "[1 2]"),
+                    ("Variance", "[0 4]"),
+                    ("Seed", "7"),
+                    ("SampleTime", "0.2"),
+                ],
+            ),
+            block(
+                "reference",
+                "RandomNumber",
+                &[
+                    ("Mean", "0"),
+                    ("Variance", "1"),
+                    ("Seed", "7"),
+                    ("SampleTime", "0.2"),
+                ],
+            ),
+        ],
+        vec![],
+    );
+    let t = simulate_model(&m, &options()).unwrap();
+    close(&t.signals["random[1]"], &[1.; 10]);
+    let expected: Vec<_> = t.signals["reference"].iter().map(|x| 2. + 2. * x).collect();
+    close(&t.signals["random[2]"], &expected);
+    let mismatch = model(
+        vec![block(
+            "random",
+            "RandomNumber",
+            &[("Mean", "[1 2]"), ("Variance", "[1 2 3]")],
+        )],
+        vec![],
+    );
+    assert!(compile(&mismatch, &options())
+        .unwrap_err()
+        .to_string()
+        .contains("incompatible signal shapes"));
+}

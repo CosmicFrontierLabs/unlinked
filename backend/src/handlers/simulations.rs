@@ -161,6 +161,15 @@ fn validate(request: &SimulationRequest) -> ApiResult<()> {
             "workspace requires <=256 named scalar expressions, each <=4096 bytes".into(),
         ));
     }
+    if request.inputs.len() > 256
+        || request.inputs.iter().any(|(id, expr)| {
+            id.is_empty() || id.len() > 1024 || expr.trim().is_empty() || expr.len() > 4096
+        })
+    {
+        return Err(ApiError::BadRequest(
+            "inputs require <=256 root block IDs (<=1024 bytes) and nonempty constant expressions (<=4096 bytes)".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -180,8 +189,7 @@ pub async fn begin(
     let reservation = sim_worker::reserve(user.id).map_err(ApiError::Conflict)?;
     request.options.max_internal_steps = request.options.max_internal_steps.min(10_000);
     request.options.max_samples = request.options.max_samples.min(25_001);
-    let opts = request.options.clone();
-    let workspace = request.workspace.clone();
+    let worker_request = request.clone();
     let actor = user.id;
     let (record,path,bytes,init_script)=state.db(move |conn| {
   conn.transaction::<_,ApiError,_>(|conn| {
@@ -225,8 +233,7 @@ pub async fn begin(
         reservation,
         path,
         bytes,
-        opts,
-        workspace,
+        worker_request,
         init_script,
         move |result, effective_options| {
             let mut conn = pool.get().map_err(|e| e.to_string())?;
@@ -381,6 +388,7 @@ mod tests {
                 ..Default::default()
             },
             workspace: Default::default(),
+            inputs: Default::default(),
             version: None,
             init_script: None,
         };
@@ -408,6 +416,33 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(outside.get(&route).await.status, StatusCode::NOT_FOUND);
+        let input_source = String::from_utf8(source.clone())
+            .unwrap()
+            .replace("BlockType Constant", "BlockType Inport");
+        let input_file: shared::FileInfo = own
+            .upload(project.id, "external-input.mdl", input_source.into_bytes())
+            .await
+            .json();
+        let input_route = format!("/api/files/{}/simulations", input_file.id);
+        let mut input_request = request.clone();
+        input_request.workspace.insert("command".into(), "4".into());
+        input_request.inputs.insert("1".into(), "command/2".into());
+        let bound: SimulationResult = view
+            .json(Method::POST, &input_route, &input_request)
+            .await
+            .json();
+        assert_eq!(bound.run.status, SimulationStatus::Completed);
+        assert_eq!(bound.trace.as_ref().unwrap().signals["2"], vec![6.0; 3]);
+        let persisted: SimulationResult = view
+            .get(&format!("/api/simulations/{}", bound.run.id))
+            .await
+            .json();
+        assert_eq!(persisted.run.request.inputs["1"], "command/2");
+        assert_eq!(persisted.run.request.version, Some(1));
+        let unbound: SimulationResult =
+            view.json(Method::POST, &input_route, &request).await.json();
+        assert_eq!(unbound.run.status, SimulationStatus::Failed);
+        assert!(unbound.trace.is_none());
         let changed = String::from_utf8(source)
             .unwrap()
             .replace("Gain \"3\"", "Gain \"4\"")
@@ -573,6 +608,7 @@ mod tests {
         let mut request = SimulationRequest {
             options: Default::default(),
             workspace: Default::default(),
+            inputs: Default::default(),
             version: None,
             init_script: None,
         };
@@ -580,6 +616,15 @@ mod tests {
         assert!(validate(&request).is_err());
         request.options.step = 0.1;
         request.workspace.insert("bad name".into(), "1".into());
+        assert!(validate(&request).is_err());
+        request.workspace.clear();
+        request.inputs.insert("9".into(), "2*pi".into());
+        assert!(validate(&request).is_ok());
+        request.inputs.insert("9".into(), " ".into());
+        assert!(validate(&request).is_err());
+        request.inputs.insert("9".into(), "1".repeat(4097));
+        assert!(validate(&request).is_err());
+        request.inputs = (0..257).map(|i| (i.to_string(), "1".into())).collect();
         assert!(validate(&request).is_err());
     }
 }

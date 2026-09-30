@@ -38,20 +38,27 @@ pub fn evaluate_inputs(
     model: &Model,
     expressions: &BTreeMap<BlockId, String>,
 ) -> Result<InputValues, Error> {
+    evaluate_inputs_with_budget(model, expressions, &mut ArrayBudget::default())
+}
+
+/// Evaluate external input expressions with a caller-owned work/cancellation budget.
+pub fn evaluate_inputs_with_budget(
+    model: &Model,
+    expressions: &BTreeMap<BlockId, String>,
+    budget: &mut ArrayBudget,
+) -> Result<InputValues, Error> {
     if expressions.len() > 1024 {
         return Err(Error::Options(
             "external input count budget exceeded".into(),
         ));
     }
-    let mut budget = ArrayBudget::default();
-    let workspace = super::vector::workspace(model, &mut budget)?;
+    let workspace = super::vector::workspace(model, budget)?;
     let mut result = BTreeMap::new();
     let mut elements = 0usize;
     for (id, expression) in expressions {
         root_input(model, id)?;
-        let value =
-            unlinked_matlab::eval_array_expr_with_budget(expression, &workspace, &mut budget)
-                .map_err(|e| block_error(&id.0, e.to_string()))?;
+        let value = unlinked_matlab::eval_array_expr_with_budget(expression, &workspace, budget)
+            .map_err(|e| block_error(&id.0, e.to_string()))?;
         validate(id, &value)?;
         elements += value.data.len();
         if elements > 100_000 {

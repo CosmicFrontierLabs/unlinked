@@ -146,3 +146,35 @@ with initialization, plus the 30-second cooperative deadline and 25,001-sample
 cap. Budget exhaustion is an explicit error, never a partial successful trace.
 Blocks marked `Commented=on` or `Commented=through` are rejected until their
 removal/bypass semantics are implemented, including nested and routing blocks.
+
+### Zero-order hold
+
+`ZeroOrderHold` samples its input at the initial hit and each subsequent period,
+then holds the value through observation samples and all continuous solver
+stages. Unlike UnitDelay, it has no one-period delay. Scalar and one-dimensional
+vector signals retain their dimensions; matrix signals reject. `SampleTime` must
+be explicitly specified (or resolved from imported block defaults). Missing or
+inherited (`-1`) sample times reject until rate inference is supported. Periods
+must be positive integer multiples of the observation step; offsets and continuous
+sample times reject. Sampling is direct-feedthrough at hits, so an algebraic
+feedback loop still rejects. See the [block reference](https://www.mathworks.com/help/simulink/slref/zeroorderhold.html).
+
+### Random sources
+
+`RandomNumber` and `UniformRandomNumber` produce seeded samples at time zero (or
+an aligned simulation start), then hold each value until the next sample hit.
+Their period must be a positive integer multiple of the simulation step; absent
+`SampleTime` defaults to 0.1 seconds. Inherited/continuous random sample times
+are rejected. Gaussian `Mean`/`Variance` default to 0/1, uniform
+`Minimum`/`Maximum` to -1/1, and `Seed` to 0. Seeds must be integers in
+0..=4294967295, variance finite and nonnegative, and uniform bounds finite with
+minimum strictly less than maximum. Parameter arrays use scalar expansion and
+a separate stream per element. Equal seeds produce equal standardized streams.
+
+Every run resets each stream; independent blocks do not consume one another's
+random state, and RK solver stages never advance it. Unlinked uses SplitMix64
+with Box–Muller for Gaussian values. **Exact sample-sequence parity with Simulink
+is unverified and is not promised**: MathWorks documents its legacy MATLAB v4
+generator. Distribution and hold semantics are tested; this is not a
+cryptographic generator. References: [Random Number](https://uk.mathworks.com/help/simulink/slref/randomnumber.html)
+and [Uniform Random Number](https://www.mathworks.com/help/simulink/slref/uniformrandomnumber.html).
