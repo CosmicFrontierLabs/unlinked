@@ -43,6 +43,14 @@ enum Action {
         solver: SolverArg,
         #[arg(long, default_value_t = 100_001)]
         max_samples: usize,
+        /// Relative local-error target for adaptive RK45.
+        #[arg(long, default_value_t = 1e-6)]
+        rtol: f64,
+        /// Absolute local-error target for adaptive RK45.
+        #[arg(long, default_value_t = 1e-9)]
+        atol: f64,
+        #[arg(long, default_value_t = 100_000)]
+        max_internal_steps: usize,
         /// Add a scalar workspace expression (repeatable); never execute a MATLAB script.
         #[arg(long = "var", value_name = "NAME=EXPR")]
         variables: Vec<String>,
@@ -69,6 +77,7 @@ enum Action {
 enum SolverArg {
     Euler,
     Rk4,
+    Rk45,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum TraceFormat {
@@ -85,6 +94,7 @@ impl From<SolverArg> for Solver {
         match value {
             SolverArg::Euler => Self::Euler,
             SolverArg::Rk4 => Self::Rk4,
+            SolverArg::Rk45 => Self::Rk45,
         }
     }
 }
@@ -255,6 +265,9 @@ fn run(args: Args) -> Result<()> {
             step,
             solver,
             max_samples,
+            rtol,
+            atol,
+            max_internal_steps,
             variables,
             format,
             output,
@@ -267,6 +280,9 @@ fn run(args: Args) -> Result<()> {
                 step,
                 solver: solver.into(),
                 max_samples,
+                relative_tolerance: rtol,
+                absolute_tolerance: atol,
+                max_internal_steps,
             };
             eprintln!(
                 "Simulating {}: {:?}, start={start}, stop={stop}, step={step}; these explicit settings override imported solver settings",
