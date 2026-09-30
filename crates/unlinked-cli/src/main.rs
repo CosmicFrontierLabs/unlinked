@@ -17,7 +17,7 @@ const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 #[command(
     name = "unlinked",
     version,
-    about = "Inspect, render and simulate Simulink files; transpile scalar MATLAB to Rust/LLVM"
+    about = "Inspect, render and simulate Simulink files; transpile MATLAB to Rust/LLVM"
 )]
 struct Args {
     #[command(subcommand)]
@@ -47,7 +47,7 @@ enum Action {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Run the supported scalar simulation subset with explicitly selected settings.
+    /// Run the supported simulation subset with explicitly selected settings.
     Sim {
         input: PathBuf,
         #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
@@ -68,7 +68,7 @@ enum Action {
         atol: f64,
         #[arg(long, default_value_t = 100_000)]
         max_internal_steps: usize,
-        /// Add a scalar workspace expression (repeatable); never execute a MATLAB script.
+        /// Add a workspace expression (repeatable); never execute a MATLAB script.
         #[arg(long = "var", value_name = "NAME=EXPR")]
         variables: Vec<String>,
         /// JSON or CSV; defaults to CSV for .csv output paths, otherwise JSON.
@@ -77,7 +77,7 @@ enum Action {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Translate a scalar MATLAB/Octave script or function file. Never execute it.
+    /// Translate a supported MATLAB/Octave script or function file. Never execute it.
     Transpile {
         input: PathBuf,
         #[arg(short, long)]

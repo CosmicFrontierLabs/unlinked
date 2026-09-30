@@ -119,6 +119,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: meawoppl/unlinked-test-cases
+          ref: 7684ab11500cda4d0f1192287360d1d767dafe4c
           path: unlinked-test-cases
 
       - name: Install Octave for compiler differential tests
