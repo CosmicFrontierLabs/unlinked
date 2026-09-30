@@ -58,9 +58,7 @@ fn lex(source: &str) -> Result<Vec<Spanned>, Error> {
             continue;
         }
         if c == '%' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
+            crate::comments::skip(&chars, &mut i, &mut line)?;
             continue;
         }
         if chars.get(i..i + 3) == Some(&['.', '.', '.']) {

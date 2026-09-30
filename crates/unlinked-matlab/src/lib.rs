@@ -2,6 +2,7 @@
 //! Parsing and transpilation do not execute source code or launch a compiler.
 pub mod array_runtime;
 mod arrays;
+mod comments;
 pub use arrays::{
     ArrayBudget, FunctionProgram, FunctionSignature, eval_array_expr, eval_array_expr_with_budget,
     eval_function, eval_script, eval_script_with_budget, transpile_arrays,
@@ -66,9 +67,7 @@ fn lex(source: &str) -> Result<Vec<Spanned>, Error> {
             i += 1;
             continue;
         } else if c == '%' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
+            comments::skip(&chars, &mut i, &mut line)?;
             continue;
         } else if c.is_ascii_alphabetic() || c == '_' {
             let start = i;

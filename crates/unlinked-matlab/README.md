@@ -7,6 +7,11 @@ also evaluate pure expressions and restricted initialization scripts in process.
 The library never launches a compiler, loads files, or provides operating-system
 builtins. It is suitable for use from a WASM application or a server.
 
+Both frontends support `%` line comments and nested `%{` / `%}` block comments
+(up to 64 levels). Block delimiters must occupy standalone lines; malformed,
+unmatched and unclosed delimiters produce diagnostics. Commented code is never
+parsed or executed, and diagnostic line numbers retain the original source lines.
+
 ```rust
 use std::collections::BTreeMap;
 use unlinked_matlab::{eval_expr, transpile};
