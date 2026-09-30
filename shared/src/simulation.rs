@@ -89,6 +89,21 @@ mod tests {
         assert!(matches!(decoded, SimulationClientMsg::Simulate { .. }));
     }
     #[test]
+    fn init_script_reference_roundtrip_and_legacy_default() {
+        let file_id = Uuid::new_v4();
+        let script = SimulationInitScript {
+            file_id,
+            version: Some(7),
+        };
+        let encoded = serde_json::to_string(&script).unwrap();
+        let decoded: SimulationInitScript = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.file_id, file_id);
+        assert_eq!(decoded.version, Some(7));
+        let legacy: SimulationRequest =
+            serde_json::from_str(r#"{"options":{},"workspace":{},"version":1}"#).unwrap();
+        assert!(legacy.init_script.is_none());
+    }
+    #[test]
     fn request_and_trace_roundtrip() {
         let request = SimulationRequest {
             options: SimulationOptions::default(),
