@@ -743,8 +743,10 @@ mod tests {
 
     #[test]
     fn annotation_tspans_count_toward_budget() {
-        let mut annotation = Annotation::default();
-        annotation.text = "x\n".repeat(MAX_ELEMENTS + 1);
+        let annotation = Annotation {
+            text: "x\n".repeat(MAX_ELEMENTS + 1),
+            ..Default::default()
+        };
         let sys = System {
             annotations: vec![annotation],
             ..Default::default()
