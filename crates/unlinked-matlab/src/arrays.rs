@@ -1117,7 +1117,16 @@ pub fn eval_array_expr_with_budget(
     workspace: &BTreeMap<String, crate::array_runtime::Value>,
     budget: &mut ArrayBudget,
 ) -> Result<crate::array_runtime::Value, Error> {
+    budget.operations(1).map_err(|e| error(1, e))?;
     for value in workspace.values() {
+        budget
+            .operations(
+                value
+                    .rows
+                    .saturating_add(value.cols)
+                    .saturating_add(value.data.len()),
+            )
+            .map_err(|e| error(1, e))?;
         value.validate().map_err(|e| error(1, e))?;
     }
     let mut parser = Parser {
@@ -1141,20 +1150,30 @@ pub fn eval_array_expr_with_budget(
 pub struct ArrayBudget {
     values: usize,
     operations: usize,
+    cancellation: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 impl Default for ArrayBudget {
     fn default() -> Self {
         Self {
             values: 8_000_000,
             operations: 20_000_000,
+            cancellation: None,
         }
     }
 }
 impl ArrayBudget {
+    /// Install a cooperative interruption/deadline check. `true` interrupts.
+    /// Checked at evaluation entry and every expression/statement/work charge.
+    pub fn with_cancellation(mut self, check: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.cancellation = Some(std::sync::Arc::new(check));
+        self
+    }
+
     pub fn with_limits(intermediate_elements: usize, operations: usize) -> Self {
         Self {
             values: intermediate_elements,
             operations,
+            cancellation: None,
         }
     }
     pub fn remaining_elements(&self) -> usize {
@@ -1164,11 +1183,19 @@ impl ArrayBudget {
         self.operations
     }
     fn operations(&mut self, count: usize) -> Result<(), String> {
+        if self.cancellation.as_ref().is_some_and(|check| check()) {
+            return Err("execution interrupted".into());
+        }
+
         self.operations = self
             .operations
             .checked_sub(count)
             .ok_or("array expression exceeds aggregate operation budget")?;
         Ok(())
+    }
+    fn shaped_value(&mut self, value: &crate::array_runtime::Value) -> Result<(), String> {
+        self.operations(value.rows.saturating_add(value.cols))?;
+        self.value(value.data.len())
     }
     fn value(&mut self, count: usize) -> Result<(), String> {
         self.values = self
@@ -1186,6 +1213,7 @@ fn eval(
     budget: &mut ArrayBudget,
 ) -> crate::array_runtime::ArrayResult<crate::array_runtime::Value> {
     use crate::array_runtime::{self as rt, Index, Value};
+    budget.operations(1)?;
     let value = match expr {
         Expr::Number(n) => Value::scalar(*n),
         Expr::Text(s) => Value::string(s)?,
@@ -1254,6 +1282,12 @@ fn eval(
         )?,
         Expr::Apply(name, args) if workspace.contains_key(name) => {
             let value = &workspace[name];
+            budget.operations(
+                value
+                    .rows
+                    .saturating_add(value.cols)
+                    .saturating_add(value.data.len()),
+            )?;
             if args.is_empty() || args.len() > 2 {
                 return Err("one or two array indices required".into());
             }
@@ -1291,6 +1325,6 @@ fn eval(
                 .ok_or("builtin returned no value")?
         }
     };
-    budget.value(value.data.len())?;
+    budget.shaped_value(&value)?;
     Ok(value)
 }

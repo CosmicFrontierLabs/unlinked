@@ -222,3 +222,12 @@ callers remain responsible for request concurrency and aggregate server load.
 Tests check initialization against eight fixed Octave scripts, empty and nested
 loops, indexed growth, forbidden capabilities in dead branches, atomic errors,
 workspace limits, runaway loops and budgets shared with later parameter evaluation.
+
+Initialization values also cap each dimension at 1,024, including empty arrays.
+Shared `ArrayBudget` work charges include dimensions as well as elements, so
+zero-element matrices cannot bypass operation limits. Install
+`ArrayBudget::with_cancellation(|| interrupted_or_deadline_reached)` for server
+execution: returning `true` produces `execution interrupted`. The check runs at
+entry and each expression/statement/work charge; individual bounded runtime
+operations finish before the next cooperative check. The library itself does
+not read clocks or start threads.
