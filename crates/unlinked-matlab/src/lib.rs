@@ -3,8 +3,8 @@
 pub mod array_runtime;
 mod arrays;
 pub use arrays::{
-    ArrayBudget, eval_array_expr, eval_array_expr_with_budget, eval_script,
-    eval_script_with_budget, transpile_arrays,
+    ArrayBudget, FunctionProgram, FunctionSignature, eval_array_expr, eval_array_expr_with_budget,
+    eval_function, eval_script, eval_script_with_budget, transpile_arrays,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

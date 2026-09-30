@@ -283,6 +283,39 @@ fn optional_corpus_functions_match_octave() {
         ),
         ("fibonacci", "fibo(10)", "f_fibo(vec![Value::scalar(10.)])"),
     ];
+    // Pure evaluation rejects diagnostics even in dead branches. Five corpus
+    // files contain standalone disp statements. Assert that rejection,
+    // then compare a TEST-ONLY numeric projection to the original Octave result.
+    // Production parsing never removes statements or silently accepts I/O.
+    let mut pure_source = String::new();
+    for definition in &definitions {
+        let has_diagnostic = definition.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("disp(")
+        });
+        if has_diagnostic {
+            assert!(unlinked_matlab::FunctionProgram::parse(definition).is_err());
+        } else {
+            unlinked_matlab::FunctionProgram::parse(definition).unwrap();
+        }
+        for line in definition.lines() {
+            if !line.trim().starts_with("disp(") {
+                pure_source.push_str(line);
+                pure_source.push('\n');
+            }
+        }
+    }
+    let interpreted: BTreeMap<_, _> = cases
+        .iter()
+        .map(|(name, call, _)| {
+            let wrapper =
+                format!("function result=corpus_primary()\nresult={call};\nend\n{pure_source}");
+            let result = unlinked_matlab::eval_function(&wrapper, vec![])
+                .unwrap()
+                .remove(0);
+            (*name, result)
+        })
+        .collect();
     let mut generated = transpile_arrays(&source, true).unwrap();
     generated.push_str("\nfn main(){\n");
     for (name, _, rust) in &cases {
@@ -325,6 +358,8 @@ fn optional_corpus_functions_match_octave() {
     assert_eq!(actual.len(), cases.len());
     assert_eq!(expected.len(), cases.len());
     for (name, (rows, cols, data)) in expected {
+        let interpreted = &interpreted[name.as_str()];
+        assert_matrix(interpreted, rows, cols, &data);
         let value = actual.get(&name).unwrap();
         assert_eq!((value.0, value.1), (rows, cols), "{name} shape");
         assert_eq!(value.2.len(), data.len());

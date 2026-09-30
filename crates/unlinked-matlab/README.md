@@ -231,3 +231,25 @@ execution: returning `true` produces `execution interrupted`. The check runs at
 entry and each expression/statement/work charge; individual bounded runtime
 operations finish before the next cooperative check. The library itself does
 not read clocks or start threads.
+
+`FunctionProgram::parse(source)` validates a pure function file once; its
+`signature()` exposes the primary function's name and ordered input/output names.
+`evaluate(Vec<Value>)` returns outputs in declaration order. Use
+`evaluate_with_budget(args, &mut budget)` to share limits and cancellation across
+simulation samples. `eval_function(source, args)` is the parse-and-evaluate helper.
+Shapes are checked at runtime; introspection does not infer MATLAB datatypes or
+array dimensions. Each call receives its own local workspace, with no persistent
+or global state. Local functions, bounded recursion, multiple outputs, array
+indexing, loops and early return are supported. `error` and `assert` report failures,
+and `sprintf` returns text; printing, files, processes and unknown functions reject
+even in dead branches. Initialization scripts still reject function definitions.
+
+Function execution shares the array budgets and initialization value limits,
+allows 64 definitions, 256 declared inputs/outputs, and 100,000 statement/loop
+steps across all local calls. Combined syntax and call nesting is bounded to
+prevent deeply nested recursive expressions from exhausting the host stack.
+Unassigned outputs fail explicitly. Corpus interpreter tests execute four original
+function files directly; five files containing printing are asserted to reject.
+For numeric comparison only, test fixtures remove standalone printing statements
+from those five files and compare results to the unchanged originals in Octave.
+Production evaluation never strips statements.
