@@ -77,7 +77,8 @@ CI. Per-model import, render and simulation coverage is tracked in
 ### Simulation
 - Bounded, version-pinned simulation jobs over HTTP and a WebSocket stream,
   with per-user and global caps, quotas, cancellation, deadlines and stored
-  results. Live plots use [rizzma](https://crates.io/crates/rizzma).
+  results. Live plots use [rizzma](https://crates.io/crates/rizzma) with
+  labeled time and value axes; traces export as CSV.
 - Solvers: Euler, RK4, adaptive Dormand–Prince 5(4).
 - Blocks: sources (Constant, Clock, Step, Sine), Gain, Bias, Sum, Product,
   Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
@@ -85,15 +86,17 @@ CI. Per-model import, render and simulation coverage is tracked in
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
   matrix signals lowered to scalars. The authoritative list and its limits are
   in [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
-- Workspace from expressions and from a pinned, same-project `.m` init script
-  evaluated by the bounded interpreter.
+- Workspace from expressions and from a same-project `.m` init script, chosen
+  in the Simulate tab, pinned to its version and evaluated by the bounded
+  interpreter; explicit workspace entries override init values.
 
 ### MATLAB / Octave
 - Array-first evaluator and Rust code generator for a bounded subset: real
   matrices, indexing, control flow, local functions, common builtins. Checked
   against Octave on the corpus scripts. LLVM IR comes from compiling the
   generated Rust with `rustc` (CLI only); there is no in-process LLVM backend.
-- In-browser MATLAB → Rust page, including for project `.m` files.
+- In-browser MATLAB → Rust page, also available as a tab on project `.m`
+  files.
 - Details: [`crates/unlinked-matlab/README.md`](crates/unlinked-matlab/README.md).
 
 ## In review
@@ -103,7 +106,6 @@ Move these into Delivered when they merge.
   `docs/COMPATIBILITY.md`. By default 1 of the 31 corpus models compiles for
   simulation; more run as isolated blocks or with explicit root inputs, as
   listed there.
-- #19: init-script picker, `.m` transpile tab, labeled plot axes.
 
 ## Roadmap (not supported yet)
 
