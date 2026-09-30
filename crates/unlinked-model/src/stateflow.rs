@@ -8,6 +8,7 @@
 
 use crate::{Point, Rect};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Chart {
@@ -25,6 +26,13 @@ pub struct Chart {
     pub data: Vec<ChartData>,
     /// MATLAB code of a MATLAB Function block.
     pub script: Option<String>,
+    /// Raw `updateMethod` (`chartUpdate` in MDL), e.g. `INHERITED`,
+    /// `DISCRETE` or `CONTINUOUS`; `None` when the file does not say.
+    #[serde(default)]
+    pub update_method: Option<String>,
+    /// Raw `sampleTime` expression, `None` when absent.
+    #[serde(default)]
+    pub sample_time: Option<String>,
 }
 
 /// A Stateflow data declaration.
@@ -37,6 +45,10 @@ pub struct ChartData {
     pub port: Option<u32>,
     /// Raw `props.array.size`, e.g. `"-1"` (inherited) or `"[3 1]"`.
     pub size: Option<String>,
+    /// Raw `props.array.isDynamic` (`"1"` for variable-size data).
+    pub variable_size: Option<String>,
+    /// Raw `props.complexity`, e.g. `"SF_COMPLEX_INHERITED"`.
+    pub complexity: Option<String>,
     /// Raw `dataType`, e.g. `"double"` or `"Inherit: Same as Simulink"`.
     pub data_type: Option<String>,
 }
@@ -194,32 +206,29 @@ impl Chart {
         }
     }
 
-    /// Whether the state has its own view (a subchart with contents).
-    pub fn is_subchart(&self, id: &str) -> bool {
-        id != self.id
-            && (self
-                .states
-                .iter()
-                .any(|s| s.subviewer.as_deref() == Some(id))
-                || self
-                    .junctions
-                    .iter()
-                    .any(|j| j.subviewer.as_deref() == Some(id))
-                || self
-                    .transitions
-                    .iter()
-                    .any(|t| t.subviewer.as_deref() == Some(id)))
+    /// Ids of the states that have their own view (subcharts with
+    /// contents), collected in one pass over the chart.
+    pub fn subchart_ids(&self) -> HashSet<&str> {
+        self.states
+            .iter()
+            .map(|s| s.subviewer.as_deref())
+            .chain(self.junctions.iter().map(|j| j.subviewer.as_deref()))
+            .chain(self.transitions.iter().map(|t| t.subviewer.as_deref()))
+            .flatten()
+            .filter(|v| *v != self.id)
+            .collect()
     }
 
     /// Follow subcharted state names from the top-level view, returning the
     /// id of the innermost view (`None` for the chart itself).
     pub fn view_at(&self, names: &[&str]) -> Option<Option<&str>> {
+        let subcharts = self.subchart_ids();
         let mut view: Option<&str> = None;
         for name in names {
             let s = self.states.iter().find(|s| {
                 self.in_view(s.subviewer.as_deref(), view)
                     && s.name() == *name
-                    && self.is_subchart(&s.id)
+                    && subcharts.contains(s.id.as_str())
             })?;
             view = Some(&s.id);
         }
@@ -294,11 +303,12 @@ mod tests {
             junctions: vec![],
             data: vec![],
             script: None,
+            update_method: None,
+            sample_time: None,
         };
         assert_eq!(chart.states[0].name(), "Outer");
         assert_eq!(chart.states[1].name(), "Inner");
-        assert!(chart.is_subchart("1"));
-        assert!(!chart.is_subchart("2"));
+        assert_eq!(chart.subchart_ids(), HashSet::from(["1"]));
         assert_eq!(chart.view_at(&[]), Some(None));
         assert_eq!(chart.view_at(&["Outer"]), Some(Some("1")));
         assert_eq!(chart.view_at(&["Inner"]), None);

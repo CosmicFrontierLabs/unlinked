@@ -97,11 +97,12 @@ fn corpus_charts_render_well_formed_svg() {
         let bytes = std::fs::read(f).unwrap();
         let model = unlinked_import::import(&f.display().to_string(), &bytes).unwrap();
         for (i, chart) in model.charts.iter().enumerate() {
+            let subcharts = chart.subchart_ids();
             let views = std::iter::once(None).chain(
                 chart
                     .states
                     .iter()
-                    .filter(|s| chart.is_subchart(&s.id))
+                    .filter(|s| subcharts.contains(s.id.as_str()))
                     .map(|s| Some(s.id.as_str())),
             );
             for (v, view) in views.enumerate() {

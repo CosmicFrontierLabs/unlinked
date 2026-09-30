@@ -626,6 +626,8 @@ mod tests {
                 junctions: vec![],
                 data: vec![],
                 script: Some("function y = f(u)".into()),
+                update_method: None,
+                sample_time: None,
             }],
         };
         assert_eq!(model.chart_at(&["Sub", "a/b"]).unwrap().id, "5");

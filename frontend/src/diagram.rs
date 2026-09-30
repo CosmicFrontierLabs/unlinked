@@ -135,6 +135,13 @@ fn chart_at<'a, 'p>(model: &'a Model, path: &'p [&'p str]) -> Option<(&'a Chart,
     (1..=path.len()).find_map(|i| model.chart_at(&path[..i]).map(|c| (c, &path[i..])))
 }
 
+/// Full name of state `sid` in the chart shown at `path`. States are
+/// opened by id because the rendered `data-name` may be truncated.
+fn subchart_name(model: &Model, path: &[&str], sid: &str) -> Option<String> {
+    let (chart, _) = chart_at(model, path)?;
+    chart.state(sid).map(|s| s.name().to_string())
+}
+
 fn render(model: &Model, path: &[&str], opts: &RenderOptions) -> Result<String, String> {
     match chart_at(model, path) {
         Some((chart, rest)) => {
@@ -290,12 +297,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let ondblclick = {
         let path = path.clone();
         let selected = selected.clone();
+        let model = props.model.clone();
         Callback::from(move |e: MouseEvent| {
-            let target = closest(
-                e.target(),
-                "g.block[data-subsystem], g.state[data-subchart]",
-            );
-            if let Some(name) = target.and_then(|g| g.get_attribute("data-name")) {
+            let name = if let Some(g) = closest(e.target(), "g.state[data-subchart]") {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                g.get_attribute("data-sid")
+                    .and_then(|sid| subchart_name(&model, &refs, &sid))
+            } else {
+                closest(e.target(), "g.block[data-subsystem]")
+                    .and_then(|g| g.get_attribute("data-name"))
+            };
+            if let Some(name) = name {
                 let mut p = (*path).clone();
                 p.push(name);
                 path.set(p);
@@ -533,5 +545,57 @@ fn inspector(props: &InspectorProps) -> Html {
                 }) }
             </table>
         </aside>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unlinked_model::{ChartKind, Rect, SimConfig, SourceFormat, State, StateKind};
+
+    fn state(id: &str, label: &str, subviewer: &str) -> State {
+        State {
+            id: id.into(),
+            label: label.into(),
+            position: Rect::new(0.0, 0.0, 50.0, 30.0),
+            parent: None,
+            subviewer: Some(subviewer.into()),
+            kind: StateKind::Or,
+            script: None,
+        }
+    }
+
+    #[test]
+    fn long_subchart_names_stay_navigable() {
+        let long = "L".repeat(300);
+        let model = Model {
+            name: "m".into(),
+            source: SourceFormat::Slx,
+            simulink_version: None,
+            config: SimConfig::default(),
+            root: System::default(),
+            workspace: Default::default(),
+            charts: vec![Chart {
+                id: "9".into(),
+                name: "Sub".into(),
+                kind: ChartKind::StateChart,
+                states: vec![state("1", &long, "9"), state("2", "Inner", "1")],
+                transitions: vec![],
+                junctions: vec![],
+                data: vec![],
+                script: None,
+                update_method: None,
+                sample_time: None,
+            }],
+        };
+        let opts = RenderOptions::default();
+        let top = render(&model, &["Sub"], &opts).unwrap();
+        assert!(top.contains("data-sid=\"1\""));
+        assert!(!top.contains(&format!("data-name=\"{long}\"")));
+
+        let name = subchart_name(&model, &["Sub"], "1").unwrap();
+        assert_eq!(name, long);
+        let inner = render(&model, &["Sub", &name], &opts).unwrap();
+        assert!(inner.contains("Inner"));
     }
 }

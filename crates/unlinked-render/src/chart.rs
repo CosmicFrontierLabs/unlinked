@@ -7,6 +7,7 @@
 use crate::svg::{escape, num, points_attr, Svg};
 use crate::theme::Palette;
 use crate::{RenderError, RenderOptions, MAX_ELEMENTS};
+use std::borrow::Cow;
 use unlinked_model::{Chart, ChartKind, JunctionKind, Point, Rect, State, StateKind, Transition};
 
 const STATE_FONT: f64 = 11.0;
@@ -15,8 +16,47 @@ const CODE_FONT: f64 = 12.0;
 const CODE_FAMILY: &str = "Menlo, Consolas, 'DejaVu Sans Mono', monospace";
 /// Longest code listing drawn; the rest is summarised in a final line.
 const MAX_CODE_LINES: usize = 5000;
+/// Characters drawn per code line; longer lines end in an ellipsis.
+const MAX_CODE_LINE_CHARS: usize = 400;
 /// Label lines drawn per state; the box clips anything taller anyway.
 const MAX_STATE_LINES: usize = 200;
+/// Label lines drawn per transition.
+const MAX_TRANSITION_LINES: usize = 50;
+/// Characters drawn per label line.
+const MAX_LABEL_LINE_CHARS: usize = 200;
+/// Characters of a state's label repeated in its tooltip.
+const MAX_TITLE_CHARS: usize = 1000;
+/// Upper bound on the markup of one chart view, so long text cannot slip
+/// past the element budget.
+const MAX_CHART_BYTES: usize = 16 * 1024 * 1024;
+
+/// `s` cut to `max` characters, ending in an ellipsis when cut.
+fn clip(s: &str, max: usize) -> Cow<'_, str> {
+    match s.char_indices().nth(max) {
+        None => Cow::Borrowed(s),
+        Some((i, _)) => Cow::Owned(format!("{}…", &s[..i])),
+    }
+}
+
+/// At most `max_lines` lines of `text`, each clipped to `max_chars`.
+/// Blank lines become a space: browsers skip empty tspans, and with them
+/// their line advance.
+fn clip_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<Cow<'_, str>> {
+    text.lines()
+        .take(max_lines)
+        .map(|l| {
+            if l.trim().is_empty() {
+                Cow::Borrowed(" ")
+            } else {
+                clip(l, max_chars)
+            }
+        })
+        .collect()
+}
+
+fn over_budget(s: &Svg) -> bool {
+    s.elements() > MAX_ELEMENTS || s.bytes() > MAX_CHART_BYTES
+}
 
 /// Render the chart's top-level view. MATLAB Function blocks render their
 /// code as a listing.
@@ -32,7 +72,7 @@ pub fn render_chart_view_svg(
     opts: &RenderOptions,
 ) -> Result<String, RenderError> {
     if let Some(v) = view {
-        if !chart.is_subchart(v) {
+        if !chart.subchart_ids().contains(v) {
             return Err(RenderError::NoSuchView(v.to_string()));
         }
     }
@@ -42,7 +82,7 @@ pub fn render_chart_view_svg(
         }
         _ => diagram(chart, view, opts),
     };
-    if s.elements() > MAX_ELEMENTS {
+    if over_budget(&s) {
         return Err(RenderError::TooLarge);
     }
     Ok(s.finish())
@@ -89,26 +129,26 @@ fn text_width(line: &str, size: f64) -> f64 {
 
 fn code_listing(chart: &Chart, script: &str, opts: &RenderOptions) -> Svg {
     let pal = opts.theme.palette();
-    // Blank lines hold a space: browsers skip empty tspans, and with them
-    // their line advance.
-    let lines: Vec<String> = script
-        .lines()
-        .map(|l| match l.trim_end() {
-            "" => " ".to_string(),
-            l => l.replace('\t', "    "),
-        })
+    let lines: Vec<String> = clip_lines(script, MAX_CODE_LINES, MAX_CODE_LINE_CHARS)
+        .into_iter()
+        .map(|l| l.trim_end().replace('\t', "    "))
+        .map(|l| if l.is_empty() { " ".to_string() } else { l })
         .collect();
-    let shown = lines.len().min(MAX_CODE_LINES);
-    let mut code: Vec<&str> = lines[..shown].iter().map(String::as_str).collect();
-    let more = format!("… {} more lines", lines.len() - shown);
-    if shown < lines.len() {
+    let shown = lines.len();
+    let hidden = script.lines().skip(shown).count();
+    let mut code: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let more = format!("… {hidden} more lines");
+    if hidden > 0 {
         code.push(&more);
     }
     let numbers: Vec<String> = (1..=shown).map(|n| n.to_string()).collect();
     let number_refs: Vec<&str> = numbers.iter().map(String::as_str).collect();
 
     let lh = CODE_FONT * 1.15;
-    let title = format!("MATLAB Function · {}", chart.name.replace('\n', " "));
+    let title = format!(
+        "MATLAB Function · {}",
+        clip(&chart.name, MAX_LABEL_LINE_CHARS).replace('\n', " ")
+    );
     let gutter = text_width(&shown.to_string(), CODE_FONT) + 12.0;
     let widest = code
         .iter()
@@ -184,8 +224,14 @@ fn code_listing(chart: &Chart, script: &str, opts: &RenderOptions) -> Svg {
 
 /// Label text of a transition, laid out at its label position or beside
 /// its midpoint.
-fn transition_label(t: &Transition) -> Option<(Point, Vec<&str>)> {
-    let lines: Vec<&str> = t.label.lines().filter(|l| !l.trim().is_empty()).collect();
+fn transition_label(t: &Transition) -> Option<(Point, Vec<Cow<'_, str>>)> {
+    let lines: Vec<Cow<str>> = t
+        .label
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(MAX_TRANSITION_LINES)
+        .map(|l| clip(l, MAX_LABEL_LINE_CHARS))
+        .collect();
     if lines.is_empty() {
         return None;
     }
@@ -271,9 +317,11 @@ fn diagram(chart: &Chart, view: Option<&str>, opts: &RenderOptions) -> Svg {
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .collect();
+    let subcharts = chart.subchart_ids();
     for (i, st) in states.iter().enumerate() {
-        draw_state(&mut s, chart, st, &format!("sf{clip_prefix}-{i}"), pal);
-        if s.elements() > MAX_ELEMENTS {
+        let subchart = subcharts.contains(st.id.as_str());
+        draw_state(&mut s, st, subchart, &format!("sf{clip_prefix}-{i}"), pal);
+        if over_budget(&s) {
             return s;
         }
     }
@@ -288,7 +336,7 @@ fn diagram(chart: &Chart, view: Option<&str>, opts: &RenderOptions) -> Svg {
     );
     for t in &transitions {
         draw_transition(&mut s, t, pal);
-        if s.elements() > MAX_ELEMENTS {
+        if over_budget(&s) {
             return s;
         }
     }
@@ -323,6 +371,9 @@ fn diagram(chart: &Chart, view: Option<&str>, opts: &RenderOptions) -> Svg {
             );
         }
         s.close("g");
+        if over_budget(&s) {
+            return s;
+        }
     }
     s.close("svg");
     s
@@ -331,11 +382,12 @@ fn diagram(chart: &Chart, view: Option<&str>, opts: &RenderOptions) -> Svg {
 /// Free-text note: its (possibly rich) text, with no outline.
 fn draw_note(s: &mut Svg, st: &State, pal: &Palette) {
     let text = if st.label.trim_start().starts_with('<') {
-        crate::strip_html(&st.label)
+        Cow::Owned(crate::strip_html(&st.label))
     } else {
-        st.label.clone()
+        Cow::Borrowed(st.label.as_str())
     };
-    let lines: Vec<&str> = text.lines().take(MAX_STATE_LINES).collect();
+    let lines = clip_lines(&text, MAX_STATE_LINES, MAX_LABEL_LINE_CHARS);
+    let lines: Vec<&str> = lines.iter().map(|l| l.as_ref()).collect();
     let r = st.position;
     s.open(
         "g",
@@ -353,16 +405,18 @@ fn draw_note(s: &mut Svg, st: &State, pal: &Palette) {
     s.close("g");
 }
 
-fn draw_state(s: &mut Svg, chart: &Chart, st: &State, clip_id: &str, pal: &Palette) {
+fn draw_state(s: &mut Svg, st: &State, subchart: bool, clip_id: &str, pal: &Palette) {
     if st.kind == StateKind::Note {
         return draw_note(s, st, pal);
     }
     let r = st.position;
-    let subchart = chart.is_subchart(&st.id);
     let mut attrs = vec![
         ("class", "state".to_string()),
         ("data-sid", st.id.clone()),
-        ("data-name", st.name().to_string()),
+        (
+            "data-name",
+            clip(st.name(), MAX_LABEL_LINE_CHARS).into_owned(),
+        ),
     ];
     if subchart {
         attrs.push(("data-subchart", "true".into()));
@@ -374,7 +428,10 @@ fn draw_state(s: &mut Svg, chart: &Chart, st: &State, clip_id: &str, pal: &Palet
     } else {
         ""
     };
-    s.raw(&escape(&format!("{}{hint}", st.label)));
+    s.raw(&escape(&format!(
+        "{}{hint}",
+        clip(&st.label, MAX_TITLE_CHARS)
+    )));
     s.close("title");
 
     let radius = 8.0_f64.min(r.width() / 4.0).min(r.height() / 4.0);
@@ -413,12 +470,8 @@ fn draw_state(s: &mut Svg, chart: &Chart, st: &State, clip_id: &str, pal: &Palet
     );
     s.close("clipPath");
     s.open("g", &[("clip-path", format!("url(#{clip_id})"))]);
-    let lines: Vec<&str> = st
-        .label
-        .lines()
-        .take(MAX_STATE_LINES)
-        .map(|l| if l.trim().is_empty() { " " } else { l })
-        .collect();
+    let lines = clip_lines(&st.label, MAX_STATE_LINES, MAX_LABEL_LINE_CHARS);
+    let lines: Vec<&str> = lines.iter().map(|l| l.as_ref()).collect();
     let (x, y) = (r.left + 5.0, r.top + STATE_FONT + 3.0);
     if let Some((first, rest)) = lines.split_first() {
         s.text(
@@ -524,6 +577,7 @@ fn draw_transition(s: &mut Svg, t: &Transition, pal: &Palette) {
         );
     }
     if let Some((at, lines)) = transition_label(t) {
+        let lines: Vec<&str> = lines.iter().map(|l| l.as_ref()).collect();
         s.text(
             at.x,
             at.y,
@@ -601,6 +655,8 @@ mod tests {
             }],
             data: vec![],
             script: None,
+            update_method: None,
+            sample_time: None,
         }
     }
 
@@ -672,6 +728,75 @@ mod tests {
         c.script = Some("x = 1;\n".repeat(MAX_CODE_LINES + 10));
         let svg = render_chart_svg(&c, &RenderOptions::default()).unwrap();
         assert!(svg.contains("… 10 more lines"));
+    }
+
+    #[test]
+    fn large_charts_render_in_linear_time() {
+        let n = 50_000;
+        let mut c = chart();
+        c.states = (0..n)
+            .map(|i| {
+                let x = (i % 200) as f64 * 60.0;
+                let y = (i / 200) as f64 * 40.0;
+                // Half the states sit inside subcharts of the other half.
+                let view = if i < n / 2 {
+                    "9".to_string()
+                } else {
+                    (i - n / 2).to_string()
+                };
+                state(
+                    &i.to_string(),
+                    "S\nentry: x = 1;",
+                    Rect::new(x, y, x + 50.0, y + 30.0),
+                    &view,
+                )
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let result = render_chart_svg(&c, &RenderOptions::default());
+        assert!(matches!(result, Ok(_) | Err(RenderError::TooLarge)));
+        assert!(render_chart_view_svg(&c, Some("7"), &RenderOptions::default()).is_ok());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn huge_labels_are_bounded() {
+        let mut c = chart();
+        c.states[0].label = format!("{}\n{}", "n".repeat(5_000_000), "a\n".repeat(1_000_000));
+        c.transitions[1].label = "[x]\n".repeat(1_000_000);
+        let start = std::time::Instant::now();
+        let svg = render_chart_svg(&c, &RenderOptions::default()).unwrap();
+        assert!(svg.len() < 200_000, "{} bytes", svg.len());
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+
+        c.states = (0..5000)
+            .map(|i| {
+                let label = "y".repeat(MAX_LABEL_LINE_CHARS);
+                let mut st = state(&i.to_string(), &label, Rect::new(0.0, 0.0, 9.0, 9.0), "9");
+                st.label = format!("{label}\n").repeat(MAX_STATE_LINES);
+                st
+            })
+            .collect();
+        assert_eq!(
+            render_chart_svg(&c, &RenderOptions::default()),
+            Err(RenderError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn huge_scripts_render_quickly() {
+        let mut c = chart();
+        c.kind = ChartKind::MatlabFunction;
+        c.script = Some(format!("{}{}", "x".repeat(100_000), "\n".repeat(5_000_000)));
+        let start = std::time::Instant::now();
+        let svg = render_chart_svg(&c, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("… 4995000 more lines"));
+        assert!(svg.len() < 1_000_000, "{} bytes", svg.len());
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[test]

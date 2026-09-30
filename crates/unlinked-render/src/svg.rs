@@ -48,6 +48,11 @@ impl Svg {
         self.out
     }
 
+    /// Bytes of markup written so far.
+    pub fn bytes(&self) -> usize {
+        self.out.len()
+    }
+
     /// Number of elements written so far.
     pub fn elements(&self) -> usize {
         self.elements

@@ -15,8 +15,8 @@ use crate::ImportError;
 use std::collections::HashMap;
 use unlinked_model::stateflow::split_path;
 use unlinked_model::{
-    escape_name, Chart, ChartData, ChartKind, DataScope, Junction, JunctionKind, Point, Rect,
-    State, StateKind, System, Transition,
+    escape_name, Block, Chart, ChartData, ChartKind, DataScope, Junction, JunctionKind, Point,
+    Rect, State, StateKind, System, Transition,
 };
 
 const SINGLE_PART: &str = "simulink/stateflow.xml";
@@ -37,19 +37,17 @@ pub fn read_slx(pkg: &mut SlxPackage) -> Result<Vec<Chart>, ImportError> {
 }
 
 /// Replace `<chart Ref="chart_7"/>` placeholders with their part's content.
-/// Placeholders whose part is missing are left as empty charts.
 fn inline_chart_parts(pkg: &mut SlxPackage, doc: &mut Node) -> Result<(), ImportError> {
     for machine in doc.children.iter_mut().filter(|c| c.tag == "machine") {
         for list in machine.children.iter_mut().filter(|c| c.tag == "Children") {
             for chart in list.children.iter_mut().filter(|c| c.tag == "chart") {
                 let Some(r) = chart.attr("Ref") else { continue };
                 let part = format!("simulink/stateflow/{r}.xml");
-                if pkg.has(&part) {
-                    let node = pkg.read_xml(&part)?;
-                    if node.tag == "chart" {
-                        *chart = node;
-                    }
+                let node = pkg.read_xml(&part)?;
+                if node.tag != "chart" {
+                    return Err(ImportError::Xml(format!("{part}: expected <chart>")));
                 }
+                *chart = node;
             }
         }
     }
@@ -138,12 +136,13 @@ pub fn mdl_charts(section: &Node) -> Vec<Chart> {
 /// Make chart names relative to the model root. Charts are named by block
 /// path, which some files prefix with the model name.
 pub fn relativize(charts: &mut [Chart], model_name: &str, root: &System) {
+    let mut index = BlockIndex::default();
     for chart in charts {
         let names = split_path(&chart.name);
-        if block_exists(root, &names) {
+        if index.exists(root, &names) {
             continue;
         }
-        if names.len() > 1 && names[0] == model_name && block_exists(root, &names[1..]) {
+        if names.len() > 1 && names[0] == model_name && index.exists(root, &names[1..]) {
             chart.name = names[1..]
                 .iter()
                 .map(|n| escape_name(n))
@@ -153,18 +152,41 @@ pub fn relativize(charts: &mut [Chart], model_name: &str, root: &System) {
     }
 }
 
-fn block_exists(root: &System, names: &[String]) -> bool {
-    let Some((last, parents)) = names.split_last() else {
-        return false;
-    };
-    let mut sys = root;
-    for name in parents {
-        match sys.block_by_name(name).and_then(|b| b.subsystem.as_deref()) {
-            Some(s) => sys = s,
-            None => return false,
-        }
+/// Block-name lookup per system, built on first use so resolving many
+/// chart paths stays linear in the model size.
+#[derive(Default)]
+struct BlockIndex<'a> {
+    systems: HashMap<*const System, HashMap<&'a str, &'a Block>>,
+}
+
+impl<'a> BlockIndex<'a> {
+    fn block(&mut self, sys: &'a System, name: &str) -> Option<&'a Block> {
+        self.systems
+            .entry(sys as *const System)
+            .or_insert_with(|| {
+                let mut m = HashMap::new();
+                for b in &sys.blocks {
+                    m.entry(b.name.as_str()).or_insert(b);
+                }
+                m
+            })
+            .get(name)
+            .copied()
     }
-    sys.block_by_name(last).is_some()
+
+    fn exists(&mut self, root: &'a System, names: &[String]) -> bool {
+        let Some((last, parents)) = names.split_last() else {
+            return false;
+        };
+        let mut sys = root;
+        for name in parents {
+            match self.block(sys, name).and_then(|b| b.subsystem.as_deref()) {
+                Some(s) => sys = s,
+                None => return false,
+            }
+        }
+        self.block(sys, last).is_some()
+    }
 }
 
 /// `chart id -> block path` from `instance` records.
@@ -196,6 +218,8 @@ fn new_chart(node: &Node, names: &HashMap<String, String>) -> Chart {
         junctions: Vec::new(),
         data: Vec::new(),
         script: None,
+        update_method: opt_string(node.get("updateMethod").or_else(|| node.get("chartUpdate"))),
+        sample_time: opt_string(node.get("sampleTime")),
     }
 }
 
@@ -220,15 +244,16 @@ fn finish(chart: &mut Chart, node: &Node) {
 }
 
 fn data(n: &Node) -> ChartData {
+    let props = n.child("props");
+    let array = props.and_then(|p| p.child("array"));
     ChartData {
         id: object_id(n),
         name: n.get("name").unwrap_or_default().trim().to_string(),
         scope: DataScope::from_scope(n.get("scope")),
         port: None,
-        size: n
-            .child("props")
-            .and_then(|p| p.child("array"))
-            .and_then(|a| opt_string(a.get("size"))),
+        size: array.and_then(|a| opt_string(a.get("size"))),
+        variable_size: array.and_then(|a| opt_string(a.get("isDynamic"))),
+        complexity: props.and_then(|p| opt_string(p.get("complexity"))),
         data_type: opt_string(n.get("dataType")),
     }
 }
@@ -351,6 +376,8 @@ mod tests {
       <target id="2" name="sfun"/>
       <chart id="3">
         <P Name="name">Controller/Mode logic</P>
+        <P Name="updateMethod">DISCRETE</P>
+        <P Name="sampleTime">Ts</P>
         <Children>
           <state SSID="1">
             <P Name="labelString">Off
@@ -376,7 +403,10 @@ entry: y = 0;</P>
           <data SSID="9" name="y"><P Name="scope">OUTPUT_DATA</P></data>
           <data SSID="10" name="u">
             <P Name="scope">INPUT_DATA</P>
-            <props><array><P Name="size">[3 1]</P></array></props>
+            <props>
+              <array><P Name="size">[3 1]</P><P Name="isDynamic">1</P></array>
+              <P Name="complexity">SF_COMPLEX_NO</P>
+            </props>
             <P Name="dataType">double</P>
           </data>
           <data SSID="11" name="v"><P Name="scope">INPUT_DATA</P></data>
@@ -443,6 +473,14 @@ y = 2*u;</P></eml>
         assert_eq!(c.data[1].size.as_deref(), Some("[3 1]"));
         assert_eq!(c.data[1].data_type.as_deref(), Some("double"));
         assert_eq!(c.data[2].size, None);
+        assert_eq!(c.data[1].variable_size.as_deref(), Some("1"));
+        assert_eq!(c.data[1].complexity.as_deref(), Some("SF_COMPLEX_NO"));
+        assert_eq!(c.data[2].variable_size, None);
+        assert_eq!(c.data[2].complexity, None);
+        assert_eq!(c.update_method.as_deref(), Some("DISCRETE"));
+        assert_eq!(c.sample_time.as_deref(), Some("Ts"));
+        assert_eq!(charts[1].update_method, None);
+        assert_eq!(charts[1].sample_time, None);
         assert_eq!(c.states[0].name(), "Off");
         assert_eq!(c.states[0].position, Rect::new(10.0, 20.0, 110.0, 70.0));
         assert_eq!(c.states[0].subviewer.as_deref(), Some("3"));
@@ -482,6 +520,7 @@ Stateflow {
   chart {
     id 2
     name "m/Chart"
+    chartUpdate INHERITED
     treeNode [0 3 0 0]
   }
   state {
@@ -564,6 +603,7 @@ Stateflow {
         assert_eq!(c.transitions[0].dst.as_deref(), Some("6"));
         assert_eq!(c.transitions[0].points.len(), 3);
         assert_eq!(c.junctions[0].kind, JunctionKind::Connective);
+        assert_eq!(c.update_method.as_deref(), Some("INHERITED"));
         assert_eq!(c.data.len(), 1, "state-level data is not chart data");
         assert_eq!(c.data[0].name, "u");
         assert_eq!(c.data[0].port, Some(1));
@@ -596,6 +636,66 @@ Stateflow {
         assert_eq!(charts[1].name, "Sub");
     }
 
+    fn slx(parts: &[(&str, &str)]) -> SlxPackage {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in parts {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(body.as_bytes()).unwrap();
+        }
+        SlxPackage::open(&w.finish().unwrap().into_inner()).unwrap()
+    }
+
+    #[test]
+    fn split_chart_parts_resolve_or_error() {
+        let machine = r#"<Stateflow><machine id="1"><Children>
+            <chart Ref="chart_7"/>
+          </Children></machine></Stateflow>"#;
+        let chart = r#"<chart id="7"><P Name="name">Sub</P><P Name="type">EML_CHART</P></chart>"#;
+
+        let mut ok = slx(&[
+            (MACHINE_PART, machine),
+            ("simulink/stateflow/chart_7.xml", chart),
+        ]);
+        let charts = read_slx(&mut ok).unwrap();
+        assert_eq!(charts.len(), 1);
+        assert_eq!(charts[0].name, "Sub");
+        assert_eq!(charts[0].kind, ChartKind::MatlabFunction);
+
+        let mut missing = slx(&[(MACHINE_PART, machine)]);
+        assert!(matches!(
+            read_slx(&mut missing),
+            Err(ImportError::MissingPart(_))
+        ));
+
+        let mut wrong = slx(&[
+            (MACHINE_PART, machine),
+            ("simulink/stateflow/chart_7.xml", "<System/>"),
+        ]);
+        assert!(matches!(read_slx(&mut wrong), Err(ImportError::Xml(_))));
+    }
+
+    #[test]
+    fn relativize_scales_linearly() {
+        let n = 20_000;
+        let root = System {
+            blocks: (0..n).map(|i| test_block(&format!("b{i}"))).collect(),
+            ..Default::default()
+        };
+        let mut charts: Vec<Chart> = (0..n)
+            .map(|i| Chart {
+                name: format!("m/b{i}"),
+                ..empty()
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        relativize(&mut charts, "m", &root);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(charts[n - 1].name, format!("b{}", n - 1));
+    }
+
     fn empty() -> Chart {
         Chart {
             id: "1".into(),
@@ -606,6 +706,8 @@ Stateflow {
             junctions: vec![],
             data: vec![],
             script: None,
+            update_method: None,
+            sample_time: None,
         }
     }
 
