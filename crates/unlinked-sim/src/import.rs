@@ -28,12 +28,13 @@ fn require(block: &Block, key: &str, allowed: &[&str]) -> Result<(), Error> {
 }
 
 /// Compile the root system, lowering ordinary virtual subsystems. Library links,
-/// masked/atomic/conditional subsystems, non-scalar
-/// signals, and unimplemented block semantics produce diagnostics.
-/// Workspace expressions are evaluated as scalar math, never as MATLAB scripts.
+/// masked/atomic/conditional subsystems and unimplemented block semantics
+/// produce diagnostics. Supported bounded vectors/matrices lower to scalar nodes.
+/// Workspace expressions are pure numeric MATLAB expressions, never scripts.
 pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
     let flattened = super::flatten::flatten(model)?;
-    let model = &flattened;
+    let scalarized = super::vector::scalarize(&flattened)?;
+    let model = &scalarized;
     let mut ws = BTreeMap::new();
     for key in model.workspace.keys() {
         if ["pi", "Inf", "NaN", "true", "false"].contains(&key.as_str()) {
@@ -65,6 +66,7 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
     let mut graph = Graph::default();
     let mut reserved = model.root.blocks.iter().map(|b| b.id.0.clone()).collect();
     let mut input_alias = BTreeMap::new();
+    let mut direct_discrete = Vec::new();
     for block in &model.root.blocks {
         if graph.nodes.len() >= 100_000 {
             return Err(Error::Options("lowered graph budget exceeded".into()));
@@ -113,7 +115,10 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         if let Some(sample) = block.param("SampleTime") {
             let value = unlinked_matlab::eval_expr(sample, &ws)
                 .map_err(|e| block_error(id, format!("SampleTime: {e}")))?;
-            let acceptable = if block.block_type == "UnitDelay" {
+            let acceptable = if matches!(
+                block.block_type.as_str(),
+                "UnitDelay" | "DiscreteTransferFcn"
+            ) {
                 value == -1.0 || (value - options.step).abs() <= 1e-12 * options.step.abs()
             } else {
                 value == -1.0
@@ -134,6 +139,31 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     &format!("{}/{}", model.name, block.name),
                 )?;
                 input_alias.insert(id.clone(), input);
+                continue;
+            }
+            "StateSpace" => {
+                let input = super::state_space::lower(
+                    block,
+                    &ws,
+                    &mut graph,
+                    &mut reserved,
+                    &format!("{}/{}", model.name, block.name),
+                )?;
+                input_alias.insert(id.clone(), input);
+                continue;
+            }
+            "DiscreteTransferFcn" => {
+                let (input, direct) = super::transfer::lower_discrete(
+                    block,
+                    &ws,
+                    &mut graph,
+                    &mut reserved,
+                    &format!("{}/{}", model.name, block.name),
+                )?;
+                input_alias.insert(id.clone(), input);
+                if direct {
+                    direct_discrete.push(id.clone());
+                }
                 continue;
             }
             "Constant" => Kind::Constant {
@@ -305,6 +335,7 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             input: (connection.dst.port.index - 1) as usize,
         });
     }
+    super::transfer::validate_discrete_coupling(&graph, &direct_discrete)?;
     Compiled::new(&graph)?;
     Ok(graph)
 }
