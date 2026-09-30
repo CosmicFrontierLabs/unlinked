@@ -1,0 +1,11 @@
+[package]
+name = "unlinked-matlab-rt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+description = "Typed ndarray and nalgebra helpers for MATLAB-to-Rust generated programs"
+
+[dependencies]
+ndarray = "0.17.2"
+nalgebra = { version = "0.35.0", default-features = false, features = ["std"] }

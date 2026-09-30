@@ -10,7 +10,7 @@ cargo run -p unlinked-cli -- render model.slx -o diagram.svg
 cargo run -p unlinked-cli -- render model.mdl --system 'Outer/Slash' --system Inner -o nested.svg
 cargo run -p unlinked-cli -- sim model.mdl --start 0 --stop 2 --step 0.01 --solver rk4 -o trace.json
 cargo run -p unlinked-cli -- sim model.slx --stop 2 --step 0.01 --solver euler -o trace.csv
-cargo run -p unlinked-cli -- transpile script.m -o generated.rs
+cargo run -p unlinked-cli -- transpile script.m -o generated-project
 cargo run -p unlinked-cli -- transpile function.m --library --emit llvm-ir -o generated.ll
 ```
 
@@ -45,16 +45,34 @@ Unsupported simulation semantics fail with a diagnostic. The simulation engine
 limits sample counts and total recorded values. `--max-samples` defaults to
 100001 and cannot exceed the engine's hard maximum.
 
-`transpile` emits the documented scalar subset from `unlinked-matlab`. Function
-library mode exposes `pub fn f_name(...) -> f64` without `main`. `--emit llvm-ir`
-requires an output file and local `rustc`; it compiles only generated Rust and
-never runs it. There are no user-selected compiler flags, external dependencies,
-build scripts, or procedural macros in generated code. This is a local CLI, not
-an uploaded-program execution service.
+`transpile` emits a complete Cargo project by default. Use `-o NEW_DIRECTORY`
+(the directory must not already exist); without it the destination is
+`<input-stem>-rust`, or `generated-matlab-rust` for stdin. Both ndarray and nalgebra
+are required dependencies, and the MATLAB semantics helper is vendored into
+`matlab-rt/`. The manifest isolates the result from any enclosing workspace.
+Build with `cargo build --manifest-path NEW_DIRECTORY/Cargo.toml`; scripts can
+then run with `cargo run --manifest-path NEW_DIRECTORY/Cargo.toml`.
+
+`--library` emits typed public function signatures and no main function.
+`--emit rust` writes only the generated source to stdout or the specified file;
+it still requires the dependency manifest/helper from a complete project.
+`--emit llvm-ir -o generated.ll` builds a temporary Cargo project with
+`cargo rustc --emit=llvm-ir`, then copies the generated module to the output. This is the generated crate’s
+LLVM module, not a self-contained linked program: ndarray, nalgebra and helper
+calls may remain external declarations. Keep the exported Cargo project to
+rebuild and link its dependencies.
+Cargo may fetch and build dependencies; the generated program is never executed.
+Compilation is a local CLI operation, not an uploaded-code server endpoint.
+
+Generation has the parser limits documented in unlinked-matlab. Generated
+standalone programs use typed locals rather than environment maps or statement
+budgets; MATLAB helpers retain shape/index/allocation validation. Only trusted
+programs should be executed outside the bounded interpreter.
 
 Output files are written only after successful import/rendering/simulation/transpilation.
-Explicit output paths may overwrite existing files. LLVM output is written by
-`rustc` itself and compiler failures are reported with its diagnostics.
+Explicit single-file outputs can replace existing files. Project export refuses
+an existing directory; a filesystem error may leave a partial new directory.
+LLVM output is copied only after successful compilation.
 
 The optional external-corpus CLI regression uses `UNLINKED_TEST_CASES` to locate
 `fixtures/synthetic/constant_gain_sum_integrator.mdl` and its expected JSON. It

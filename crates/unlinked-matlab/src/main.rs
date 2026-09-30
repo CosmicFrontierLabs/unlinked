@@ -5,15 +5,11 @@ fn main() {
         let library = match arguments.as_slice() {
             [] => false,
             [mode] if mode == "--library" => true,
-            _ => return Err("usage: unlinked-matlab [--library] < source.m > generated.rs".into()),
+            _ => return Err("usage: unlinked-matlab [--library] < source.m > generated.rs (use unlinked transpile for a complete Cargo project)".into()),
         };
         let mut source = String::new();
         io::stdin().read_to_string(&mut source)?;
-        Ok(if library {
-            unlinked_matlab::transpile_library(&source)?
-        } else {
-            unlinked_matlab::transpile(&source)?
-        })
+        Ok(unlinked_matlab::transpile_typed(&source, library)?)
     })();
     match result {
         Ok(rust) => print!("{rust}"),

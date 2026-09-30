@@ -95,17 +95,39 @@ fn malformed_model_and_missing_solver_are_errors() {
 }
 #[test]
 fn transpile_script_library_and_llvm_without_execution() {
-    let script = stdin(&["transpile", "-"], b"disp(1+2);\n");
+    let script = stdin(&["transpile", "-", "--emit", "rust"], b"disp(1+2);\n");
     success(&script);
     assert!(String::from_utf8_lossy(&script.stdout).contains("fn main()"));
     let library = stdin(
-        &["transpile", "-", "--library"],
+        &["transpile", "-", "--library", "--emit", "rust"],
         b"function y=f(x)\ny=x^2;\nend\n",
     );
     success(&library);
     let generated = String::from_utf8(library.stdout).unwrap();
     assert!(generated.contains("pub fn f_f"));
     assert!(!generated.contains("fn main"));
+    assert!(!generated.contains("Environment"));
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("exported");
+    let output = stdin(
+        &["transpile", "-", "-o", project.to_str().unwrap()],
+        b"disp(1+2);\n",
+    );
+    success(&output);
+    assert!(project.join("src/main.rs").is_file());
+    assert!(project.join("matlab-rt/src/lib.rs").is_file());
+    let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    assert!(manifest.contains("ndarray"));
+    assert!(manifest.contains("nalgebra"));
+    let overwrite = stdin(
+        &["transpile", "-", "-o", project.to_str().unwrap()],
+        b"disp(4);\n",
+    );
+    assert!(!overwrite.status.success());
+    assert_eq!(
+        std::fs::read_to_string(project.join("Cargo.toml")).unwrap(),
+        manifest
+    );
     let path = std::env::temp_dir().join(format!("unlinked-cli-{}.ll", std::process::id()));
     let output = path.to_str().unwrap();
     let llvm = stdin(

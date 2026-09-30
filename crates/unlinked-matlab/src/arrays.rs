@@ -1,6 +1,9 @@
 //! Native Rust code generation for the real matrix and character-array subset.
 #[path = "functions.rs"]
 mod functions;
+#[path = "typed_codegen.rs"]
+mod typed_codegen;
+pub use typed_codegen::transpile_typed;
 #[path = "script.rs"]
 mod script;
 use crate::Error;
@@ -224,7 +227,12 @@ enum Target {
     Many(Vec<String>),
 }
 #[derive(Debug)]
-enum Stmt {
+struct Stmt {
+    line: usize,
+    kind: StmtKind,
+}
+#[derive(Debug)]
+enum StmtKind {
     Assign(Target, Expr),
     Call(Expr),
     If(Vec<(Expr, Vec<Stmt>)>, Vec<Stmt>),
@@ -234,9 +242,21 @@ enum Stmt {
     Continue,
     Return,
 }
+#[derive(Clone, Copy)]
+enum ArgumentKind {
+    Double,
+    Logical,
+    Character,
+}
+#[derive(Clone)]
+struct ArgumentDeclaration {
+    kind: ArgumentKind,
+    dimensions: [Option<usize>; 2],
+}
 struct Function {
     name: String,
     args: Vec<String>,
+    declarations: BTreeMap<String, ArgumentDeclaration>,
     outputs: Vec<String>,
     body: Vec<Stmt>,
 }
@@ -478,6 +498,11 @@ impl Parser {
         self.finish()
     }
     fn statement(&mut self) -> Result<Stmt, Error> {
+        let line = self.tokens[self.pos].line;
+        let kind = self.statement_kind()?;
+        Ok(Stmt { line, kind })
+    }
+    fn statement_kind(&mut self) -> Result<StmtKind, Error> {
         if self.named("if") {
             self.pos += 1;
             let condition = self.expr(0, false)?;
@@ -499,7 +524,7 @@ impl Parser {
                 vec![]
             };
             self.end()?;
-            return Ok(Stmt::If(branches, other));
+            return Ok(StmtKind::If(branches, other));
         }
         if self.named("for") {
             self.pos += 1;
@@ -509,7 +534,7 @@ impl Parser {
             self.finish()?;
             let body = self.body()?;
             self.end()?;
-            return Ok(Stmt::For(name, values, body));
+            return Ok(StmtKind::For(name, values, body));
         }
         if self.named("while") {
             self.pos += 1;
@@ -517,12 +542,12 @@ impl Parser {
             self.finish()?;
             let body = self.body()?;
             self.end()?;
-            return Ok(Stmt::While(condition, body));
+            return Ok(StmtKind::While(condition, body));
         }
         for (name, stmt) in [
-            ("break", Stmt::Break),
-            ("continue", Stmt::Continue),
-            ("return", Stmt::Return),
+            ("break", StmtKind::Break),
+            ("continue", StmtKind::Continue),
+            ("return", StmtKind::Return),
         ] {
             if self.named(name) {
                 self.pos += 1;
@@ -551,7 +576,7 @@ impl Parser {
                 }
                 let value = self.expr(0, false)?;
                 self.finish()?;
-                return Ok(Stmt::Assign(Target::Many(names), value));
+                return Ok(StmtKind::Assign(Target::Many(names), value));
             }
             self.pos = checkpoint;
         }
@@ -562,22 +587,29 @@ impl Parser {
                 Expr::Apply(n, args) => Target::Index(n, args),
                 _ => return Err(self.fail("invalid assignment target")),
             };
-            Stmt::Assign(target, self.expr(0, false)?)
+            StmtKind::Assign(target, self.expr(0, false)?)
         } else {
             if !matches!(lhs, Expr::Apply(..)) {
                 return Err(
                     self.fail("bare expression display is unsupported; use disp(expression)")
                 );
             }
-            Stmt::Call(lhs)
+            StmtKind::Call(lhs)
         };
         self.finish()?;
         Ok(result)
     }
-    fn function(&mut self) -> Result<Function, Error> {
-        self.function_with_implicit_end(false)
+    fn function_typed(&mut self) -> Result<Function, Error> {
+        self.function_with_declarations(false, true)
     }
     fn function_with_implicit_end(&mut self, implicit: bool) -> Result<Function, Error> {
+        self.function_with_declarations(implicit, false)
+    }
+    fn function_with_declarations(
+        &mut self,
+        implicit: bool,
+        declarations_allowed: bool,
+    ) -> Result<Function, Error> {
         self.pos += 1;
         let mut outputs = Vec::new();
         let name;
@@ -617,6 +649,62 @@ impl Parser {
             }
         }
         self.finish()?;
+        let mut declarations = BTreeMap::new();
+        if self.named("arguments") {
+            if !declarations_allowed {
+                return Err(self.fail("arguments blocks are supported by typed compilation, not by the bounded interpreter"));
+            }
+            self.pos += 1;
+            self.finish()
+                .map_err(|_| self.fail("arguments block attributes are unsupported"))?;
+            while !self.named("end") {
+                let argument = self.name()?;
+                if !args.contains(&argument) {
+                    return Err(self.fail("arguments declaration must name a function input"));
+                }
+                let mut dimensions = [None, None];
+                if self.op("(") {
+                    for (axis, dimension) in dimensions.iter_mut().enumerate() {
+                        if !self.op(":") {
+                            let Token::Number(value) = self.token() else {
+                                return Err(self.fail(
+                                    "argument dimensions require positive integer literals or ':'",
+                                ));
+                            };
+                            if *value < 1.0 || *value > 1_000_000.0 || value.fract() != 0.0 {
+                                return Err(self
+                                    .fail("argument dimension must be an integer in 1..=1000000"));
+                            }
+                            *dimension = Some(*value as usize);
+                            self.pos += 1;
+                        }
+                        if axis == 0 {
+                            self.expect(",")?;
+                        }
+                    }
+                    self.expect(")")?;
+                }
+                let kind = match self.name()?.as_str() {
+                    "double" => ArgumentKind::Double,
+                    "logical" => ArgumentKind::Logical,
+                    "char" => ArgumentKind::Character,
+                    _ => {
+                        return Err(
+                            self.fail("typed arguments support only double, logical, and char")
+                        );
+                    }
+                };
+                if declarations
+                    .insert(argument, ArgumentDeclaration { kind, dimensions })
+                    .is_some()
+                {
+                    return Err(self.fail("duplicate arguments declaration"));
+                }
+                self.finish()
+                    .map_err(|_| self.fail("argument defaults and validators are unsupported"))?;
+            }
+            self.end()?;
+        }
         let body = self.body()?;
         if !(implicit && matches!(self.token(), Token::Eof)) {
             self.end()?;
@@ -624,6 +712,7 @@ impl Parser {
         Ok(Function {
             name,
             args,
+            declarations,
             outputs,
             body,
         })
@@ -681,122 +770,21 @@ const BUILTINS: &[&str] = &[
     "isinf",
     "isfinite",
 ];
-const ARRAY_BUILTINS: &[&str] = &[
-    "fprintf",
-    "sprintf",
-    "error",
-    "assert",
-    "numel",
-    "length",
-    "isempty",
-    "size",
-    "zeros",
-    "ones",
-    "eye",
-    "reshape",
-    "transpose",
-    "num2str",
-    "strcmp",
-    "linspace",
-    "diag",
-    "sum",
-    "prod",
-    "all",
-    "any",
-    "norm",
-    "dot",
-    "sort",
-    "find",
-    "isnan",
-    "isinf",
-    "isfinite",
-    "log2",
-];
-/// Select the array frontend only for explicit array/character/builtin syntax.
-/// Scalar-only sources keep the original scalar API and diagnostics.
-pub(crate) fn selects_array_frontend(source: &str) -> bool {
-    let Ok(tokens) = lex(source) else {
-        return false;
-    };
-    if tokens.iter().enumerate().any(|(i,s)| {
-        matches!(&s.token,Token::Text(_))
-        || matches!(&s.token,Token::Op(op) if ["[",".*","./",".\\",".^","\\","'",".'"].contains(&op.as_str()))
-        || matches!(&s.token,Token::Name(n) if ["while","break","continue","return"].contains(&n.as_str()))
-        || matches!(&s.token,Token::Name(n) if ARRAY_BUILTINS.contains(&n.as_str()) && tokens.get(i+1).is_some_and(|s|s.token==Token::Op("(".into())))
-    }) { return true; }
-    // Indexing parameters need not contain a matrix literal (e.g. y=x(1)).
-    // Inspect scope names without changing the legacy scalar function ABI.
-    let mut parser = Parser {
-        tokens,
-        pos: 0,
-        depth: 0,
-    };
-    let Ok(script) = parser.body() else {
-        return false;
-    };
-    let mut vars = BTreeSet::new();
-    assigned(&script, &mut vars);
-    if body_needs_arrays(&script, &vars) {
-        return true;
-    }
-    while parser.named("function") {
-        let Ok(function) = parser.function() else {
-            return false;
-        };
-        let mut vars = function.args.into_iter().collect();
-        assigned(&function.body, &mut vars);
-        if body_needs_arrays(&function.body, &vars) {
-            return true;
-        }
-    }
-    false
-}
-fn expr_needs_arrays(expr: &Expr, vars: &BTreeSet<String>) -> bool {
-    match expr {
-        Expr::Apply(name, args) => {
-            vars.contains(name) || args.iter().any(|e| expr_needs_arrays(e, vars))
-        }
-        Expr::Range(..) | Expr::Array(..) | Expr::All | Expr::End | Expr::Text(_) => true,
-        Expr::Unary(_, e) => expr_needs_arrays(e, vars),
-        Expr::Binary(_, a, b) => expr_needs_arrays(a, vars) || expr_needs_arrays(b, vars),
-        _ => false,
-    }
-}
-fn body_needs_arrays(body: &[Stmt], vars: &BTreeSet<String>) -> bool {
-    body.iter().any(|s| match s {
-        Stmt::Assign(Target::Index(..) | Target::Many(..), _) => true,
-        Stmt::Assign(_, e) | Stmt::Call(e) => expr_needs_arrays(e, vars),
-        Stmt::If(branches, other) => {
-            branches
-                .iter()
-                .any(|(c, b)| expr_needs_arrays(c, vars) || body_needs_arrays(b, vars))
-                || body_needs_arrays(other, vars)
-        }
-        Stmt::For(_, Expr::Range(a, b, c), body) => {
-            expr_needs_arrays(a, vars)
-                || expr_needs_arrays(b, vars)
-                || expr_needs_arrays(c, vars)
-                || body_needs_arrays(body, vars)
-        }
-        Stmt::For(..) | Stmt::While(..) | Stmt::Break | Stmt::Continue | Stmt::Return => true,
-    })
-}
-
 fn assigned(body: &[Stmt], vars: &mut BTreeSet<String>) {
     for statement in body {
-        match statement {
-            Stmt::Assign(target, _) => match target {
+        match &statement.kind {
+            StmtKind::Assign(target, _) => match target {
                 Target::Name(n) | Target::Index(n, _) => {
                     vars.insert(n.clone());
                 }
                 Target::Many(names) => vars.extend(names.iter().cloned()),
             },
-            Stmt::For(n, _, body) => {
+            StmtKind::For(n, _, body) => {
                 vars.insert(n.clone());
                 assigned(body, vars);
             }
-            Stmt::While(_, body) => assigned(body, vars),
-            Stmt::If(branches, other) => {
+            StmtKind::While(_, body) => assigned(body, vars),
+            StmtKind::If(branches, other) => {
                 for (_, body) in branches {
                     assigned(body, vars);
                 }
@@ -806,308 +794,6 @@ fn assigned(body: &[Stmt], vars: &mut BTreeSet<String>) {
         }
     }
 }
-struct Generator<'a> {
-    vars: BTreeSet<String>,
-    functions: &'a BTreeMap<String, (usize, usize)>,
-    outputs: &'a [String],
-    serial: usize,
-    in_function: bool,
-}
-impl Generator<'_> {
-    fn expr(&mut self, expr: &Expr, end: Option<&str>) -> Result<String, Error> {
-        Ok(match expr {
-            Expr::Number(n) => format!("Value::scalar({n:?}_f64)"),
-            Expr::Text(s) => format!("Value::string({s:?})?"),
-            Expr::Var(n) => {
-                if self.vars.contains(n) {
-                    format!("get(&env,{n:?})?")
-                } else {
-                    match n.as_str() {
-                        "pi" => "Value::scalar(std::f64::consts::PI)".into(),
-                        "Inf" | "inf" => "Value::scalar(f64::INFINITY)".into(),
-                        "NaN" | "nan" => "Value::scalar(f64::NAN)".into(),
-                        "true" => "Value::logical(true)".into(),
-                        "false" => "Value::logical(false)".into(),
-                        _ => return Err(error(1, format!("undefined variable '{n}'"))),
-                    }
-                }
-            }
-            Expr::End => end
-                .ok_or_else(|| error(1, "'end' is only supported inside array indices"))?
-                .into(),
-            Expr::All => return Err(error(1, "bare ':' is only supported as an array index")),
-            Expr::Unary(op, a) => format!("unary({op:?},&({}))?", self.expr(a, end)?),
-            Expr::Binary(op, a, b) if op == "&&" || op == "||" => format!(
-                "Value::logical(({}).scalar_truth()? {op} ({}).scalar_truth()?)",
-                self.expr(a, end)?,
-                self.expr(b, end)?
-            ),
-            Expr::Binary(op, a, b) => format!(
-                "binary({op:?},&({}),&({}))?",
-                self.expr(a, end)?,
-                self.expr(b, end)?
-            ),
-            Expr::Range(a, b, c) => format!(
-                "range(&({}),&({}),&({}))?",
-                self.expr(a, end)?,
-                self.expr(b, end)?,
-                self.expr(c, end)?
-            ),
-            Expr::Array(rows) => {
-                let rows = rows
-                    .iter()
-                    .map(|row| {
-                        let values = row
-                            .iter()
-                            .map(|v| self.expr(v, end))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        Ok(format!("vec![{}]", values.join(",")))
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
-                format!("concatenate(vec![{}])?", rows.join(","))
-            }
-            Expr::Apply(name, args) if self.vars.contains(name) => {
-                let index = self.indices(args, "indexed")?;
-                format!("{{let indexed=get(&env,{name:?})?; indexed.index(&[{index}])?}}")
-            }
-            Expr::Apply(name, args) => {
-                let call = self.call(name, args, 1, end)?;
-                format!(
-                    "{{let result={call}; result.into_iter().next().ok_or_else(||\"function has no output\".to_string())?}}"
-                )
-            }
-        })
-    }
-    fn indices(&mut self, args: &[Expr], base: &str) -> Result<String, Error> {
-        if args.is_empty() || args.len() > 2 {
-            return Err(error(1, "one or two array indices required"));
-        }
-        args.iter()
-            .enumerate()
-            .map(|(i, arg)| {
-                if matches!(arg, Expr::All) {
-                    Ok("Index::All".into())
-                } else {
-                    Ok(format!(
-                        "Index::Values({})",
-                        self.expr(arg, Some(&format!("{base}.end_value({i},{})", args.len())))?
-                    ))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(|v| v.join(","))
-    }
-    fn call(
-        &mut self,
-        name: &str,
-        args: &[Expr],
-        outputs: usize,
-        end: Option<&str>,
-    ) -> Result<String, Error> {
-        if self.vars.contains(name) {
-            return Err(error(
-                1,
-                "multiple outputs cannot be taken from array indexing",
-            ));
-        }
-        let values = args
-            .iter()
-            .map(|a| self.expr(a, end))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(",");
-        if let Some((inputs, available)) = self.functions.get(name) {
-            if *inputs != args.len() {
-                return Err(error(1, format!("{name} expects {inputs} arguments")));
-            }
-            if outputs > *available {
-                return Err(error(
-                    1,
-                    format!("{name} supplies only {available} outputs"),
-                ));
-            }
-            Ok(format!("{{let args=vec![{values}];call_{name}(rt,args)?}}"))
-        } else if BUILTINS.contains(&name) {
-            Ok(format!("builtin({name:?},vec![{values}],{outputs})?"))
-        } else {
-            Err(error(1, format!("unsupported function '{name}'")))
-        }
-    }
-    fn returns(&self) -> String {
-        format!(
-            "Ok(vec![{}])",
-            self.outputs
-                .iter()
-                .map(|n| format!("get(&env,{n:?})?"))
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-    }
-    fn body(&mut self, body: &[Stmt], loop_depth: usize) -> Result<String, Error> {
-        let mut out = String::new();
-        for statement in body {
-            out.push_str("rt.tick()?;\n");
-            match statement {
-                Stmt::Assign(Target::Name(name), expr) => {
-                    let value = self.expr(expr, None)?;
-                    out.push_str(&format!(
-                        "{{let value={value};env.insert({name:?}.into(),value);}}\n"
-                    ));
-                }
-                Stmt::Assign(Target::Index(name, args), expr) => {
-                    let indices = self.indices(args, "indexed")?;
-                    let value = self.expr(expr, None)?;
-                    out.push_str(&format!("{{let value={value};let mut indexed=env.get({name:?}).cloned().unwrap_or_else(Value::empty);let indices=vec![{indices}];indexed.assign(&indices,&value)?;env.insert({name:?}.into(),indexed);}}\n"));
-                }
-                Stmt::Assign(Target::Many(names), expr) => {
-                    let Expr::Apply(name, args) = expr else {
-                        return Err(error(1, "multiple assignment requires a function call"));
-                    };
-                    let call = self.call(name, args, names.len(), None)?;
-                    out.push_str(&format!("{{let mut values=({call}).into_iter();"));
-                    for name in names {
-                        out.push_str(&format!("env.insert({name:?}.into(),values.next().ok_or_else(||\"missing function output\".to_string())?);"));
-                    }
-                    out.push_str("}\n");
-                }
-                Stmt::Call(Expr::Apply(name, args)) => {
-                    let call = self.call(name, args, 0, None)?;
-                    out.push_str(&format!("let _={call};\n"));
-                }
-                Stmt::Call(_) => unreachable!(),
-                Stmt::If(branches, other) => {
-                    for (i, (condition, body)) in branches.iter().enumerate() {
-                        let condition = self.expr(condition, None)?;
-                        out.push_str(&format!(
-                            "{}if ({condition}).truth()? {{\n{}}}",
-                            if i == 0 { "" } else { "else " },
-                            self.body(body, loop_depth)?
-                        ));
-                    }
-                    out.push_str(&format!("else{{\n{}}}\n", self.body(other, loop_depth)?));
-                }
-                Stmt::For(name, expr, body) => {
-                    self.serial += 1;
-                    let id = self.serial;
-                    let value = self.expr(expr, None)?;
-                    let body = self.body(body, loop_depth + 1)?;
-                    out.push_str(&format!("{{let values_{id}={value}; if values_{id}.cols==0||values_{id}.rows==0 {{env.insert({name:?}.into(),values_{id}.clone());}} else {{for column in values_{id}.columns() {{rt.tick()?;env.insert({name:?}.into(),column);{body}}}}}}}\n"));
-                }
-                Stmt::While(expr, body) => {
-                    let condition = self.expr(expr, None)?;
-                    let body = self.body(body, loop_depth + 1)?;
-                    out.push_str(&format!(
-                        "while ({condition}).truth()? {{rt.tick()?;{body}}}\n"
-                    ));
-                }
-                Stmt::Break | Stmt::Continue => {
-                    if loop_depth == 0 {
-                        return Err(error(1, "break/continue outside a loop"));
-                    }
-                    out.push_str(if matches!(statement, Stmt::Break) {
-                        "break;\n"
-                    } else {
-                        "continue;\n"
-                    });
-                }
-                Stmt::Return => {
-                    if !self.in_function {
-                        return Err(error(1, "return outside a function"));
-                    }
-                    out.push_str(&format!("return {};\n", self.returns()));
-                }
-            }
-        }
-        Ok(out)
-    }
-}
-/// Generate native Rust for real numeric/logical matrices and ASCII character arrays.
-/// The generated code contains the dependency-free runtime and executes no external code.
-pub fn transpile_arrays(source: &str, library: bool) -> Result<String, Error> {
-    let mut parser = Parser {
-        tokens: lex(source)?,
-        pos: 0,
-        depth: 0,
-    };
-    let script = parser.body()?;
-    let mut functions = Vec::new();
-    while parser.named("function") {
-        functions.push(parser.function()?);
-    }
-    if !matches!(parser.token(), Token::Eof) {
-        return Err(parser.fail("unexpected token after script/function definitions"));
-    }
-    if library && (!script.is_empty() || functions.is_empty()) {
-        return Err(error(
-            1,
-            "library mode requires functions and no script statements",
-        ));
-    }
-    let mut signatures = BTreeMap::new();
-    for function in &functions {
-        if BUILTINS.contains(&function.name.as_str()) {
-            return Err(error(1, "built-in function shadowing is unsupported"));
-        }
-        if signatures
-            .insert(
-                function.name.clone(),
-                (function.args.len(), function.outputs.len()),
-            )
-            .is_some()
-        {
-            return Err(error(1, "duplicate function definition"));
-        }
-    }
-    let mut out = String::from(
-        "// Generated by unlinked-matlab array frontend. Real 2D bounded subset.\n#![allow(dead_code,unused_variables,unused_mut,unused_imports,non_snake_case,unreachable_code)]\nmod unlinked_array_runtime {\n",
-    );
-    out.push_str(include_str!("array_runtime.rs"));
-    out.push_str("\n}\npub use unlinked_array_runtime::{Value,ValueKind,ArrayResult};\nuse unlinked_array_runtime::*;\n");
-    for function in &functions {
-        let mut vars = function.args.iter().cloned().collect();
-        assigned(&function.body, &mut vars);
-        for output in &function.outputs {
-            if !vars.contains(output) {
-                return Err(error(
-                    1,
-                    format!("function output '{output}' is never assigned"),
-                ));
-            }
-        }
-        let mut generator = Generator {
-            vars,
-            functions: &signatures,
-            outputs: &function.outputs,
-            serial: 0,
-            in_function: true,
-        };
-        let body = generator.body(&function.body, 0)?;
-        let returns = generator.returns();
-        let name = &function.name;
-        let arity = function.args.len();
-        out.push_str(&format!("pub fn f_{name}(args:Vec<Value>)->ArrayResult<Vec<Value>> {{call_{name}(&mut Runtime::default(),args)}}\nfn call_{name}(rt:&mut Runtime,args:Vec<Value>)->ArrayResult<Vec<Value>> {{rt.enter()?;let result=(||->ArrayResult<Vec<Value>>{{if args.len()!={arity} {{return Err(\"function argument count mismatch\".into());}}for arg in &args{{arg.validate()?;}}let mut env=Environment::new();let mut args=args.into_iter();\n"));
-        for arg in &function.args {
-            out.push_str(&format!(
-                "env.insert({arg:?}.into(),args.next().unwrap());\n"
-            ));
-        }
-        out.push_str(&format!("{body}{returns}\n}})();rt.leave();result}}\n"));
-    }
-    if !library {
-        let mut vars = BTreeSet::new();
-        assigned(&script, &mut vars);
-        let mut generator = Generator {
-            vars,
-            functions: &signatures,
-            outputs: &[],
-            serial: 0,
-            in_function: false,
-        };
-        let body = generator.body(&script, 0)?;
-        out.push_str(&format!("pub fn run_script()->ArrayResult<Environment>{{let mut runtime=Runtime::default();let rt=&mut runtime;let mut env=Environment::new();{body}Ok(env)}}\nfn main(){{if let Err(error)=run_script(){{eprintln!(\"MATLAB runtime error: {{error}}\");std::process::exit(1);}}}}\n"));
-    }
-    Ok(out)
-}
-
 /// Evaluate a pure scalar/array parameter expression against explicit values.
 /// File/process access, printing, script execution and user functions are unavailable.
 pub fn eval_array_expr(
