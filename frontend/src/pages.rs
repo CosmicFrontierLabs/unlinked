@@ -12,7 +12,7 @@ use shared::{
     Project, ProjectRole, UserInfo,
 };
 use std::rc::Rc;
-use unlinked_model::diff::{BlockChange, ModelDiff};
+use unlinked_model::diff::{BlockChange, ChartChange, ModelDiff};
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{Event, HtmlInputElement, HtmlSelectElement, InputEvent};
@@ -966,6 +966,23 @@ pub fn compare_page(props: &CompareProps) -> Html {
                                         <strong>{ format!("{place}{}", b.name.replace('\n', " ")) }</strong>
                                         <span class="muted">{ format!(" {}", b.block_type) }</span>
                                         <div>{ text }</div>
+                                    </li>
+                                }
+                            }) }
+                            { for d.charts.iter().map(|c| {
+                                let (class, what) = match c.change {
+                                    ChartChange::Added => ("added", "chart added".to_string()),
+                                    ChartChange::Removed => ("removed", "chart removed".to_string()),
+                                    ChartChange::Modified => ("modified", match &c.previous_name {
+                                        Some(old) => format!("chart changed (was {})", old.replace('\n', " ")),
+                                        None => "chart code, states, data or timing changed".to_string(),
+                                    }),
+                                };
+                                html! {
+                                    <li class={classes!("change", class)}>
+                                        <strong>{ c.name.replace('\n', " ") }</strong>
+                                        <span class="muted">{ " Stateflow / MATLAB Function" }</span>
+                                        <div>{ what }</div>
                                     </li>
                                 }
                             }) }
