@@ -20,7 +20,7 @@
       "name": "Calibrating_The_AR_Drone_Sensors_Model",
       "path": "ardrone/AR_Drone_Models/Calibration_Models/Calibrating_The_AR_Drone_Sensors_Model.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 1723: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 1723: MATLAB Function: line 5: bare expression display is unsupported; use disp(expression)",
       "systems": 3,
       "version": "R2016a"
     },
@@ -167,7 +167,7 @@
       "name": "DISCON_NREL5MW",
       "path": "discon/Simulink_64bit/DISCON_NREL5MW.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 7101: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 7101: MATLAB Function signature must match input ports and declare exactly one output",
       "systems": 14,
       "version": "R2018b"
     },
@@ -189,7 +189,7 @@
       "name": "can_decoder",
       "path": "icub/boards/amcbldc/messaging/can_decoder.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 231: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 245: only pure MATLAB Function charts are supported; Stateflow state charts are not executable",
       "systems": 6,
       "version": "R2026a"
     },
@@ -213,7 +213,7 @@
       "name": "can_encoder",
       "path": "icub/boards/amcbldc/messaging/can_encoder.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 11: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 86: MATLAB Function: line 1: unsupported pure function 'uint8'",
       "systems": 7,
       "version": "R2026a"
     },
@@ -230,7 +230,7 @@
       "name": "format_can_id",
       "path": "icub/boards/amcbldc/messaging/format_can_id.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 4: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 4: MATLAB Function: line 1: unsupported pure function 'uint16'",
       "systems": 2,
       "version": "R2025a"
     },
@@ -267,7 +267,7 @@
       "name": "control_foc",
       "path": "icub/boards/common/models/motion_control/control/control_foc.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 155: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 514: MATLAB Function: line 1: unsupported pure function 'wrapTo2Pi'",
       "systems": 12,
       "version": "R2025b"
     },
@@ -309,7 +309,7 @@
       "name": "supervisor",
       "path": "icub/boards/common/models/motion_control/supervision/supervisor.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 1: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 1: only pure MATLAB Function charts are supported; Stateflow state charts are not executable",
       "systems": 2,
       "version": "R2026a"
     },
@@ -418,7 +418,7 @@
       "name": "spherical_wrist",
       "path": "icub/wrist_mk2_1/spherical_wrist.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 1535: conditional or physical subsystems are unsupported",
+      "simulation_compile_error": "block 1364: MATLAB Function chart requires an unmasked, unconditional MATLAB Function subsystem",
       "systems": 90,
       "version": "R2024b"
     },
@@ -646,7 +646,7 @@
       "name": "rovSim_trj",
       "path": "uuv/extra/rovSim_trj.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 121: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 121: MATLAB Function: line 14: bare expression display is unsupported; use disp(expression)",
       "systems": 5,
       "version": "R2017a"
     },
@@ -672,7 +672,7 @@
       "name": "rovSim_los",
       "path": "uuv/models/rovSim_los.slx",
       "render_errors": [],
-      "simulation_compile_error": "block 99: only unmasked virtual subsystems can be flattened",
+      "simulation_compile_error": "block 99: MATLAB Function: line 12: bare expression display is unsupported; use disp(expression)",
       "systems": 6,
       "version": "R2017a"
     },
@@ -733,6 +733,13 @@
         "synthetic/constant_gain_sum_integrator.mdl"
       ],
       "result": "Analytic fixture matches y=1+10*t within 1e-9."
+    }
+  ],
+  "isolated_block_scenarios": [
+    {
+      "model": "uuv/models/rovSim_los.slx",
+      "chart": "PID Control/ud",
+      "result": "Original imported scalar MATLAB Function executed with explicit inputs and checked against its piecewise formula. Full enclosing model is not executed."
     }
   ]
 }
