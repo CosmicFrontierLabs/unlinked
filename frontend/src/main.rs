@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod diagram;
+mod editor;
 mod fetch;
 mod local_viewer;
 mod pages;
