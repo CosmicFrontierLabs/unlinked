@@ -105,7 +105,7 @@ fn corpus_models_import() {
 /// why the ratio is not close to 1.
 fn orthogonality(sys: &System, aligned: &mut usize, total: &mut usize) {
     use unlinked_model::geometry::port_anchor;
-    use unlinked_model::{Branch, Endpoint, Point};
+    use unlinked_model::{Branch, Endpoint, Point, PortKind};
     fn check(
         sys: &System,
         last: Option<Point>,
@@ -119,6 +119,10 @@ fn orthogonality(sys: &System, aligned: &mut usize, total: &mut usize) {
         let Some(b) = sys.block(&dst.block) else {
             return;
         };
+        // Physical connection trees are undirected; only check signal lines.
+        if matches!(dst.port.kind, PortKind::LConn | PortKind::RConn) {
+            return;
+        }
         let a = port_anchor(b, dst.port);
         *total += 1;
         if (a.x - last.x).abs() < 1.5 || (a.y - last.y).abs() < 1.5 {
