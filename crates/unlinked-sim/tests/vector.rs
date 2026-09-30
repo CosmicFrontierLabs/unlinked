@@ -41,6 +41,7 @@ fn line(source: &str, output: u32, target: &str, input: u32) -> Line {
 }
 fn model(blocks: Vec<Block>, lines: Vec<Line>) -> Model {
     Model {
+        charts: Vec::new(),
         name: "vectors".into(),
         source: SourceFormat::Mdl,
         simulink_version: None,
