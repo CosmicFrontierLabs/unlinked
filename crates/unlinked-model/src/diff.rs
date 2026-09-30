@@ -127,10 +127,16 @@ fn keyed(sys: &System) -> (BTreeMap<String, &Block>, BTreeMap<&BlockId, String>)
     (by_key, key_of)
 }
 
-fn map_diff(old: &BTreeMap<String, String>, new: &BTreeMap<String, String>) -> Vec<Change> {
+/// Keys whose values differ. `ignored` names are skipped (editor noise in
+/// block parameters; nothing for workspace or configuration maps).
+fn map_diff(
+    old: &BTreeMap<String, String>,
+    new: &BTreeMap<String, String>,
+    ignored: &[&str],
+) -> Vec<Change> {
     let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
     keys.into_iter()
-        .filter(|k| !IGNORED_PARAMETERS.contains(&k.as_str()))
+        .filter(|k| !ignored.contains(&k.as_str()))
         .filter_map(|k| {
             let (a, b) = (old.get(k), new.get(k));
             (a != b).then(|| (k.clone(), a.cloned(), b.cloned()))
@@ -149,7 +155,7 @@ fn compare_block(old: &Block, new: &Block) -> Modification {
         appearance_changed: old.orientation != new.orientation
             || old.mirrored != new.mirrored
             || old.style != new.style,
-        parameters: map_diff(&old.parameters, &new.parameters),
+        parameters: map_diff(&old.parameters, &new.parameters, IGNORED_PARAMETERS),
         mask_changed: old.mask != new.mask,
         ports_changed: old.ports != new.ports,
         library_changed: (old.library_source != new.library_source)
@@ -239,8 +245,8 @@ fn diff_system(old: &System, new: &System, path: &[String], out: &mut ModelDiff)
 pub fn diff(old: &Model, new: &Model) -> ModelDiff {
     let mut out = ModelDiff::default();
     diff_system(&old.root, &new.root, &[], &mut out);
-    out.config = map_diff(&config_map(old), &config_map(new));
-    out.workspace = map_diff(&old.workspace, &new.workspace);
+    out.config = map_diff(&config_map(old), &config_map(new), &[]);
+    out.workspace = map_diff(&old.workspace, &new.workspace, &[]);
     out
 }
 
@@ -447,6 +453,15 @@ mod tests {
             }),
         );
         assert!(d.systems.is_empty(), "{:?}", d.systems);
+    }
+
+    #[test]
+    fn workspace_names_are_never_filtered() {
+        let old = model(System::default());
+        let mut new = old.clone();
+        new.workspace.insert("ZOrder".into(), "3".into());
+        let d = diff(&old, &new);
+        assert_eq!(d.workspace, vec![("ZOrder".into(), None, Some("3".into()))]);
     }
 
     #[test]

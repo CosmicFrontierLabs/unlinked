@@ -929,7 +929,7 @@ pub fn compare_page(props: &CompareProps) -> Html {
                 </div>
                 <div class="file-body">
                     <div class="file-main">
-                        <DiagramView model={c.model.clone()} diff={Some(c.diff.clone())} />
+                        <DiagramView key={format!("{old}-{new}")} model={c.model.clone()} diff={Some(c.diff.clone())} />
                     </div>
                     <aside class="history changes">
                         <h4>{ "Changes" }</h4>
