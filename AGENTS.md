@@ -47,3 +47,31 @@ let app = Router::new()
 ```
 
 Note: memory-serve 2.x requires axum 0.8+. For axum 0.7, use memory-serve 0.6.0 (older `load_assets!` macro API).
+
+## Backend Patterns
+
+- **Authorization goes through one place.** Handlers take `session::CurrentUser`
+  (any signed-in user), `access::OrgAccess` (`:org_id` path segment) or
+  `access::ProjectAccess` (`:project_id`), then call `.require(min_role)`.
+  No role on a resource answers 404, never 403; `require` failing answers 403.
+  Effective project roles come only from `access::effective_project_role`
+  (org owner/admin => Owner, else explicit membership, else org default role).
+  Scope every child-resource query (files, versions, members) by the parent id
+  from the access struct.
+- **Blocking DB work** runs via `state.db(move |conn| ...)` (spawn_blocking
+  with a pooled connection); errors are `error::ApiError` (diesel `NotFound`
+  => 404, unique violation => 409).
+- **CSRF:** `origin::require_same_origin` rejects unsafe methods whose
+  `Origin`/`Referer` is not `PUBLIC_URL` (dev mode also allows localhost).
+  There is deliberately no CORS layer. WebSocket routes must authenticate with
+  `session::WsUser` or the `session::require_ws_user` route layer, which also
+  require a same-origin `Origin`.
+- **Mutations write an audit entry** with `audit::record` inside the same
+  transaction.
+- **Tests:** `test_support` builds states/clients. DB-backed tests start with
+  `let Some((state, app)) = db_app() else { return };` so they skip without
+  `DATABASE_URL`. Run them locally with
+  `docker run -d --name unlinked-pg-test -e POSTGRES_PASSWORD=pw -e POSTGRES_USER=unlinked -e POSTGRES_DB=unlinked -p 55432:5432 postgres:16-alpine`
+  and `DATABASE_URL=postgres://unlinked:pw@localhost:55432/unlinked cargo test -p backend`.
+- Regenerate `backend/src/schema.rs` with `diesel print-schema` after adding a
+  migration; name migrations `YYYY-MM-DD-HHMMSS_snake_case`.
