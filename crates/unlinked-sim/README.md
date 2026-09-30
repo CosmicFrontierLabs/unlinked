@@ -8,7 +8,8 @@ IDs mapped to scalar sample vectors, and the selected solver.
 
 Implemented: Constant/Ground, Clock, Step, time-based Sine, Gain, Bias, Sum/Add,
 Product/division, Saturation, Integrator, UnitDelay, Abs, scalar trigonometric
-and math operations, and single-input sinks. Raw block parameters and model
+and math operations, and single-input sinks. Ordinary virtual subsystems lower
+to identity boundary nodes with qualified block IDs. Raw block parameters and model
 workspace expressions use `unlinked-matlab::eval_expr`. Workspace dependencies
 resolve iteratively; unresolved/cyclic references fail.
 
@@ -22,10 +23,10 @@ interval. Time is in seconds, sine frequency is radians/second.
 Options explicitly override imported solver configuration. This is a supported
 subset, not a claim of general Simulink numerical equivalence. It rejects
 algebraic loops, missing/multiple drivers, non-finite signals, unknown block
-types, subsystems, masks, library links, matrices/vectors, integer types,
+types, atomic/conditional subsystems, masks, library links, matrices/vectors, integer types,
 external resets and multirate sampling. Root Inports require explicit sources
 and currently reject. UnitDelay sample time must be inherited or equal to the
-requested step. Workspace names overriding built-in constants reject to avoid
+requested step; the stop time must lie on its sampling grid. Workspace names overriding built-in constants reject to avoid
 ambiguous dependency ordering. Scope and ToWorkspace values appear in the
 trace; these blocks do not produce external files.
 

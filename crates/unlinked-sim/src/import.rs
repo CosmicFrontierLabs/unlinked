@@ -27,10 +27,13 @@ fn require(block: &Block, key: &str, allowed: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Compile the root system. Library links, masked blocks, subsystems, non-scalar
+/// Compile the root system, lowering ordinary virtual subsystems. Library links,
+/// masked/atomic/conditional subsystems, non-scalar
 /// signals, and unimplemented block semantics produce diagnostics.
 /// Workspace expressions are evaluated as scalar math, never as MATLAB scripts.
 pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
+    let flattened = super::flatten::flatten(model)?;
+    let model = &flattened;
     let mut ws = BTreeMap::new();
     for key in model.workspace.keys() {
         if ["pi", "Inf", "NaN", "true", "false"].contains(&key.as_str()) {

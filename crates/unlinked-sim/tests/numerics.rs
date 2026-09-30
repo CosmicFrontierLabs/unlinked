@@ -181,3 +181,66 @@ fn decimal_step_boundary_does_not_integrate_future_value() {
     assert!((t.signals["int"].last().unwrap() - 0.7).abs() < 1e-12);
     assert_eq!(t.signals["int"][3], 0.0);
 }
+
+#[test]
+fn accepted_transition_tolerance_is_consistent_across_stages() {
+    let g = Graph {
+        nodes: vec![
+            node(
+                "step",
+                Kind::Step {
+                    time: 0.30000000005,
+                    before: 0.0,
+                    after: 1.0,
+                },
+            ),
+            node("int", Kind::Integrator { initial: 0.0 }),
+        ],
+        wires: vec![wire("step", "int", 0)],
+    };
+    let t = simulate(
+        &g,
+        &Options {
+            stop: 1.0,
+            step: 0.1,
+            ..options()
+        },
+    )
+    .unwrap();
+    assert!((t.signals["int"].last().unwrap() - 0.7).abs() < 1e-12);
+    assert_eq!(t.signals["step"][3], 1.0);
+}
+#[test]
+fn discrete_delays_reject_off_grid_final_sample() {
+    let g = Graph {
+        nodes: vec![node("x", Kind::UnitDelay { initial: 1.0 })],
+        wires: vec![wire("x", "x", 0)],
+    };
+    assert!(simulate(
+        &g,
+        &Options {
+            stop: 1.05,
+            step: 0.1,
+            ..options()
+        }
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("stop time"));
+}
+
+#[test]
+fn decimal_stop_time_does_not_add_duplicate_sample() {
+    let t = simulate(
+        &Graph::default(),
+        &Options {
+            stop: 0.14,
+            step: 0.01,
+            ..options()
+        },
+    )
+    .unwrap();
+    assert_eq!(t.time.len(), 15);
+    assert_eq!(*t.time.last().unwrap(), 0.14);
+    assert!(t.time.windows(2).all(|x| x[0] < x[1]));
+}

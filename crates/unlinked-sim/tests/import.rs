@@ -101,3 +101,43 @@ fn rejects_multirate_and_off_grid_steps() {
     m.root.blocks[0] = block("c", "Step", &[("Time", "0.305")]);
     assert!(compile(&m, &Options::default()).is_err());
 }
+
+#[test]
+fn virtual_subsystem_interfaces_are_lowered() {
+    let mut m = model();
+    let mut sub = block("sub", "SubSystem", &[]);
+    let ep = |id: &str, kind, index| Endpoint {
+        block: id.into(),
+        port: PortRef { kind, index },
+    };
+    let line = |a: &str, b: &str| Line {
+        src: Some(ep(a, PortKind::Out, 1)),
+        dst: Some(ep(b, PortKind::In, 1)),
+        ..Line::default()
+    };
+    sub.subsystem = Some(Box::new(System {
+        blocks: vec![
+            block("in", "Inport", &[]),
+            block("gain", "Gain", &[("Gain", "4")]),
+            block("out", "Outport", &[]),
+        ],
+        lines: vec![line("in", "gain"), line("gain", "out")],
+        ..System::default()
+    }));
+    m.root.blocks.insert(1, sub);
+    m.root.lines = vec![line("c", "sub"), line("sub", "g")];
+    let t = simulate_model(
+        &m,
+        &Options {
+            stop: 0.0,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(t.signals["g"], vec![24.0]);
+    assert_eq!(t.signals["sub/out"], vec![12.0]);
+    m.root.blocks[1]
+        .parameters
+        .insert("TreatAsAtomicUnit".into(), "on".into());
+    assert!(compile(&m, &Options::default()).is_err());
+}

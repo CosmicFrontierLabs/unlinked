@@ -233,32 +233,45 @@ impl<'a> Compiled<'a> {
             .enumerate()
             .filter_map(|(i, n)| n.kind.is_state().then_some(i))
             .collect();
-        let mut ready: BTreeSet<usize> = states.iter().copied().collect();
-        let mut order = vec![];
-        // A state output breaks direct feedthrough, but its input is still validated above.
-        loop {
-            let before = ready.len();
-            for (i, input) in inputs.iter().enumerate() {
-                if !ready.contains(&i) && input.iter().all(|j| ready.contains(j)) {
-                    ready.insert(i);
-                    order.push(i);
+        let mut dependents = vec![vec![]; graph.nodes.len()];
+        let mut remaining = vec![0; graph.nodes.len()];
+        let mut ready = BTreeSet::new();
+        for (i, node) in graph.nodes.iter().enumerate() {
+            if !node.kind.is_state() {
+                remaining[i] = inputs[i].len();
+                for &source in &inputs[i] {
+                    dependents[source].push(i);
                 }
             }
-            if ready.len() == graph.nodes.len() {
-                break;
+            if remaining[i] == 0 {
+                ready.insert(i);
             }
-            if ready.len() == before {
-                return Err(Error::AlgebraicLoop(
-                    graph
-                        .nodes
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| !ready.contains(i))
-                        .map(|(_, n)| n.id.clone())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ));
+        }
+        let mut order = vec![];
+        let mut visited = 0;
+        while let Some(i) = ready.pop_first() {
+            visited += 1;
+            if !graph.nodes[i].kind.is_state() {
+                order.push(i);
             }
+            for &target in &dependents[i] {
+                remaining[target] -= 1;
+                if remaining[target] == 0 {
+                    ready.insert(target);
+                }
+            }
+        }
+        if visited != graph.nodes.len() {
+            return Err(Error::AlgebraicLoop(
+                graph
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| remaining[*i] > 0)
+                    .map(|(_, n)| n.id.clone())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
         }
         Ok(Self {
             graph,
@@ -357,13 +370,34 @@ pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
             "require finite start <= stop and positive finite step".into(),
         ));
     }
-    let intervals = ((o.stop - o.start) / o.step).ceil();
+    let ticks = (o.stop - o.start) / o.step;
+    let near_integer = (ticks - ticks.round()).abs() <= 8.0 * f64::EPSILON * ticks.abs().max(1.0);
+    let intervals = if near_integer {
+        ticks.round()
+    } else {
+        ticks.ceil()
+    };
     if !intervals.is_finite() || intervals >= o.max_samples as f64 || o.max_samples > 1_000_001 {
         return Err(Error::Options(
             "sample budget exceeded (hard limit 1,000,001)".into(),
         ));
     }
     let count = intervals as usize + 1;
+    if graph.nodes.len() > 100_000 || graph.wires.len() > 1_000_000 {
+        return Err(Error::Options("graph budget exceeded".into()));
+    }
+    if graph
+        .nodes
+        .iter()
+        .any(|n| matches!(n.kind, Kind::UnitDelay { .. }))
+    {
+        let ticks = (o.stop - o.start) / o.step;
+        if (ticks - ticks.round()).abs() > 1e-9 {
+            return Err(Error::Options(
+                "UnitDelay requires stop time on the fixed-step grid".into(),
+            ));
+        }
+    }
     if graph.nodes.len().saturating_mul(count) > 10_000_000 {
         return Err(Error::Options(
             "signal output budget exceeded (10 million values)".into(),
@@ -380,6 +414,17 @@ pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
             }
         }
     }
+    // Accepted decimal transition times are snapped to the same grid used for
+    // samples; validation tolerance must not create inconsistent stage values.
+    let mut normalized = graph.clone();
+    for node in &mut normalized.nodes {
+        if let Kind::Step { time, .. } = &mut node.kind {
+            if *time >= o.start && *time <= o.stop {
+                *time = o.start + ((*time - o.start) / o.step).round() * o.step;
+            }
+        }
+    }
+    let graph = &normalized;
     let compiled = Compiled::new(graph)?;
     let mut state: Vec<f64> = compiled
         .states
@@ -399,7 +444,11 @@ pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
         solver: o.solver,
     };
     for sample in 0..count {
-        let t = (o.start + sample as f64 * o.step).min(o.stop);
+        let t = if sample + 1 == count {
+            o.stop
+        } else {
+            (o.start + sample as f64 * o.step).min(o.stop)
+        };
         let values = compiled.evaluate(t, &state)?;
         trace.time.push(t);
         for (i, node) in graph.nodes.iter().enumerate() {
@@ -463,5 +512,6 @@ pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
     Ok(trace)
 }
 
+mod flatten;
 mod import;
 pub use import::{compile, simulate_model};
