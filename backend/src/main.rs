@@ -11,6 +11,7 @@ mod oauth;
 mod origin;
 mod schema;
 mod session;
+mod sim_worker;
 #[cfg(test)]
 mod test_support;
 
@@ -156,6 +157,11 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/health", get(handlers::health::health))
         .merge(api_routes())
+        .merge(handlers::simulations::routes())
+        .route(
+            shared::SimulationSocket::PATH,
+            get(handlers::simulation_socket::handler),
+        )
         .with_state(state.clone())
         .route(
             shared::AppSocket::PATH,
