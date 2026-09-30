@@ -627,3 +627,28 @@ button:disabled {
 .plot-host canvas {
     border-radius: 6px;
 }
+
+/* Scope settings in the inspector */
+.inspector table.scope {
+    margin-bottom: 0.5rem;
+}
+
+.inspector table.scope th {
+    color: var(--muted);
+    font-weight: normal;
+}
+
+.inspector details.raw {
+    margin-top: 1rem;
+}
+
+.inspector details.raw summary {
+    cursor: pointer;
+    color: var(--muted);
+}
+
+.inspector details.raw pre {
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 0.75rem;
+}

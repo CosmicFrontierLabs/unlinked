@@ -4,6 +4,7 @@
 //! sibling checkout of the workspace. The test is skipped when absent.
 
 use std::path::{Path, PathBuf};
+use unlinked_model::scope::ScopeConfig;
 use unlinked_model::stateflow::split_path;
 use unlinked_model::{ChartKind, DataScope, Model, System};
 
@@ -276,4 +277,42 @@ fn corpus_line_routing_is_orthogonal() {
         ratio > 0.65,
         "port geometry disagrees with stored routing: {ratio:.3}"
     );
+}
+
+/// Every Scope block's configuration is readable, and every specification
+/// that saves display settings yields at least one display.
+#[test]
+fn corpus_scope_configs_parse() {
+    let Some(dir) = corpus_dir() else { return };
+    let mut files = Vec::new();
+    models(&dir, &mut files);
+    let mut problems = Vec::new();
+    let mut specs = 0;
+    for f in &files {
+        let rel = f.strip_prefix(&dir).unwrap().display().to_string();
+        let bytes = std::fs::read(f).unwrap();
+        let Ok(model) = unlinked_import::import(&rel, &bytes) else {
+            continue;
+        };
+        for (path, sys) in model.walk() {
+            for b in &sys.blocks {
+                match ScopeConfig::from_block(b) {
+                    None => {}
+                    Some(Err(e)) => problems.push(format!("{rel}: {path}/{}: {e}", b.name)),
+                    Some(Ok(cfg)) if b.param("ScopeSpecificationString").is_some() => {
+                        specs += 1;
+                        let saved = b
+                            .param("ScopeSpecificationString")
+                            .is_some_and(|s| s.contains("SerializedDisplays"));
+                        if saved && cfg.displays.is_empty() {
+                            problems.push(format!("{rel}: {path}/{}: no displays", b.name));
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert!(specs > 0, "corpus has scope specifications");
 }
