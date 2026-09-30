@@ -32,17 +32,23 @@ fn period_ticks(
     options: &Options,
     ws: &BTreeMap<String, f64>,
 ) -> Result<usize, Error> {
+    let random = matches!(
+        block.block_type.as_str(),
+        "RandomNumber" | "UniformRandomNumber"
+    );
     let value = parameter(
         block,
         "SampleTime",
-        if block.block_type == "DigitalClock" {
+        if random {
+            "0.1"
+        } else if matches!(block.block_type.as_str(), "DigitalClock" | "ZeroOrderHold") {
             "1"
         } else {
             "-1"
         },
         ws,
     )?;
-    if value == -1.0 && block.block_type != "DigitalClock" {
+    if value == -1.0 && block.block_type != "DigitalClock" && !random {
         return Ok(1);
     }
     let ticks = value / options.step;
@@ -101,11 +107,27 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
     for block in &model.root.blocks {
         if matches!(
             block.block_type.as_str(),
-            "UnitDelay" | "DiscreteTransferFcn" | "DigitalClock"
+            "UnitDelay"
+                | "DiscreteTransferFcn"
+                | "DigitalClock"
+                | "ZeroOrderHold"
+                | "RandomNumber"
+                | "UniformRandomNumber"
         ) {
             has_multirate |= period_ticks(block, options, &ws)? > 1;
-            if block.block_type != "DigitalClock"
-                && parameter(block, "SampleTime", "-1", &ws)? == -1.0
+            if matches!(
+                block.block_type.as_str(),
+                "UnitDelay" | "DiscreteTransferFcn" | "ZeroOrderHold"
+            ) && parameter(
+                block,
+                "SampleTime",
+                if block.block_type == "ZeroOrderHold" {
+                    "1"
+                } else {
+                    "-1"
+                },
+                &ws,
+            )? == -1.0
             {
                 inherited_discrete.get_or_insert(block.id.0.clone());
             }
@@ -170,7 +192,12 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         let p = |key, default| parameter(block, key, default, &ws);
         let discrete = matches!(
             block.block_type.as_str(),
-            "UnitDelay" | "DiscreteTransferFcn" | "DigitalClock"
+            "UnitDelay"
+                | "DiscreteTransferFcn"
+                | "DigitalClock"
+                | "ZeroOrderHold"
+                | "RandomNumber"
+                | "UniformRandomNumber"
         );
         let period = if discrete {
             period_ticks(block, options, &ws)?
@@ -311,6 +338,27 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     bias: p("Bias", "0")?,
                 }
             }
+            "RandomNumber" | "UniformRandomNumber" => {
+                let seed = p("Seed", "0")?;
+                if seed.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&seed) {
+                    return Err(block_error(id, "Seed must be an integer in 0..=4294967295"));
+                }
+                if block.block_type == "RandomNumber" {
+                    Kind::RandomNumber {
+                        mean: p("Mean", "0")?,
+                        variance: p("Variance", "1")?,
+                        seed: seed as u32,
+                        period_ticks: period,
+                    }
+                } else {
+                    Kind::UniformRandomNumber {
+                        minimum: p("Minimum", "-1")?,
+                        maximum: p("Maximum", "1")?,
+                        seed: seed as u32,
+                        period_ticks: period,
+                    }
+                }
+            }
             "Gain" => {
                 require(block, "Multiplication", &["Element-wise(K.*u)"])?;
                 Kind::Gain {
@@ -378,6 +426,9 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     initial: p("InitialCondition", "0")?,
                 }
             }
+            "ZeroOrderHold" => Kind::SampleHold {
+                period_ticks: period,
+            },
             "UnitDelay" => Kind::RateDelay {
                 initial: p("InitialCondition", "0")?,
                 period_ticks: period,

@@ -115,6 +115,20 @@ pub enum Kind {
     SampleHold {
         period_ticks: usize,
     },
+    /// Seeded Gaussian samples held between discrete hits. Sequence is Unlinked-specific.
+    RandomNumber {
+        mean: f64,
+        variance: f64,
+        seed: u32,
+        period_ticks: usize,
+    },
+    /// Seeded uniform samples held between discrete hits. Sequence is Unlinked-specific.
+    UniformRandomNumber {
+        minimum: f64,
+        maximum: f64,
+        seed: u32,
+        period_ticks: usize,
+    },
     /// Scalar numeric switch. All three inputs are evaluated; no lazy branch execution.
     Switch,
     Relational {
@@ -142,7 +156,9 @@ impl Kind {
             | Self::Step { .. }
             | Self::Sine { .. }
             | Self::Clock
-            | Self::DigitalClock { .. } => 0,
+            | Self::DigitalClock { .. }
+            | Self::RandomNumber { .. }
+            | Self::UniformRandomNumber { .. } => 0,
             Self::Switch => 3,
             Self::Relational { .. } => 2,
             Self::Logic { inputs, .. } | Self::MatlabFunction { inputs, .. } => *inputs,
@@ -159,6 +175,8 @@ impl Kind {
                 | Self::RateDelay { .. }
                 | Self::DigitalClock { .. }
                 | Self::SampleHold { .. }
+                | Self::RandomNumber { .. }
+                | Self::UniformRandomNumber { .. }
         )
     }
     fn direct_feedthrough(&self) -> bool {
@@ -169,7 +187,9 @@ impl Kind {
             Self::UnitDelay { .. } => Some(1),
             Self::RateDelay { period_ticks, .. }
             | Self::DigitalClock { period_ticks }
-            | Self::SampleHold { period_ticks } => Some(*period_ticks),
+            | Self::SampleHold { period_ticks }
+            | Self::RandomNumber { period_ticks, .. }
+            | Self::UniformRandomNumber { period_ticks, .. } => Some(*period_ticks),
             _ => None,
         }
     }
@@ -245,6 +265,20 @@ impl<'a> Compiled<'a> {
                         return Err(block_error(&node.id, "lower limit exceeds upper limit"));
                     }
                     vec![*lower, *upper]
+                }
+                Kind::RandomNumber { mean, variance, .. } => {
+                    if *variance < 0.0 {
+                        return Err(block_error(&node.id, "Variance must be nonnegative"));
+                    }
+                    vec![*mean, *variance]
+                }
+                Kind::UniformRandomNumber {
+                    minimum, maximum, ..
+                } => {
+                    if minimum >= maximum {
+                        return Err(block_error(&node.id, "Minimum must be less than Maximum"));
+                    }
+                    vec![*minimum, *maximum]
                 }
                 Kind::Integrator { initial }
                 | Kind::UnitDelay { initial }
@@ -481,7 +515,9 @@ impl<'a> Compiled<'a> {
                 Kind::Integrator { .. }
                 | Kind::UnitDelay { .. }
                 | Kind::RateDelay { .. }
-                | Kind::DigitalClock { .. } => unreachable!(),
+                | Kind::DigitalClock { .. }
+                | Kind::RandomNumber { .. }
+                | Kind::UniformRandomNumber { .. } => unreachable!(),
             };
             if !value.is_finite() {
                 return Err(block_error(
@@ -632,7 +668,10 @@ pub fn simulate_with_observer_and_budget(
             Kind::Integrator { initial }
             | Kind::UnitDelay { initial }
             | Kind::RateDelay { initial, .. } => initial,
-            Kind::DigitalClock { .. } | Kind::SampleHold { .. } => 0.0,
+            Kind::DigitalClock { .. }
+            | Kind::SampleHold { .. }
+            | Kind::RandomNumber { .. }
+            | Kind::UniformRandomNumber { .. } => 0.0,
             _ => unreachable!(),
         })
         .collect();
@@ -645,6 +684,16 @@ pub fn simulate_with_observer_and_budget(
             .collect(),
         solver: o.solver,
     };
+    let mut random: Vec<Option<random::Generator>> = compiled
+        .states
+        .iter()
+        .map(|&i| match graph.nodes[i].kind {
+            Kind::RandomNumber { seed, .. } | Kind::UniformRandomNumber { seed, .. } => {
+                Some(random::Generator::new(seed))
+            }
+            _ => None,
+        })
+        .collect();
     let mut pending = state.clone();
     let mut adaptive = adaptive::Adaptive::new(o.step);
     for sample in 0..count {
@@ -658,6 +707,23 @@ pub fn simulate_with_observer_and_budget(
                 Kind::DigitalClock { period_ticks } if sample % period_ticks == 0 => {
                     state[slot] = t
                 }
+                Kind::RandomNumber {
+                    mean,
+                    variance,
+                    period_ticks,
+                    ..
+                } if sample % period_ticks == 0 => {
+                    state[slot] = mean + variance.sqrt() * random[slot].as_mut().unwrap().normal();
+                }
+                Kind::UniformRandomNumber {
+                    minimum,
+                    maximum,
+                    period_ticks,
+                    ..
+                } if sample % period_ticks == 0 => {
+                    let u = random[slot].as_mut().unwrap().uniform();
+                    state[slot] = (1.0 - u) * minimum + u * maximum;
+                }
                 Kind::UnitDelay { .. } if sample > 0 => state[slot] = pending[slot],
                 Kind::RateDelay { period_ticks, .. }
                     if sample > 0 && sample % period_ticks == 0 =>
@@ -665,6 +731,14 @@ pub fn simulate_with_observer_and_budget(
                     state[slot] = pending[slot]
                 }
                 _ => {}
+            }
+        }
+        for (slot, &node) in compiled.states.iter().enumerate() {
+            if !state[slot].is_finite() {
+                return Err(block_error(
+                    &graph.nodes[node].id,
+                    format!("non-finite state at time {t}"),
+                ));
             }
         }
         let values = compiled.evaluate_sample(t, &state, false, Some(sample))?;
@@ -758,7 +832,11 @@ mod flatten;
 mod import;
 mod inputs;
 mod matlab_function;
-pub use inputs::{compile_with_inputs, evaluate_inputs, simulate_model_with_inputs, InputValues};
+mod random;
+pub use inputs::{
+    compile_with_inputs, evaluate_inputs, evaluate_inputs_with_budget, simulate_model_with_inputs,
+    InputValues,
+};
 mod state_space;
 mod transfer;
 mod vector;

@@ -66,6 +66,7 @@ impl Shape {
 #[derive(Clone)]
 enum Operation {
     Source,
+    RandomSource,
     Elementwise,
     State,
     Gain {
@@ -260,6 +261,7 @@ fn describe(
     let mut values = BTreeMap::new();
     let (operation, inputs, vector_parameter) = match block.block_type.as_str() {
         "Constant" => (Operation::Source, 0, Some(("Value", "1"))),
+        "RandomNumber" | "UniformRandomNumber" => (Operation::RandomSource, 0, None),
         "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" => (Operation::Source, 0, None),
         "Gain" => {
             let matrix = match block
@@ -416,7 +418,9 @@ fn describe(
         }
         "TransferFcn" | "DiscreteTransferFcn" | "StateSpace" => (Operation::Transfer, 1, None),
         "Bias" | "Saturate" | "Saturation" | "Abs" | "Trigonometry" | "Math" | "Scope"
-        | "Display" | "Outport" | "Terminator" | "ToWorkspace" => (Operation::Elementwise, 1, None),
+        | "Display" | "Outport" | "Terminator" | "ToWorkspace" | "ZeroOrderHold" => {
+            (Operation::Elementwise, 1, None)
+        }
         other => return Err(block_error(id, format!("unsupported block type {other}"))),
     };
     if !matches!(operation, Operation::Demux { .. }) && block.ports.outputs > 1 {
@@ -436,6 +440,25 @@ fn describe(
                 budget,
             )?,
         );
+    }
+    if matches!(operation, Operation::RandomSource) {
+        let parameters: &[(&str, &str)] = if block.block_type == "RandomNumber" {
+            &[("Mean", "0"), ("Variance", "1"), ("Seed", "0")]
+        } else {
+            &[("Minimum", "-1"), ("Maximum", "1"), ("Seed", "0")]
+        };
+        for &(key, default) in parameters {
+            values.insert(
+                key.into(),
+                eval(
+                    block,
+                    key,
+                    block.param(key).unwrap_or(default),
+                    workspace,
+                    budget,
+                )?,
+            );
+        }
     }
     let numeric: &[(&str, &str)] = match block.block_type.as_str() {
         "Step" => &[("Time", "1"), ("Before", "0"), ("After", "1")],
@@ -573,6 +596,15 @@ fn infer(
                 .map(|v| Shape::from_value(v, block.param("VectorParams1D") != Some("off")))
                 .unwrap_or(Shape::SCALAR),
         ),
+        Operation::RandomSource => broadcast(
+            id,
+            spec.values.values().map(|value| {
+                Some(Shape::from_value(
+                    value,
+                    block.param("VectorParams1D") != Some("off"),
+                ))
+            }),
+        )?,
         Operation::State => broadcast(
             id,
             [
