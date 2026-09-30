@@ -1,19 +1,310 @@
-body {
-    font-family: sans-serif;
+/* Tokyo Night */
+:root {
+    --bg: #1a1b26;
+    --bg-alt: #16161e;
+    --panel: #24283b;
+    --border: #3b4261;
+    --fg: #c0caf5;
+    --muted: #565f89;
+    --blue: #7aa2f7;
+    --green: #9ece6a;
+    --red: #f7768e;
+    --orange: #ff9e64;
+    --purple: #bb9af7;
+    --teal: #7dcfff;
+    --topbar: 44px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html, body {
     margin: 0;
-    padding: 2rem;
-    background: #1a1a2e;
-    color: #eee;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-size: 14px;
 }
 
-h1 {
-    color: #e94560;
+a {
+    color: var(--blue);
+    text-decoration: none;
+    cursor: pointer;
 }
 
-.status {
-    padding: 0.5rem 1rem;
-    background: #16213e;
-    border-radius: 4px;
+a:hover {
+    text-decoration: underline;
+}
+
+.topbar {
+    height: var(--topbar);
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 0 1rem;
+    background: var(--bg-alt);
+    border-bottom: 1px solid var(--border);
+}
+
+.topbar .brand {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--fg);
+}
+
+.topbar nav {
+    display: flex;
+    gap: 1rem;
+    flex: 1;
+}
+
+.topbar .user {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+main {
+    height: calc(100% - var(--topbar));
+}
+
+.page {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+}
+
+.page-fill {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.lead {
+    font-size: 1.15rem;
+}
+
+.muted {
+    color: var(--muted);
+}
+
+.error {
+    color: var(--red);
+    white-space: pre-wrap;
+}
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 1rem;
+    margin-top: 2rem;
+}
+
+.card {
+    display: block;
+    padding: 1rem 1.25rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--fg);
+}
+
+.card:hover {
+    border-color: var(--blue);
+    text-decoration: none;
+}
+
+button, .button {
     display: inline-block;
-    margin-top: 1rem;
+    padding: 0.35rem 0.8rem;
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    font: inherit;
+}
+
+button:hover, .button:hover {
+    border-color: var(--blue);
+}
+
+button.primary {
+    background: var(--blue);
+    color: var(--bg);
+    border-color: var(--blue);
+}
+
+input, select, textarea {
+    background: var(--bg-alt);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.35rem 0.5rem;
+    font: inherit;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+td, th {
+    text-align: left;
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.85em;
+    word-break: break-all;
+}
+
+.dropzone {
+    margin: 3rem auto;
+    max-width: 640px;
+    padding: 3rem 2rem;
+    text-align: center;
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+}
+
+.dropzone.over {
+    border-color: var(--blue);
+    background: var(--panel);
+}
+
+.subbar {
+    padding: 0.4rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-alt);
+}
+
+/* Diagram viewer */
+.viewer {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-alt);
+}
+
+.toolbar .spacer {
+    flex: 1;
+}
+
+.toolbar .zoom {
+    color: var(--muted);
+    min-width: 3.5rem;
+    text-align: right;
+}
+
+.crumbs .crumb {
+    color: var(--fg);
+}
+
+.crumb-sep {
+    color: var(--muted);
+    margin: 0 0.35rem;
+}
+
+.viewer-body {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+}
+
+.tree {
+    width: 240px;
+    overflow: auto;
+    padding: 0.75rem;
+    border-right: 1px solid var(--border);
+    background: var(--bg-alt);
+}
+
+.system-tree ul {
+    list-style: none;
+    padding-left: 0.9rem;
+    margin: 0.2rem 0;
+}
+
+.system-tree a {
+    color: var(--fg);
+    display: inline-block;
+    padding: 0.1rem 0.25rem;
+    border-radius: 4px;
+}
+
+.system-tree a.active {
+    background: var(--panel);
+    color: var(--blue);
+}
+
+.diagram {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    cursor: grab;
+    background: var(--bg);
+    user-select: none;
+}
+
+.diagram.light {
+    background: #ffffff;
+}
+
+.diagram:active {
+    cursor: grabbing;
+}
+
+.diagram .canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+.diagram .canvas svg {
+    display: block;
+}
+
+.diagram g.block {
+    cursor: pointer;
+}
+
+.diagram g.block[data-subsystem] {
+    cursor: zoom-in;
+}
+
+.inspector {
+    width: 320px;
+    overflow: auto;
+    padding: 0.75rem 1rem;
+    border-left: 1px solid var(--border);
+    background: var(--bg-alt);
+}
+
+.inspector h3 {
+    margin: 0 0 0.25rem;
+}
+
+.inspector h4 {
+    margin: 1rem 0 0.4rem;
+    color: var(--purple);
+}
+
+.inspector td:first-child {
+    color: var(--teal);
+    white-space: nowrap;
 }
