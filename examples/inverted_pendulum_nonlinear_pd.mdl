@@ -1,0 +1,221 @@
+Model {
+  Name "inverted_pendulum_nonlinear_pd"
+  Version 8.0
+  Solver "ode4"
+  StartTime "0"
+  StopTime "4"
+  FixedStep "0.005"
+  System {
+    Name "inverted_pendulum_nonlinear_pd"
+    Block {
+      BlockType Sum
+      Name "Angular accel"
+      SID "1"
+      Position [300, 100, 330, 160]
+      Inputs "++-"
+    }
+    Block {
+      BlockType Integrator
+      Name "theta_dot"
+      SID "2"
+      Position [380, 115, 410, 145]
+      InitialCondition "0"
+    }
+    Block {
+      BlockType Integrator
+      Name "theta"
+      SID "3"
+      Position [470, 115, 500, 145]
+      InitialCondition "0.8"
+    }
+    Block {
+      BlockType Trigonometry
+      Name "sin"
+      SID "4"
+      Position [450, 190, 490, 220]
+      Orientation "left"
+      Operator "sin"
+    }
+    Block {
+      BlockType Gain
+      Name "g/l"
+      SID "5"
+      Position [370, 190, 410, 220]
+      Orientation "left"
+      Gain "19.6"
+    }
+    Block {
+      BlockType Gain
+      Name "damping"
+      SID "6"
+      Position [370, 240, 410, 270]
+      Orientation "left"
+      Gain "0.2"
+    }
+    Block {
+      BlockType Gain
+      Name "Kp"
+      SID "7"
+      Position [460, 300, 500, 330]
+      Orientation "left"
+      Gain "5"
+    }
+    Block {
+      BlockType Gain
+      Name "Kd"
+      SID "8"
+      Position [370, 360, 410, 390]
+      Orientation "left"
+      Gain "1"
+    }
+    Block {
+      BlockType Sum
+      Name "PD"
+      SID "9"
+      Position [320, 320, 340, 380]
+      Orientation "left"
+      Inputs "--"
+    }
+    Block {
+      BlockType Saturate
+      Name "Torque limit"
+      SID "10"
+      Position [260, 335, 300, 365]
+      Orientation "left"
+      UpperLimit "3"
+      LowerLimit "-3"
+    }
+    Block {
+      BlockType Gain
+      Name "1/(m l^2)"
+      SID "11"
+      Position [180, 335, 220, 365]
+      Orientation "left"
+      Gain "8"
+    }
+    Block {
+      BlockType Outport
+      Name "angle from upright (rad)"
+      SID "12"
+      Position [600, 120, 630, 140]
+      Port "1"
+    }
+    Block {
+      BlockType Outport
+      Name "motor torque (N m)"
+      SID "13"
+      Position [200, 405, 230, 425]
+      Orientation "left"
+      Port "2"
+    }
+    Line {
+      SrcBlock "Angular accel"
+      SrcPort 1
+      DstBlock "theta_dot"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "theta_dot"
+      SrcPort 1
+      Points [20, 0]
+      Branch {
+        DstBlock "theta"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 125]
+        DstBlock "damping"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 245]
+        DstBlock "Kd"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "theta"
+      SrcPort 1
+      Points [40, 0]
+      Branch {
+        DstBlock "angle from upright (rad)"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 75]
+        DstBlock "sin"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 185]
+        DstBlock "Kp"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "sin"
+      SrcPort 1
+      DstBlock "g/l"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "g/l"
+      SrcPort 1
+      Points [-85, 0; 0, -75]
+      DstBlock "Angular accel"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "damping"
+      SrcPort 1
+      Points [-95, 0; 0, -110]
+      DstBlock "Angular accel"
+      DstPort 3
+    }
+    Line {
+      SrcBlock "Kp"
+      SrcPort 1
+      Points [-90, 0; 0, 25]
+      DstBlock "PD"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Kd"
+      SrcPort 1
+      Points [-15, 0; 0, -15]
+      DstBlock "PD"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "PD"
+      SrcPort 1
+      DstBlock "Torque limit"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Torque limit"
+      SrcPort 1
+      Points [-20, 0]
+      Branch {
+        DstBlock "1/(m l^2)"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 65]
+        DstBlock "motor torque (N m)"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "1/(m l^2)"
+      SrcPort 1
+      Points [-30, 0; 0, -235]
+      DstBlock "Angular accel"
+      DstPort 1
+    }
+    Annotation {
+      Name "Nonlinear pendulum balanced upright by a saturated PD controller\ntheta'' = tau/(m l^2) + (g/l) sin(theta) - c theta',  m = 0.5 kg, l = 0.5 m\nStarts 0.8 rad from upright; torque limited to 3 N m"
+      Position [300, 40]
+    }
+  }
+}

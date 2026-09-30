@@ -1,0 +1,164 @@
+Model {
+  Name "dc_motor_speed_pi"
+  Version 8.0
+  Solver "ode4"
+  StartTime "0"
+  StopTime "3"
+  FixedStep "0.001"
+  System {
+    Name "dc_motor_speed_pi"
+    Block {
+      BlockType Step
+      Name "Speed setpoint"
+      SID "1"
+      Position [30, 90, 60, 120]
+      Time "0.1"
+      Before "0"
+      After "1"
+    }
+    Block {
+      BlockType Sum
+      Name "Error"
+      SID "2"
+      Position [110, 95, 130, 125]
+      Inputs "+-"
+    }
+    Block {
+      BlockType Gain
+      Name "Kp"
+      SID "3"
+      Position [200, 50, 240, 80]
+      Gain "20"
+    }
+    Block {
+      BlockType Integrator
+      Name "Integral"
+      SID "4"
+      Position [200, 125, 230, 155]
+      InitialCondition "0"
+    }
+    Block {
+      BlockType Gain
+      Name "Ki"
+      SID "5"
+      Position [260, 125, 300, 155]
+      Gain "50"
+    }
+    Block {
+      BlockType Sum
+      Name "PI"
+      SID "6"
+      Position [340, 90, 360, 130]
+      Inputs "++"
+    }
+    Block {
+      BlockType Saturate
+      Name "Supply limit"
+      SID "7"
+      Position [400, 95, 440, 125]
+      UpperLimit "24"
+      LowerLimit "-24"
+    }
+    Block {
+      BlockType TransferFcn
+      Name "DC motor"
+      SID "8"
+      Position [490, 90, 590, 130]
+      Numerator "[0.01]"
+      Denominator "[0.005 0.06 0.1001]"
+    }
+    Block {
+      BlockType Outport
+      Name "speed (rad/s)"
+      SID "9"
+      Position [680, 100, 710, 120]
+      Port "1"
+    }
+    Block {
+      BlockType Outport
+      Name "armature voltage (V)"
+      SID "10"
+      Position [500, 30, 530, 50]
+      Port "2"
+    }
+    Line {
+      SrcBlock "Speed setpoint"
+      SrcPort 1
+      DstBlock "Error"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Error"
+      SrcPort 1
+      Points [40, 0]
+      Branch {
+        Points [0, -45]
+        DstBlock "Kp"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 30]
+        DstBlock "Integral"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "Integral"
+      SrcPort 1
+      DstBlock "Ki"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Kp"
+      SrcPort 1
+      Points [70, 0; 0, 35]
+      DstBlock "PI"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Ki"
+      SrcPort 1
+      Points [20, 0; 0, -40]
+      DstBlock "PI"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "PI"
+      SrcPort 1
+      DstBlock "Supply limit"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Supply limit"
+      SrcPort 1
+      Points [20, 0]
+      Branch {
+        DstBlock "DC motor"
+        DstPort 1
+      }
+      Branch {
+        Points [0, -70]
+        DstBlock "armature voltage (V)"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "DC motor"
+      SrcPort 1
+      Points [50, 0]
+      Branch {
+        DstBlock "speed (rad/s)"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 100; -560, 0; 0, -85]
+        DstBlock "Error"
+        DstPort 2
+      }
+    }
+    Annotation {
+      Name "DC motor speed control with a PI controller and a 24 V supply limit\nJ = 0.01 kg m^2, b = 0.1 N m s, K = 0.01, R = 1 ohm, L = 0.5 H\nP(s) = K / ((J s + b)(L s + R) + K^2)"
+      Position [120, 250]
+    }
+  }
+}
