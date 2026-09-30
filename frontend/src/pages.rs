@@ -855,6 +855,19 @@ fn change_label(change: &BlockChange) -> (&'static str, String) {
             if m.mask_changed {
                 parts.push("mask changed".into());
             }
+            if m.ports_changed {
+                parts.push("ports changed".into());
+            }
+            if let Some((old, new)) = &m.library_changed {
+                let show = |l: &Option<String>| l.as_deref().unwrap_or("none").replace('\n', " ");
+                parts.push(format!("library link {} → {}", show(old), show(new)));
+            }
+            if m.subsystem_changed {
+                parts.push("contents added or removed".into());
+            }
+            if m.appearance_changed {
+                parts.push("appearance changed".into());
+            }
             if m.moved {
                 parts.push("moved".into());
             }
@@ -941,9 +954,9 @@ pub fn compare_page(props: &CompareProps) -> Html {
                                     <div>{ format!("wiring: +{} −{} connections", s.connections_added.len(), s.connections_removed.len()) }</div>
                                 </li>
                             }) }
-                            { for d.config.iter().map(|(k, a, b)| html! {
+                            { for d.config.iter().map(|c| ("Configuration", c)).chain(d.workspace.iter().map(|c| ("Workspace", c))).map(|(section, (k, a, b))| html! {
                                 <li class="change modified">
-                                    <strong>{ "Configuration" }</strong>
+                                    <strong>{ section }</strong>
                                     <div>{ format!("{k}: {} → {}", a.as_deref().unwrap_or("∅"), b.as_deref().unwrap_or("∅")) }</div>
                                 </li>
                             }) }

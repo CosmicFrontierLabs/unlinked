@@ -16,15 +16,24 @@ pub enum BlockChange {
     Modified(Modification),
 }
 
+/// A `(name, old, new)` change; `None` means absent.
+pub type Change = (String, Option<String>, Option<String>);
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Modification {
     pub renamed_from: Option<String>,
     pub type_changed_from: Option<String>,
     pub moved: bool,
     pub resized: bool,
-    /// Parameters as `(name, old, new)`; `None` means absent.
-    pub parameters: Vec<(String, Option<String>, Option<String>)>,
+    /// Orientation, mirroring or colors/font/name placement changed.
+    pub appearance_changed: bool,
+    pub parameters: Vec<Change>,
     pub mask_changed: bool,
+    pub ports_changed: bool,
+    /// Library link `(old, new)`.
+    pub library_changed: Option<(Option<String>, Option<String>)>,
+    /// The block gained or lost its contained system.
+    pub subsystem_changed: bool,
 }
 
 impl Modification {
@@ -32,13 +41,16 @@ impl Modification {
         *self == Modification::default()
     }
 
-    /// Only the layout changed.
+    /// Only layout or appearance changed, not behavior.
     pub fn layout_only(&self) -> bool {
-        (self.moved || self.resized)
+        (self.moved || self.resized || self.appearance_changed)
             && self.renamed_from.is_none()
             && self.type_changed_from.is_none()
             && self.parameters.is_empty()
             && !self.mask_changed
+            && !self.ports_changed
+            && self.library_changed.is_none()
+            && !self.subsystem_changed
     }
 }
 
@@ -64,13 +76,18 @@ pub struct ModelDiff {
     pub blocks: Vec<BlockDiff>,
     /// Systems whose wiring changed.
     pub systems: Vec<SystemDiff>,
-    /// Solver configuration as `(name, old, new)`.
-    pub config: Vec<(String, Option<String>, Option<String>)>,
+    /// Solver configuration.
+    pub config: Vec<Change>,
+    /// Model workspace variables.
+    pub workspace: Vec<Change>,
 }
 
 impl ModelDiff {
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty() && self.systems.is_empty() && self.config.is_empty()
+        self.blocks.is_empty()
+            && self.systems.is_empty()
+            && self.config.is_empty()
+            && self.workspace.is_empty()
     }
 
     /// Changes to blocks directly inside the system at `path`.
@@ -88,18 +105,29 @@ impl ModelDiff {
 /// Parameters that only record editor state and are not model changes.
 const IGNORED_PARAMETERS: &[&str] = &["ZOrder", "SIDHighWatermark"];
 
-fn match_key(b: &Block) -> String {
-    if b.id.0.starts_with("path:") {
-        format!("name:{}", b.name)
-    } else {
-        format!("id:{}", b.id.0)
+/// Stable per-level keys: the SID, or the name for ids synthesized from
+/// paths (those change when a parent is renamed). Repeated keys, which a
+/// valid model never has, get an occurrence suffix instead of colliding.
+fn keyed(sys: &System) -> (BTreeMap<String, &Block>, BTreeMap<&BlockId, String>) {
+    let mut by_key = BTreeMap::new();
+    let mut key_of = BTreeMap::new();
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for b in &sys.blocks {
+        let base = if b.id.0.starts_with("path:") {
+            format!("name:{}", b.name)
+        } else {
+            format!("id:{}", b.id.0)
+        };
+        let n = seen.entry(base.clone()).or_insert(0);
+        *n += 1;
+        let key = if *n == 1 { base } else { format!("{base}#{n}") };
+        key_of.insert(&b.id, key.clone());
+        by_key.insert(key, b);
     }
+    (by_key, key_of)
 }
 
-fn map_diff(
-    old: &BTreeMap<String, String>,
-    new: &BTreeMap<String, String>,
-) -> Vec<(String, Option<String>, Option<String>)> {
+fn map_diff(old: &BTreeMap<String, String>, new: &BTreeMap<String, String>) -> Vec<Change> {
     let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
     keys.into_iter()
         .filter(|k| !IGNORED_PARAMETERS.contains(&k.as_str()))
@@ -118,18 +146,45 @@ fn compare_block(old: &Block, new: &Block) -> Modification {
         type_changed_from: (old.block_type != new.block_type).then(|| old.block_type.clone()),
         moved: p(old) != p(new),
         resized: s(old) != s(new),
+        appearance_changed: old.orientation != new.orientation
+            || old.mirrored != new.mirrored
+            || old.style != new.style,
         parameters: map_diff(&old.parameters, &new.parameters),
         mask_changed: old.mask != new.mask,
+        ports_changed: old.ports != new.ports,
+        library_changed: (old.library_source != new.library_source)
+            .then(|| (old.library_source.clone(), new.library_source.clone())),
+        subsystem_changed: old.subsystem.is_some() != new.subsystem.is_some(),
     }
 }
 
-fn connections(sys: &System) -> BTreeSet<Connection> {
-    sys.connections().into_iter().collect()
+/// Connections with endpoints expressed as stable block keys, mapped to a
+/// representative connection for reporting.
+fn connections(sys: &System, key_of: &BTreeMap<&BlockId, String>) -> BTreeMap<String, Connection> {
+    let key = |id: &BlockId| {
+        key_of
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| format!("missing:{id}"))
+    };
+    sys.connections()
+        .into_iter()
+        .map(|c| {
+            let k = format!(
+                "{}|{:?}|{}|{:?}",
+                key(&c.src.block),
+                c.src.port,
+                key(&c.dst.block),
+                c.dst.port
+            );
+            (k, c)
+        })
+        .collect()
 }
 
 fn diff_system(old: &System, new: &System, path: &[String], out: &mut ModelDiff) {
-    let old_by: BTreeMap<String, &Block> = old.blocks.iter().map(|b| (match_key(b), b)).collect();
-    let new_by: BTreeMap<String, &Block> = new.blocks.iter().map(|b| (match_key(b), b)).collect();
+    let (old_by, old_keys) = keyed(old);
+    let (new_by, new_keys) = keyed(new);
 
     let entry = |b: &Block, change| BlockDiff {
         system: path.to_vec(),
@@ -161,9 +216,17 @@ fn diff_system(old: &System, new: &System, path: &[String], out: &mut ModelDiff)
         }
     }
 
-    let (oc, nc) = (connections(old), connections(new));
-    let added: Vec<Connection> = nc.difference(&oc).cloned().collect();
-    let removed: Vec<Connection> = oc.difference(&nc).cloned().collect();
+    let (oc, nc) = (connections(old, &old_keys), connections(new, &new_keys));
+    let added: Vec<Connection> = nc
+        .iter()
+        .filter(|(k, _)| !oc.contains_key(*k))
+        .map(|(_, c)| c.clone())
+        .collect();
+    let removed: Vec<Connection> = oc
+        .iter()
+        .filter(|(k, _)| !nc.contains_key(*k))
+        .map(|(_, c)| c.clone())
+        .collect();
     if !added.is_empty() || !removed.is_empty() {
         out.systems.push(SystemDiff {
             system: path.to_vec(),
@@ -176,8 +239,27 @@ fn diff_system(old: &System, new: &System, path: &[String], out: &mut ModelDiff)
 pub fn diff(old: &Model, new: &Model) -> ModelDiff {
     let mut out = ModelDiff::default();
     diff_system(&old.root, &new.root, &[], &mut out);
-    out.config = map_diff(&old.config.raw, &new.config.raw);
+    out.config = map_diff(&config_map(old), &config_map(new));
+    out.workspace = map_diff(&old.workspace, &new.workspace);
     out
+}
+
+/// Raw solver settings plus the normalized fields, which some files only
+/// provide through model-level properties.
+fn config_map(m: &Model) -> BTreeMap<String, String> {
+    let mut map = m.config.raw.clone();
+    let c = &m.config;
+    for (k, v) in [
+        ("Solver", &c.solver),
+        ("StartTime", &c.start_time),
+        ("StopTime", &c.stop_time),
+        ("FixedStep", &c.fixed_step),
+    ] {
+        if let Some(v) = v {
+            map.entry(k.to_string()).or_insert_with(|| v.clone());
+        }
+    }
+    map
 }
 
 #[cfg(test)]
@@ -297,5 +379,92 @@ mod tests {
         assert_eq!(d.blocks[0].system, vec!["Sub".to_string()]);
         assert!(d.touches(&["Sub".to_string()]));
         assert!(d.touches(&[]));
+    }
+
+    #[test]
+    fn structural_and_appearance_changes_are_reported() {
+        let old = block("1", "a", 0.0);
+        let mut new = old.clone();
+        new.subsystem = Some(Box::default());
+        new.ports = PortCounts::from_slice(&[2, 1]);
+        new.mirrored = true;
+        new.library_source = Some("simulink/Math/Gain".into());
+        let m = compare_block(&old, &new);
+        assert!(m.subsystem_changed && m.ports_changed && m.appearance_changed);
+        assert_eq!(
+            m.library_changed,
+            Some((None, Some("simulink/Math/Gain".into())))
+        );
+        assert!(!m.layout_only());
+
+        let mut flipped = old.clone();
+        flipped.mirrored = true;
+        assert!(compare_block(&old, &flipped).layout_only());
+    }
+
+    #[test]
+    fn synthesized_ids_survive_parent_rename() {
+        // MDL without SIDs: ids embed the parent path, which changes when
+        // the parent is renamed; wiring inside must not look rewired.
+        let inner = |parent: &str| {
+            let mut a = block(&format!("path:m/{parent}/a"), "a", 0.0);
+            let b = block(&format!("path:m/{parent}/b"), "b", 50.0);
+            a.ports = PortCounts::from_slice(&[1, 1]);
+            System {
+                lines: vec![Line {
+                    src: Some(Endpoint {
+                        block: a.id.clone(),
+                        port: PortRef {
+                            kind: PortKind::Out,
+                            index: 1,
+                        },
+                    }),
+                    dst: Some(Endpoint {
+                        block: b.id.clone(),
+                        port: PortRef {
+                            kind: PortKind::In,
+                            index: 1,
+                        },
+                    }),
+                    ..Default::default()
+                }],
+                blocks: vec![a, b],
+                ..Default::default()
+            }
+        };
+        let mut old_sub = block("path:m/P", "P", 0.0);
+        old_sub.subsystem = Some(Box::new(inner("P")));
+        let mut new_sub = block("path:m/Q", "Q", 0.0);
+        new_sub.subsystem = Some(Box::new(inner("Q")));
+        let d = diff(
+            &model(System {
+                blocks: vec![old_sub],
+                ..Default::default()
+            }),
+            &model(System {
+                blocks: vec![new_sub],
+                ..Default::default()
+            }),
+        );
+        assert!(d.systems.is_empty(), "{:?}", d.systems);
+    }
+
+    #[test]
+    fn duplicate_keys_do_not_collapse() {
+        let dup = |g: &str| {
+            let mut b = block("path:m/x", "x", 0.0);
+            b.parameters.insert("Gain".into(), g.into());
+            b
+        };
+        let old = model(System {
+            blocks: vec![dup("1"), dup("2")],
+            ..Default::default()
+        });
+        let new = model(System {
+            blocks: vec![dup("1"), dup("3")],
+            ..Default::default()
+        });
+        let d = diff(&old, &new);
+        assert_eq!(d.blocks.len(), 1);
     }
 }
