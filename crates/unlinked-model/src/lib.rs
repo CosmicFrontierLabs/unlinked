@@ -7,6 +7,8 @@
 //! Block parameters are kept as raw MATLAB expression strings; evaluating them
 //! is left to consumers that need numbers.
 
+pub mod geometry;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;

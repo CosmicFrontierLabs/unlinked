@@ -1,0 +1,11 @@
+[package]
+name = "unlinked-import"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+quick-xml = "0.42.0"
+thiserror = "2.0.21"
+unlinked-model = { version = "0.1.0", path = "../unlinked-model" }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
