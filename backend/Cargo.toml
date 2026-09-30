@@ -9,11 +9,10 @@ license.workspace = true
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
-tower-cookies = "0.10"
+tower-cookies = { version = "0.10", features = ["private"] }
 
 # Database
-diesel = { version = "2.3.8", features = ["postgres", "r2d2", "uuid", "chrono"] }
+diesel = { version = "2.3.8", features = ["postgres", "r2d2", "uuid", "chrono", "serde_json"] }
 diesel_migrations = "2.3.1"
 
 # Serialization
@@ -46,3 +45,11 @@ alloc-stdlib = "=0.2.2"
 
 # Workspace
 shared = { path = "../shared" }
+oauth2 = "5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+url = "2"
+tower-http = { version = "0.6", features = ["fs", "limit", "trace"] }
