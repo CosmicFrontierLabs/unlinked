@@ -9,7 +9,7 @@ mod sim;
 
 use auth::{Login, Session, SessionProvider, UserMenu};
 use local_viewer::LocalViewer;
-use pages::{Dashboard, FilePage, OrgPage, ProjectPage};
+use pages::{ComparePage, Dashboard, FilePage, OrgPage, ProjectPage};
 use uuid::Uuid;
 use yew::prelude::*;
 use yew_router::prelude::*;
@@ -33,6 +33,13 @@ pub enum Route {
         project_id: Uuid,
         file_id: Uuid,
         version_id: Uuid,
+    },
+    #[at("/projects/:project_id/files/:file_id/compare/:old/:new")]
+    Compare {
+        project_id: Uuid,
+        file_id: Uuid,
+        old: Uuid,
+        new: Uuid,
     },
     #[not_found]
     #[at("/404")]
@@ -58,6 +65,14 @@ fn switch(route: Route) -> Html {
             version_id,
         } => html! {
             <RequireLogin><FilePage {project_id} {file_id} version_id={Some(version_id)} /></RequireLogin>
+        },
+        Route::Compare {
+            project_id,
+            file_id,
+            old,
+            new,
+        } => html! {
+            <RequireLogin><ComparePage {project_id} {file_id} {old} {new} /></RequireLogin>
         },
         Route::NotFound => html! { <div class="page"><h1>{ "404 - Not Found" }</h1></div> },
     }

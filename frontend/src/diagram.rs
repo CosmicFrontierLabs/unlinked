@@ -4,6 +4,7 @@
 
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
+use unlinked_model::diff::{BlockChange, ModelDiff};
 use unlinked_model::{Block, Model, System};
 use unlinked_render::{render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
@@ -13,6 +14,43 @@ use yew::prelude::*;
 #[derive(Properties, PartialEq)]
 pub struct DiagramProps {
     pub model: Rc<Model>,
+    /// Changes relative to an older version, highlighted on the diagram.
+    #[prop_or_default]
+    pub diff: Option<Rc<ModelDiff>>,
+}
+
+/// CSS outlining changed blocks in the system at `path`: added green,
+/// modified orange, moved-only teal, and subsystems containing changes
+/// dashed purple.
+fn diff_css(diff: &ModelDiff, path: &[String], system: Option<&System>) -> String {
+    let rule = |sid: &str, color: &str, dashed: bool| {
+        format!(
+            ".diagram g.block[data-sid=\"{}\"] > :is(rect, polygon, ellipse) {{ stroke: {color}; stroke-width: 3px;{} }}\n",
+            css_string(sid),
+            if dashed { " stroke-dasharray: 6 3;" } else { "" }
+        )
+    };
+    let mut css = String::new();
+    for b in diff.in_system(path) {
+        match &b.change {
+            BlockChange::Added => css.push_str(&rule(&b.id.0, "#9ece6a", false)),
+            BlockChange::Modified(m) if m.layout_only() => {
+                css.push_str(&rule(&b.id.0, "#7dcfff", false))
+            }
+            BlockChange::Modified(_) => css.push_str(&rule(&b.id.0, "#ff9e64", false)),
+            BlockChange::Removed => {}
+        }
+    }
+    if let Some(sys) = system {
+        for b in sys.blocks.iter().filter(|b| b.subsystem.is_some()) {
+            let mut sub = path.to_vec();
+            sub.push(b.name.clone());
+            if diff.touches(&sub) {
+                css.push_str(&rule(&b.id.0, "#bb9af7", true));
+            }
+        }
+    }
+    css
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -307,6 +345,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             )
         })
         .unwrap_or_default();
+    let highlight = match &props.diff {
+        Some(d) => diff_css(d, &path, system) + &highlight,
+        None => highlight,
+    };
 
     let canvas = match rendered.as_ref() {
         Ok(svg) => Html::from_html_unchecked(AttrValue::from(svg.clone())),
