@@ -2453,6 +2453,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "unlinked-render"
+version = "0.1.0"
+dependencies = [
+ "quick-xml",
+ "thiserror 2.0.21",
+ "unlinked-import",
+ "unlinked-model",
+]
+
+[[package]]
 name = "unlinked-sim"
 version = "0.1.0"
 dependencies = [
