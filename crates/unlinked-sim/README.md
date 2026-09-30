@@ -124,3 +124,15 @@ budget carrying a cooperative deadline/cancellation callback. Source totals are
 limited to 1 MiB and 1,024 functions per graph; individual interpreter limits also
 apply. Persistent/global state, printing, external access, non-scalar outputs and
 multiple output ports reject explicitly.
+
+Imported MATLAB Function charts lower to those execution nodes when their
+escaped model path, declared data, function signature and generated `sf_sfun`
+backing wiring agree. The supported imported subset is pure, scalar, fixed-size,
+real, double/inherited numeric data with inherited scheduling and one output.
+The legacy default transition calling `eML_blk_kernel()` is recognized only in
+its generated form. Additional chart actions, graphical state machines,
+parameters requiring external workspace semantics, altered backing wiring,
+conditional ports, masks and links fail explicitly. Chart-path matching does
+not change the imported model. The corpus test isolates the unchanged
+`PID Control/ud` function from `rovSim_los.slx` and checks its source formula;
+it does not claim that the complete ROV model or its stateful guidance chart runs.

@@ -43,6 +43,7 @@ fn model(numerator: &str, denominator: &str) -> Model {
     Model {
         name: "response".into(),
         source: SourceFormat::Mdl,
+        charts: vec![],
         simulink_version: None,
         config: SimConfig::default(),
         workspace: BTreeMap::new(),

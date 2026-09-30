@@ -6,7 +6,7 @@ use unlinked_model::*;
 mod routing;
 
 pub fn flatten(model: &Model) -> Result<Model, Error> {
-    let model = routing::lower(model)?;
+    let model = super::chart_lowering::lower_charts(routing::lower(model)?)?;
     fn id(prefix: &str, id: &BlockId) -> BlockId {
         BlockId(format!("{prefix}{}", id.0.replace('/', "//")))
     }
