@@ -85,7 +85,10 @@ and mask scopes). `System::connections()` flattens line trees to
 - **SLX** (R2012a+): OPC zip. `simulink/blockdiagram.xml` holds the model and,
   in newer releases, `simulink/systems/system_<sid>.xml` holds each subsystem.
   Parse with `zip` + `quick-xml`; resolve `<System Ref=...>` across parts.
-  Stateflow lives in `simulink/stateflow.xml` (parsed later).
+  Stateflow lives in `simulink/stateflow.xml` (or, in newer releases,
+  `simulink/stateflow/machine.xml` plus one `chart_<id>.xml` per chart) and
+  in the MDL `Stateflow` section; both become `Model::charts`, matched to
+  their block by path (`Model::chart_at`).
 - **MDL**: nested `Key { ... }` text format with quoted strings and implicit
   string concatenation. Hand-written tokenizer → generic tree → IR. Old files
   lack `SID`; synthesize ids from the block path.

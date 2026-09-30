@@ -8,13 +8,16 @@
 //! Every block is emitted as `<g class="block" data-sid=".." data-type="..">`
 //! and subsystems additionally carry `data-subsystem="true"`, so an embedding
 //! page can hit-test clicks without re-deriving geometry.
+//! [`render_chart_svg`] draws Stateflow charts and MATLAB Function code.
 
+mod chart;
 mod color;
 mod glyph;
 mod route;
 mod svg;
 mod theme;
 
+pub use chart::{render_chart_svg, render_chart_view_svg};
 pub use theme::Theme;
 
 use glyph::{appearance, draw_icon, draw_shape, subsystem_port_labels};
@@ -58,6 +61,8 @@ const MAX_PORT_MARKERS: u32 = 64;
 pub enum RenderError {
     #[error("no subsystem at path {0:?}")]
     NoSuchSystem(Vec<String>),
+    #[error("no subchart with id {0:?}")]
+    NoSuchView(String),
     #[error("diagram too large to render (more than {MAX_ELEMENTS} elements)")]
     TooLarge,
 }
@@ -698,6 +703,7 @@ mod tests {
             config: Default::default(),
             root: System::default(),
             workspace: Default::default(),
+            charts: Vec::new(),
         };
         assert!(render_svg(&model, &[], &RenderOptions::default()).is_ok());
         assert_eq!(
