@@ -55,7 +55,7 @@ impl GeneratedProject {
             (
                 "README.md".into(),
                 format!(
-                    "# Generated MATLAB {}\n\nGenerated code uses ndarray and nalgebra. The MATLAB semantics helper is vendored in matlab-rt/.\n\n{}\n\nGenerated standalone code is intended for trusted execution. It does not have the interpreter's statement budgets or cancellation hooks. Array helpers retain shape/index validation and checked dimension arithmetic. The current MATLAB semantics subset is real two-dimensional arrays; ArrayD leaves room for future N-D support.\n",
+                    "# Generated MATLAB {}\n\nGenerated code uses ndarray and nalgebra. The MATLAB semantics helper is vendored in matlab-rt/.\n\n{}\n\nGenerated standalone code is intended for trusted execution. It does not have the interpreter's statement budgets or cancellation hooks. Array helpers retain shape/index validation and checked dimension arithmetic. Native allocation failure or stack exhaustion can abort the process. The current MATLAB semantics subset is real two-dimensional arrays; ArrayD leaves room for future N-D support.\n",
                     if self.library { "library" } else { "program" },
                     if self.library {
                         "Build with `cargo build`. Public functions are in src/lib.rs."

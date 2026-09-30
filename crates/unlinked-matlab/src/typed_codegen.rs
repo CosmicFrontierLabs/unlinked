@@ -1329,11 +1329,12 @@ fn inline_names(body: &[Stmt], args: &[String], optional: &BTreeSet<String>) -> 
                     inline.insert(n.clone());
                 }
             }
-            StmtKind::Assign(Target::Many(names), _) => {
-                for n in names {
-                    if !seen.contains(n) && !optional.contains(n) {
-                        inline.insert(n.clone());
-                    }
+            // Multiple outputs are unpacked inside a temporary-result block, so
+            // their first declarations must remain in the enclosing MATLAB scope.
+            StmtKind::Assign(Target::Many(names), _) if names.len() == 1 => {
+                let n = &names[0];
+                if !seen.contains(n) && !optional.contains(n) {
+                    inline.insert(n.clone());
                 }
             }
             _ => {}
@@ -1853,6 +1854,22 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::transpile_typed;
+    #[test]
+    fn first_multiple_output_assignment_declares_in_enclosing_scope() {
+        for source in [
+            "[r,c]=size(zeros(3,4)); disp(r); disp(c);",
+            "[r,c]=pair(); disp(r); function [r,c]=pair(); r=3; c=4; end",
+            "function [r,c]=dims(); [r,c]=size(zeros(3,4)); end",
+        ] {
+            let code = transpile_typed(source, source.starts_with("function")).unwrap();
+            let result = code.find("let result_").unwrap();
+            let scope = &code[..result];
+            assert!(scope.contains("let v_r:"), "{code}");
+            assert!(scope.contains("let v_c:"), "{code}");
+            assert!(!code[result..].contains("let v_r:"), "{code}");
+            assert!(!code[result..].contains("let v_c:"), "{code}");
+        }
+    }
     #[test]
     fn simple_functions_need_no_lint_suppression_and_unused_locals_are_named() {
         let code = transpile_typed(

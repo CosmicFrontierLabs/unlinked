@@ -168,6 +168,7 @@ fn octave_result(name: &str) -> String {
 #[test]
 fn typed_projects_match_interpreter_and_octave() {
     let projects = Projects::new();
+    typed_first_multioutput_assignments(&projects);
     typed_library_exports_arrays_and_multiple_outputs_without_dynamic_environment(&projects);
     optional_typed_corpus(&projects);
     typed_codegen_edge_regressions(&projects);
@@ -620,5 +621,38 @@ fn main() {
     );
     if let Some(reference) = octave(&format!("{oracle}\ndisp(polynomial(3));")) {
         assert_numbers(&output, &reference, "arguments scalar result vs Octave");
+    }
+}
+
+fn typed_first_multioutput_assignments(projects: &Projects) {
+    // Every target is first declared by a multi-output assignment and then read
+    // outside the call's temporary-expression scope. Reassigning preexisting
+    // variables would hide a generator that scoped `let` bindings too narrowly.
+    let statements =
+        "[r,c]=size(zeros(3,4));\n[a,b]=pair();\ncombined=combine();\n[d,e]=dimensions();\n";
+    let functions = "function [x,y]=pair()\nx=2;y=7;\nend\nfunction result=combine()\n[u,v]=pair();\n[rows,cols]=size(ones(2,5));\nresult=u+v+rows+cols;\nend\nfunction [rows,cols]=dimensions()\n[rows,cols]=size(zeros(6,8));\nend\n";
+    let output = "disp(r);disp(c);disp(a);disp(b);disp(combined);disp(d);disp(e);\n";
+    let source = format!("{statements}{output}{functions}");
+    let actual = numbers(&projects.run("first-multiple-outputs", &source, false, None));
+    let oracle = format!(
+        "function result=primary()\n{statements}result=[r c a b combined d e];\nend\n{functions}"
+    );
+    let expected = unlinked_matlab::eval_function(&oracle, vec![]).unwrap();
+    assert_numbers(
+        &actual,
+        &[3., 4., 2., 7., 16., 6., 8.],
+        "first multi-output assignments",
+    );
+    assert_numbers(
+        &actual,
+        &expected[0].data,
+        "first multi-output assignments vs evaluator",
+    );
+    if let Some(reference) = octave(&format!("{functions}\n{statements}{output}")) {
+        assert_numbers(
+            &actual,
+            &reference,
+            "first multi-output assignments vs Octave",
+        );
     }
 }

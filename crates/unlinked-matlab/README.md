@@ -92,7 +92,8 @@ echo is unsupported; use explicit `disp` or `fprintf`.
 Parser limits are 256 KiB source, 16384 tokens, 64 statement nesting levels,
 and 256 expression levels/operators. Semantic helpers validate shapes/indices
 and use checked dimension arithmetic. Generated code has no statement or recursion
-fuel; it is not a sandbox. The browser accepts at most 64 KiB source and never
+fuel; it is not a sandbox. Native allocation failure or stack exhaustion can
+abort the process rather than returning `rt::Error`. The browser accepts at most 64 KiB source and never
 executes the result.
 
 Differential tests compile complete Cargo projects and compare array values,
@@ -124,7 +125,9 @@ Generated functions expose Rust primitives and borrowed ndarray arrays, with typ
 `rt::Error` results. Functions consistently return `rt::Result`, including pure
 scalar functions, so callers keep one error-handling convention as functions
 evolve. They use named operation helpers rather than runtime
-operator-name strings. Source is formatted in-process for extraction and review. The helper's canonical array storage is ndarray; dense linear algebra uses
+operator-name strings. Source is formatted in-process with syn and prettyplease
+for extraction and review. Those formatting dependencies add to the web compiler
+bundle; exported projects do not depend on them. The helper's canonical array storage is ndarray; dense linear algebra uses
 nalgebra. MATLAB-specific conversion and indexing use small helper calls. Standard Rust error results report unsupported
 shapes and invalid operations. Current code requires `std` (including formatting
 and explicit printing) and is **not no_std**. The helper compiles for wasm32, but
