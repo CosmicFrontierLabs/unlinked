@@ -45,6 +45,13 @@ pub fn model_editor(props: &EditorProps) -> Html {
     let error = use_state(|| None::<String>);
     let message = use_state(String::new);
     let saving = use_state(|| false);
+    // Cleared on unmount so a save finishing afterwards neither updates
+    // state nor navigates.
+    let mounted = use_mut_ref(|| true);
+    {
+        let mounted = mounted.clone();
+        use_effect_with((), move |_| move || *mounted.borrow_mut() = false);
+    }
 
     let on_edit = {
         let (pending, working, error) = (pending.clone(), working.clone(), error.clone());
@@ -103,6 +110,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
         })
     };
     let save = {
+        let mounted = mounted.clone();
         let (pending, message, saving, error, editing, working) = (
             pending.clone(),
             message.clone(),
@@ -151,8 +159,12 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 model.clone(),
                 message.clone(),
             );
+            let mounted = mounted.clone();
             spawn_local(async move {
                 let result = api::upload(project_id, &path, &msg, &patched).await;
+                if !*mounted.borrow() {
+                    return;
+                }
                 saving.set(false);
                 match result {
                     Ok(_) => {
