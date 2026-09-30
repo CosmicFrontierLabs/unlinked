@@ -51,6 +51,34 @@ pub struct SimulationResult {
 mod tests {
     use super::*;
     #[test]
+    fn stream_messages_roundtrip() {
+        let message = SimulationServerMsg::SimulationSamples {
+            run_id: Uuid::new_v4(),
+            time: vec![0.0, 0.1],
+            values: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+        };
+        let serialized = serde_json::to_string(&message).unwrap();
+        let decoded: SimulationServerMsg = serde_json::from_str(&serialized).unwrap();
+        match decoded {
+            SimulationServerMsg::SimulationSamples { time, values, .. } => {
+                assert_eq!(time.len(), 2);
+                assert_eq!(values[1], vec![3.0, 4.0]);
+            }
+            _ => panic!("wrong variant"),
+        }
+        let request = SimulationClientMsg::Simulate {
+            file_id: Uuid::new_v4(),
+            request: SimulationRequest {
+                options: Default::default(),
+                workspace: Default::default(),
+                version: None,
+            },
+        };
+        let decoded: SimulationClientMsg =
+            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert!(matches!(decoded, SimulationClientMsg::Simulate { .. }));
+    }
+    #[test]
     fn request_and_trace_roundtrip() {
         let request = SimulationRequest {
             options: SimulationOptions::default(),

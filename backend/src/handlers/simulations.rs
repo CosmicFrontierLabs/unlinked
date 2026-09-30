@@ -84,6 +84,12 @@ impl RunRow {
 }
 const SELECT_RUN:&str="SELECT r.id, v.file_id, r.file_version_id, v.version AS file_version, r.requested_by, r.status, r.request::text AS request_json, r.error, r.created_at, r.finished_at";
 fn load(conn: &mut PgConnection, id: Uuid, trace: bool) -> ApiResult<SimulationResult> {
+    // Workers have a 30-second compute deadline plus bounded stream/DB waits.
+    // Reconcile abandoned records after a crash without cancelling other live
+    // instances' recently started runs.
+    diesel::sql_query("UPDATE simulation_runs SET status='failed',error='simulation worker expired or server restarted',finished_at=NOW() WHERE id=$1 AND status='running' AND created_at < NOW()-INTERVAL '5 minutes'")
+        .bind::<SqlUuid,_>(id).execute(conn)?;
+
     let trace_column = if trace { "r.trace::text" } else { "NULL::text" };
     let query=format!("{SELECT_RUN}, {trace_column} AS trace_json FROM simulation_runs r JOIN file_versions v ON v.id=r.file_version_id WHERE r.id=$1");
     diesel::sql_query(query)

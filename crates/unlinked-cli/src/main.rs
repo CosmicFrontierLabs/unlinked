@@ -304,8 +304,8 @@ fn run(args: Args) -> Result<()> {
                 step,
                 solver: solver.into(),
                 max_samples,
-                relative_tolerance:rtol,
-                absolute_tolerance:atol,
+                relative_tolerance: rtol,
+                absolute_tolerance: atol,
                 max_internal_steps,
             };
             eprintln!(

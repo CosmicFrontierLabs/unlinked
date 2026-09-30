@@ -80,8 +80,7 @@ pub async fn handler(
                             let session = token.clone();
                             let current = state
                                 .db(move |conn| {
-                                    Ok(session_user(conn, &session)?
-                                        .ok_or(ApiError::Unauthorized)?)
+                                    session_user(conn, &session)?.ok_or(ApiError::Unauthorized)
                                 })
                                 .await;
                             let result = match current {
