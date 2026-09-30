@@ -4,7 +4,7 @@
 //! immediate preview) and, by `unlinked-import`'s patcher, to the original
 //! model file, so that everything the IR does not model survives a save.
 
-use crate::{Block, BlockId, Branch, Endpoint, Line, Model, Rect, System};
+use crate::{Block, BlockId, Branch, Chart, Endpoint, Line, Model, Rect, System};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +42,8 @@ pub enum EditError {
     DuplicateName(String),
     #[error("invalid value: {0}")]
     Invalid(String),
+    #[error("{0:?} contains Stateflow charts, which cannot be renamed or deleted yet")]
+    OwnsCharts(String),
 }
 
 impl Edit {
@@ -98,6 +100,13 @@ impl Edit {
 
     pub fn apply(&self, model: &mut Model) -> Result<(), EditError> {
         self.validate()?;
+        let charts = std::mem::take(&mut model.charts);
+        let result = self.apply_to_diagram(model, &charts);
+        model.charts = charts;
+        result
+    }
+
+    fn apply_to_diagram(&self, model: &mut Model, charts: &[Chart]) -> Result<(), EditError> {
         let sys = system_mut(model, self.system())?;
         let id = self.block();
         let index = sys
@@ -105,6 +114,18 @@ impl Edit {
             .iter()
             .position(|b| &b.id == id)
             .ok_or_else(|| EditError::NoBlock(id.clone()))?;
+        // Chart records are keyed by block path; renaming or deleting a
+        // block at or above a chart would orphan them.
+        if matches!(self, Edit::RenameBlock { .. } | Edit::DeleteBlock { .. }) {
+            let mut prefix = self.system().to_vec();
+            prefix.push(sys.blocks[index].name.clone());
+            if charts
+                .iter()
+                .any(|c| crate::stateflow::split_path(&c.name).starts_with(&prefix))
+            {
+                return Err(EditError::OwnsCharts(sys.blocks[index].name.clone()));
+            }
+        }
         match self {
             Edit::MoveBlock { position, .. } => {
                 sys.blocks[index].position = *position;
@@ -258,6 +279,7 @@ mod tests {
                 ..Default::default()
             },
             workspace: BTreeMap::new(),
+            charts: Vec::new(),
         }
     }
 
@@ -325,6 +347,60 @@ mod tests {
             "5"
         );
         assert!(!m.root.blocks[0].parameters.contains_key("K"));
+    }
+
+    #[test]
+    fn chart_owners_cannot_be_renamed_or_deleted() {
+        let mut m = model();
+        let mut sub = block("9", "Sub");
+        sub.subsystem = Some(Box::new(System {
+            blocks: vec![block("10", "fcn")],
+            ..Default::default()
+        }));
+        m.root.blocks.push(sub);
+        m.charts.push(Chart {
+            id: "1".into(),
+            name: "Sub/fcn".into(),
+            kind: ChartKind::MatlabFunction,
+            states: vec![],
+            transitions: vec![],
+            junctions: vec![],
+            data: vec![],
+            script: None,
+            update_method: None,
+            sample_time: None,
+        });
+        let rename = |system: &[&str], id: &str| Edit::RenameBlock {
+            system: system.iter().map(|s| s.to_string()).collect(),
+            id: id.into(),
+            name: "x".into(),
+        };
+        assert!(matches!(
+            rename(&[], "9").apply(&mut m),
+            Err(EditError::OwnsCharts(_))
+        ));
+        assert!(matches!(
+            rename(&["Sub"], "10").apply(&mut m),
+            Err(EditError::OwnsCharts(_))
+        ));
+        let delete = Edit::DeleteBlock {
+            system: vec![],
+            id: "9".into(),
+        };
+        assert!(matches!(
+            delete.apply(&mut m),
+            Err(EditError::OwnsCharts(_))
+        ));
+        // Unrelated blocks and non-structural edits still work.
+        rename(&[], "1").apply(&mut m).unwrap();
+        Edit::MoveBlock {
+            system: vec![],
+            id: "9".into(),
+            position: Rect::new(0.0, 0.0, 10.0, 10.0),
+        }
+        .apply(&mut m)
+        .unwrap();
+        assert_eq!(m.charts.len(), 1);
     }
 
     #[test]

@@ -27,11 +27,27 @@ fn models(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Move, re-parameterize and rename the first root block, and delete the
-/// first root block that has a line attached.
+/// Whether a root-level block contains (or is) a Stateflow chart; those
+/// cannot be renamed or deleted.
+fn owns_chart(model: &Model, name: &str) -> bool {
+    model.charts.iter().any(|c| {
+        unlinked_model::stateflow::split_path(&c.name)
+            .first()
+            .map(String::as_str)
+            == Some(name)
+    })
+}
+
+/// Move, re-parameterize and rename the first root block without charts,
+/// and delete the next chart-free root block that has a line attached.
 fn edits_for(model: &Model) -> Vec<Edit> {
     let mut edits = Vec::new();
-    let Some(first) = model.root.blocks.first() else {
+    let mut free = model
+        .root
+        .blocks
+        .iter()
+        .filter(|b| !owns_chart(model, &b.name));
+    let Some(first) = free.next() else {
         return edits;
     };
     let p = first.position;
@@ -51,7 +67,7 @@ fn edits_for(model: &Model) -> Vec<Edit> {
         id: first.id.clone(),
         name: format!("{} renamed", first.name),
     });
-    let connected = model.root.blocks.iter().skip(1).find(|b| {
+    let connected = free.find(|b| {
         model
             .root
             .lines
@@ -118,6 +134,23 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
         let same = unlinked_import::patch::apply_edits(&name, &bytes, &[]).unwrap();
         if let Some(changed) = changed_content(&bytes, &same).into_iter().next() {
             failures.push(format!("{name}: empty patch changed {changed}"));
+        }
+
+        // Renaming a chart owner would orphan its chart records.
+        if let Some(owner) = original
+            .root
+            .blocks
+            .iter()
+            .find(|b| owns_chart(&original, &b.name))
+        {
+            let rename = Edit::RenameBlock {
+                system: vec![],
+                id: owner.id.clone(),
+                name: format!("{} renamed", owner.name),
+            };
+            if unlinked_import::patch::apply_edits(&name, &bytes, &[rename]).is_ok() {
+                failures.push(format!("{name}: renamed chart owner {:?}", owner.name));
+            }
         }
 
         let edits = edits_for(&original);
