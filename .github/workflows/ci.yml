@@ -121,6 +121,9 @@ jobs:
           repository: meawoppl/unlinked-test-cases
           path: unlinked-test-cases
 
+      - name: Install Octave for compiler differential tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends octave
+
       - name: Run tests
         run: cargo test --workspace --locked
         env:
