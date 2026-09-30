@@ -44,7 +44,6 @@ fn model(numerator: &str, denominator: &str) -> Model {
         charts: Vec::new(),
         name: "response".into(),
         source: SourceFormat::Mdl,
-        charts: vec![],
         simulink_version: None,
         config: SimConfig::default(),
         workspace: BTreeMap::new(),

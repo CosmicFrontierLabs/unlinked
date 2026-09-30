@@ -44,7 +44,6 @@ fn model(blocks: Vec<Block>, lines: Vec<Line>) -> Model {
         charts: Vec::new(),
         name: "vectors".into(),
         source: SourceFormat::Mdl,
-        charts: vec![],
         simulink_version: None,
         config: SimConfig::default(),
         workspace: BTreeMap::new(),
