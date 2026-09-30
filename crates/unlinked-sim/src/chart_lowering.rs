@@ -138,8 +138,14 @@ pub(super) fn lower_charts(
                         ));
                     }
                     if data.complexity.as_deref().is_some_and(|s| {
-                        !["real", "SF_REAL", "SF_COMPLEX_INHERITED", "Inherited"]
-                            .contains(&s.trim())
+                        ![
+                            "real",
+                            "SF_REAL",
+                            "SF_COMPLEX_NO",
+                            "SF_COMPLEX_INHERITED",
+                            "Inherited",
+                        ]
+                        .contains(&s.trim())
                     }) {
                         return Err(block_error(
                             &block.id.0,
@@ -261,6 +267,14 @@ fn validate_backing(
     {
         return Err(fail(
             "MATLAB Function chart requires an unmasked, unconditional MATLAB Function subsystem",
+        ));
+    }
+    if block
+        .param("SystemSampleTime")
+        .is_some_and(|s| s.trim() != "-1")
+    {
+        return Err(fail(
+            "MATLAB Function backing SystemSampleTime must be inherited (-1)",
         ));
     }
     let system = block

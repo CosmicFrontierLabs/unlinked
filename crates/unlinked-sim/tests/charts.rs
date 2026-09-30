@@ -315,3 +315,21 @@ fn only_canonical_legacy_kernel_control_flow_is_accepted() {
         assert!(compile(&m, &options()).is_err(), "edit {edit}");
     }
 }
+
+#[test]
+fn wrapper_sample_time_must_be_inherited_and_real_complexity_is_recognized() {
+    let mut m = model();
+    for data in &mut m.charts[0].data {
+        data.complexity = Some("SF_COMPLEX_NO".into());
+    }
+    m.root.blocks[1]
+        .parameters
+        .insert("SystemSampleTime".into(), " -1 ".into());
+    assert!(compile(&m, &options()).is_ok());
+    for sample in ["0.1", "0", "[-1 0]", "garbage"] {
+        m.root.blocks[1]
+            .parameters
+            .insert("SystemSampleTime".into(), sample.into());
+        assert!(compile(&m, &options()).is_err(), "{sample}");
+    }
+}
