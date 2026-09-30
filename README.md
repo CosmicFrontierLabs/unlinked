@@ -14,7 +14,7 @@ The application follows [single-binary-rust-website](https://github.com/meawoppl
 
 This is an independent implementation with partial compatibility. Rendering a model does not mean it can be simulated. Stateflow, arbitrary toolbox/library behavior, MATLAB callbacks, and general masked or conditional subsystem execution are not implemented. Model callbacks are not executed. Supply parameter values explicitly or select an authorized, versioned project initialization script; that path uses a bounded interpreter with no file or process access. Solver settings must be selected explicitly when running from the CLI.
 
-The separately licensed [test corpus](https://github.com/meawoppl/unlinked-test-cases) records upstream URLs, pinned revisions, licenses, checksums, and expected results where available. Corpus tests cover import and rendering; analytic and Octave differential tests cover numerical behavior. Passing import/render checks is not a numerical equivalence claim.
+The separately licensed [test corpus](https://github.com/meawoppl/unlinked-test-cases) records upstream URLs, pinned revisions, licenses, checksums, and expected results where available. Corpus tests cover import and rendering; analytic and Octave differential tests cover numerical behavior. Passing import/render checks is not a numerical equivalence claim. See [compatibility evidence and configured execution scenarios](docs/COMPATIBILITY.md) for the current inventory.
 
 ## Run locally
 
