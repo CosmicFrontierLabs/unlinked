@@ -1,23 +1,23 @@
 # unlinked-matlab
 
-Dependency-free MATLAB/Octave frontend for supported real scalar, matrix and
+MATLAB/Octave frontend for supported real scalar, matrix and
 character-array programs targeting Rust and LLVM. The library
 parses input and generates source without executing it. Explicit bounded APIs
 also evaluate pure expressions and restricted initialization scripts in process.
 The library never launches a compiler, loads files, or provides operating-system
 builtins. It is suitable for use from a WASM application or a server.
 
-Both frontends support `%` line comments and nested `%{` / `%}` block comments
+The parsers support `%` line comments and nested `%{` / `%}` block comments
 (up to 64 levels). Block delimiters must occupy standalone lines; malformed,
 unmatched and unclosed delimiters produce diagnostics. Commented code is never
 parsed or executed, and diagnostic line numbers retain the original source lines.
 
 ```rust
 use std::collections::BTreeMap;
-use unlinked_matlab::{eval_expr, transpile};
+use unlinked_matlab::{eval_expr, transpile_typed};
 let value = eval_expr("gain * sin(pi/2)", &BTreeMap::from([("gain".into(), 2.0)]))?;
 assert_eq!(value, 2.0);
-let rust = transpile("x = 2^3; disp(x);")?;
+let rust = transpile_typed("x = 2^3; disp(x);", false)?;
 # Ok::<(), unlinked_matlab::Error>(())
 ```
 
@@ -38,8 +38,10 @@ cargo run -p unlinked-cli -- transpile functions.m --library --emit llvm-ir -o f
 
 Typed generation uses primitive `f64`/`bool` when proven and `ndarray::ArrayD`
 for arrays, with MATLAB column-major indexing and logical element types. Function
-parameters without type declarations conservatively accept numeric arrays.
-Outputs are typed values or tuples, and script outputs have named fields.
+parameters without type declarations conservatively accept borrowed numeric arrays.
+Outputs are typed values or tuples, and script outputs have named fields for
+persistent bindings. Unobserved loop-only temporaries may be omitted from
+`ScriptOutput`, allowing scalar range loops without materializing an array.
 Potentially unassigned locals report an error when read; they never silently
 become zero. Incompatible type changes and unresolved function signatures produce
 diagnostics. This is conservative inference, not arbitrary MATLAB type inference.
@@ -52,15 +54,16 @@ ArrayD provides N-D headroom without implying support for all N-D MATLAB operati
 
 Generated programs have **no environment map or statement-budget machinery**.
 They are intended for trusted standalone execution; helpers retain shape, index
-and allocation validation. The bounded interpreter used by server simulations
+and checked dimension arithmetic. The bounded interpreter used by server simulations
 is unchanged. Native CLI LLVM generation runs `cargo rustc --emit=llvm-ir` on the
 emitted project, which may fetch/build its dependencies; it never runs the resulting
-program. The browser only generates/downloads source and a complete project ZIP.
+program. LLVM output is one crate module with external dependency declarations;
+retain the Cargo project for linking. The browser downloads a complete project ZIP
+under a single `generated-matlab/` directory.
 
 ## Supported semantics
 
-`transpile(source)` and `transpile_library(source)` both use the single typed
-emitter. There is no pasted-runtime code-generation path. `eval_expr`,
+`transpile_typed(source, library)` emits typed Rust. `eval_expr`,
 `eval_array_expr`, `eval_script` and `eval_function` remain separate bounded
 reference evaluators for model execution.
 
@@ -70,9 +73,13 @@ nonsingular solves, integer matrix powers, one-based indexing, `end`, colon,
 logical masks, zero-filled assignment growth, and explicit control flow. Local
 functions have typed parameters and tuple outputs. Unsupported type joins
 (including logical-to-numeric reassignment, which changes indexing meaning)
-produce diagnostics. MATLAB `arguments` declarations are currently unsupported;
-no static dimensions are guessed. Function input element types may be proven
-from calls within a script; otherwise parameters default to numeric arrays.
+produce diagnostics. Typed compilation accepts a restricted MATLAB `arguments`
+block with `double`, `logical`, or `char` inputs and two dimensions written as
+positive integer literals or `:`. A `(1,1) double` input becomes `f64`; array
+dimensions are checked at the function boundary. Defaults, validators, and block
+attributes are rejected. The bounded interpreter rejects arguments blocks.
+Without declarations, input element types may be proven from calls within a
+script; otherwise parameters default to borrowed numeric arrays.
 
 Builtins include elementwise mathematics, constructors, shape/size queries,
 reductions, sorting, character formatting, assertions, and display. `inv` and
@@ -84,7 +91,7 @@ echo is unsupported; use explicit `disp` or `fprintf`.
 
 Parser limits are 256 KiB source, 16384 tokens, 64 statement nesting levels,
 and 256 expression levels/operators. Semantic helpers validate shapes/indices
-and retain finite allocation limits. Generated code has no statement or recursion
+and use checked dimension arithmetic. Generated code has no statement or recursion
 fuel; it is not a sandbox. The browser accepts at most 64 KiB source and never
 executes the result.
 
@@ -96,23 +103,27 @@ statements; generated code and Octave run the original function. The configured 
 `UNLINKED_TEST_CASES`. Compilation or a configured missing corpus is an error;
 Octave absence is an explicit skip. One documented divergence is matrix logical
 indexing with a row mask: MATLAB/reference semantics produce a column vector,
-while Octave can produce a row vector. That test checks the divergence explicitly
-instead of claiming shared shape conformance.
+while Octave can produce a row vector. A false scalar mask on a row array
+preserves a `1×0` result here, while Octave returns `0×0`. Tests check these
+divergences explicitly instead of claiming shared shape conformance. Shared
+kernel consolidation and remaining output/formatting/assignment gaps are tracked
+in [issue #25](https://github.com/meawoppl/unlinked/issues/25).
 
 ## Portability and extraction
 
-Exported Cargo projects depend on both ndarray and nalgebra with fixed versions;
+Exported Cargo projects depend on both ndarray and nalgebra with compatible version requirements;
 `matlab-rt/` is vendored source and has no dependency on the Unlinked application,
 database, interpreter, or server. Copy the entire project to another repository,
 or integrate its `src/lib.rs` plus the helper crate and dependency declarations.
 The `[workspace]` section keeps standalone exports independent of an enclosing
 Cargo workspace; remove it when deliberately adding the package as a workspace
-member. Cargo resolves dependencies and writes a lockfile on the first build.
+member. Cargo resolves dependencies and writes a lockfile on the first build. The
+manifest declares Rust 1.89 or newer, matching nalgebra’s minimum version.
 
-Generated functions expose Rust primitives and ndarray arrays, not an environment
-map. The helper's canonical array storage is ndarray; dense linear algebra uses
-nalgebra. MATLAB-specific conversion/indexing rules remain small calls rather
-than pasted into every program. Standard Rust error results report unsupported
+Generated functions expose Rust primitives and borrowed ndarray arrays, with typed
+`rt::Error` results. They use named operation helpers rather than runtime
+operator-name strings. Source is formatted in-process for extraction and review. The helper's canonical array storage is ndarray; dense linear algebra uses
+nalgebra. MATLAB-specific conversion and indexing use small helper calls. Standard Rust error results report unsupported
 shapes and invalid operations. Current code requires `std` (including formatting
 and explicit printing) and is **not no_std**. The helper compiles for wasm32, but
 embedding hosts must decide how to handle console output and trusted execution.

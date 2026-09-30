@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use unlinked_matlab::{
     array_runtime::{self as rt, Index, Value, ValueKind},
-    transpile, transpile_typed,
+    transpile_typed,
 };
 fn matrix(rows: usize, cols: usize, data: &[f64]) -> Value {
     Value::new(rows, cols, data.to_vec()).unwrap()
@@ -97,7 +97,7 @@ fn array_runtime_diagnostics_and_parser_limits() {
         "A=[1,];",
         "A=[1];disp(A());",
     ] {
-        assert!(transpile(source).is_err(), "accepted {source}");
+        assert!(transpile_typed(source, false).is_err(), "accepted {source}");
     }
     let nested = format!("A=[{}1{}];", "(".repeat(80), ")".repeat(80));
     assert!(transpile_typed(&nested, false).is_err());
@@ -134,17 +134,17 @@ fn pure_array_parameter_expressions_and_dispatch() {
         );
     }
     assert!(
-        transpile("x=1:3;disp(x);")
+        transpile_typed("x=1:3;disp(x);", false)
             .unwrap()
             .contains("unlinked_matlab_rt")
     );
     assert!(
-        unlinked_matlab::transpile_library("function y=f(x)\ny=x(1);\nend")
+        unlinked_matlab::transpile_typed("function y=f(x)\ny=x(1);\nend", true)
             .unwrap()
             .contains("ArrayD<f64>")
     );
     assert!(
-        unlinked_matlab::transpile_library("function y=f(x)\ny=x^2;\nend")
+        unlinked_matlab::transpile_typed("function y=f(x)\ny=x^2;\nend", true)
             .unwrap()
             .contains("unlinked_matlab_rt")
     );

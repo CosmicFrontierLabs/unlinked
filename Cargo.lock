@@ -789,7 +789,6 @@ dependencies = [
 name = "frontend"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "chrono",
  "futures-util",
  "gloo-events 0.3.0",
@@ -3396,6 +3395,10 @@ dependencies = [
 [[package]]
 name = "unlinked-matlab"
 version = "0.1.0"
+dependencies = [
+ "prettyplease",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "unlinked-matlab-rt"

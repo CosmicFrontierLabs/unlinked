@@ -14,9 +14,9 @@ pub fn generate_project(source: &str, library: bool) -> Result<GeneratedProject,
     Ok(GeneratedProject {
         source: crate::transpile_typed(source, library)?,
         manifest: String::from(concat!(
-            "[package]\nname = \"generated_matlab\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n",
+            "[package]\nname = \"generated_matlab\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.89\"\n\n",
             "# Isolated from any enclosing Cargo workspace.\n[workspace]\n\n",
-            "[dependencies]\nndarray = \"=0.17.2\"\nnalgebra = { version = \"=0.35.0\", default-features = false, features = [\"std\"] }\n",
+            "[dependencies]\nndarray = \"0.17.2\"\nnalgebra = { version = \"0.35.0\", default-features = false, features = [\"std\"] }\n",
             "unlinked-matlab-rt = { path = \"matlab-rt\" }\n"
         )),
         library,
@@ -55,7 +55,7 @@ impl GeneratedProject {
             (
                 "README.md".into(),
                 format!(
-                    "# Generated MATLAB {}\n\nGenerated code uses ndarray and nalgebra. The MATLAB semantics helper is vendored in matlab-rt/.\n\n{}\n\nGenerated standalone code is intended for trusted execution. It does not have the interpreter's statement budgets or cancellation hooks. Array helpers retain shape/index/allocation validation. The current MATLAB semantics subset is real two-dimensional arrays; ArrayD leaves room for future N-D support.\n",
+                    "# Generated MATLAB {}\n\nGenerated code uses ndarray and nalgebra. The MATLAB semantics helper is vendored in matlab-rt/.\n\n{}\n\nGenerated standalone code is intended for trusted execution. It does not have the interpreter's statement budgets or cancellation hooks. Array helpers retain shape/index validation and checked dimension arithmetic. The current MATLAB semantics subset is real two-dimensional arrays; ArrayD leaves room for future N-D support.\n",
                     if self.library { "library" } else { "program" },
                     if self.library {
                         "Build with `cargo build`. Public functions are in src/lib.rs."

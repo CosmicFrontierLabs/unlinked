@@ -443,10 +443,36 @@ pub fn range(start: &Value, step: &Value, stop: &Value) -> ArrayResult<Value> {
         }
         count as usize
     };
+    // Match the exported helper's colon arithmetic: retain a reachable supplied
+    // endpoint exactly and form the second half from that endpoint. An off-grid
+    // stop is never substituted for the last arithmetic progression value.
+    let last_index = count.saturating_sub(1);
+    let tolerance = 4.0 * f64::EPSILON * intervals.abs().max(1.0);
+    let last = if count <= 1 {
+        start
+    } else if (intervals - last_index as f64).abs() <= tolerance {
+        stop
+    } else {
+        start + last_index as f64 * step
+    };
     Value::new(
         1,
         count,
-        (0..count).map(|i| start + i as f64 * step).collect(),
+        (0..count)
+            .map(|i| {
+                if i == 0 {
+                    start
+                } else if i == last_index {
+                    last
+                } else if i == last_index - i {
+                    start.midpoint(last)
+                } else if i < last_index - i {
+                    start + i as f64 * step
+                } else {
+                    last - (last_index - i) as f64 * step
+                }
+            })
+            .collect(),
     )
 }
 pub fn unary(op: &str, value: &Value) -> ArrayResult<Value> {

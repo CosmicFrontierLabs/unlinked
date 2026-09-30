@@ -79,6 +79,7 @@ fn join(a: Ty, b: Ty) -> Result<Ty, Error> {
 #[derive(Clone)]
 struct Signature {
     args: Vec<Ty>,
+    declared: Vec<bool>,
     outputs: Vec<Option<Ty>>,
 }
 type Types = BTreeMap<String, Ty>;
@@ -117,6 +118,19 @@ fn builtin_ty(name: &str, args: &[Ty]) -> Result<Ty, Error> {
         }
         _ => return Err(error(1, format!("unsupported function '{name}'"))),
     })
+}
+fn flattened_reduction(name: &str, args: &[Expr], vars: &BTreeSet<String>) -> Option<Ty> {
+    if args.len() == 1
+        && matches!(&args[0],Expr::Apply(n,indices) if vars.contains(n)&&matches!(indices.as_slice(),[Expr::All]))
+    {
+        match name {
+            "sum" | "prod" => Some(Ty::Number),
+            "all" | "any" => Some(Ty::Bool),
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
 fn expr_ty(
     expr: &Expr,
@@ -203,6 +217,9 @@ fn expr_ty(
             })
         }
         Expr::Apply(n, args) => {
+            if let Some(ty) = flattened_reduction(n, args, vars) {
+                return Ok(Some(ty));
+            }
             if let Some(sig) = functions.get(n) {
                 if sig.args.len() != args.len() {
                     return Err(error(
@@ -244,16 +261,137 @@ fn expression_work(e: &Expr) -> usize {
     }
 }
 fn statement_work(s: &Stmt) -> usize {
-    1 + match s {
-        Stmt::Assign(Target::Index(_, args), e) => {
+    1 + match &s.kind {
+        StmtKind::Assign(Target::Index(_, args), e) => {
             expression_work(e) + args.iter().map(expression_work).sum::<usize>()
         }
-        Stmt::Assign(_, e) | Stmt::Call(e) | Stmt::For(_, e, _) | Stmt::While(e, _) => {
-            expression_work(e)
-        }
-        Stmt::If(branches, _) => branches.iter().map(|(e, _)| expression_work(e)).sum(),
+        StmtKind::Assign(_, e)
+        | StmtKind::Call(e)
+        | StmtKind::For(_, e, _)
+        | StmtKind::While(e, _) => expression_work(e),
+        StmtKind::If(branches, _) => branches.iter().map(|(e, _)| expression_work(e)).sum(),
         _ => 0,
     }
+}
+fn loop_types(body: &[Stmt], outputs: &[String]) -> (BTreeSet<String>, BTreeSet<String>) {
+    fn number(e: &Expr) -> Option<f64> {
+        match e {
+            Expr::Number(n) => Some(*n),
+            Expr::Unary(op, e) if op == "-" => Some(-number(e)?),
+            _ => None,
+        }
+    }
+    fn gather(body: &[Stmt], candidates: &mut BTreeMap<String, bool>) {
+        for s in body {
+            match &s.kind {
+                StmtKind::For(n, Expr::Range(a, b, c), body) => {
+                    let nonempty = match (number(a), number(b), number(c)) {
+                        (Some(a), Some(b), Some(c)) => {
+                            b != 0.0 && ((b > 0.0 && a <= c) || (b < 0.0 && a >= c))
+                        }
+                        _ => false,
+                    };
+                    candidates
+                        .entry(n.clone())
+                        .and_modify(|old| *old &= nonempty)
+                        .or_insert(nonempty);
+                    gather(body, candidates);
+                }
+                StmtKind::For(n, _, body) => {
+                    candidates.insert(n.clone(), false);
+                    gather(body, candidates);
+                }
+                StmtKind::While(_, body) => gather(body, candidates),
+                StmtKind::If(branches, other) => {
+                    for (_, b) in branches {
+                        gather(b, candidates);
+                    }
+                    gather(other, candidates);
+                }
+                _ => {}
+            }
+        }
+    }
+    fn reads_name(e: &Expr, n: &str) -> bool {
+        match e {
+            Expr::Var(name) => name == n,
+            Expr::Apply(name, args) => name == n || args.iter().any(|e| reads_name(e, n)),
+            Expr::Unary(_, a) => reads_name(a, n),
+            Expr::Binary(_, a, b) => reads_name(a, n) || reads_name(b, n),
+            Expr::Range(a, b, c) => reads_name(a, n) || reads_name(b, n) || reads_name(c, n),
+            Expr::Array(rows) => rows.iter().flatten().any(|e| reads_name(e, n)),
+            _ => false,
+        }
+    }
+    fn escapes(body: &[Stmt], n: &str) -> bool {
+        body.iter().any(|s| match &s.kind {
+            StmtKind::For(name, range, _) if name == n => reads_name(range, n),
+            StmtKind::For(_, e, b) | StmtKind::While(e, b) => reads_name(e, n) || escapes(b, n),
+            StmtKind::Assign(t, e) => {
+                reads_name(e, n)
+                    || match t {
+                        Target::Name(name) => name == n,
+                        Target::Index(name, args) => {
+                            name == n || args.iter().any(|e| reads_name(e, n))
+                        }
+                        Target::Many(names) => names.iter().any(|name| name == n),
+                    }
+            }
+            StmtKind::Call(e) => reads_name(e, n),
+            StmtKind::If(branches, other) => {
+                branches
+                    .iter()
+                    .any(|(e, b)| reads_name(e, n) || escapes(b, n))
+                    || escapes(other, n)
+            }
+            _ => false,
+        })
+    }
+    fn nonrange_loops(body: &[Stmt], names: &mut BTreeSet<String>) {
+        for s in body {
+            match &s.kind {
+                StmtKind::For(n, e, b) => {
+                    if !matches!(e, Expr::Range(..)) {
+                        names.insert(n.clone());
+                    }
+                    nonrange_loops(b, names);
+                }
+                StmtKind::While(_, b) => nonrange_loops(b, names),
+                StmtKind::If(branches, other) => {
+                    for (_, b) in branches {
+                        nonrange_loops(b, names);
+                    }
+                    nonrange_loops(other, names);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut nonrange = BTreeSet::new();
+    nonrange_loops(body, &mut nonrange);
+    let mut candidates = BTreeMap::new();
+    gather(body, &mut candidates);
+    let mut scalar = BTreeSet::new();
+    let mut hidden = BTreeSet::new();
+    for (n, nonempty) in candidates {
+        if nonrange.contains(&n) {
+            continue;
+        }
+        let local = !outputs.contains(&n) && !escapes(body, &n);
+        if nonempty || local {
+            scalar.insert(n.clone());
+        }
+        if local {
+            hidden.insert(n);
+        }
+    }
+    (scalar, hidden)
+}
+fn at_statement(mut error: Error, line: usize) -> Error {
+    if error.line == 1 {
+        error.line = line;
+    }
+    error
 }
 fn infer_body(
     body: &[Stmt],
@@ -261,82 +399,97 @@ fn infer_body(
     vars: &BTreeSet<String>,
     functions: &BTreeMap<String, Signature>,
     budget: &mut usize,
+    scalar_loops: &BTreeSet<String>,
 ) -> Result<(), Error> {
     for s in body {
         *budget = budget
             .checked_sub(statement_work(s))
             .ok_or_else(|| error(1, "typed inference work budget exceeded"))?;
-        match s {
-            Stmt::Assign(Target::Name(n), e) => {
-                if let Some(t) = expr_ty(e, types, vars, functions)? {
-                    assign_type(types, n, t)?
-                }
-            }
-            Stmt::Assign(Target::Index(n, _), e) => {
-                if let Some(t) = expr_ty(e, types, vars, functions)? {
-                    let target = types.get(n).copied().unwrap_or(t).array();
-                    assign_type(types, n, target)?
-                }
-            }
-            Stmt::Assign(Target::Many(names), e) if names.len() == 1 => {
-                if let Some(t) = expr_ty(e, types, vars, functions)? {
-                    assign_type(types, &names[0], t)?;
-                }
-            }
-            Stmt::Assign(Target::Many(names), Expr::Apply(n, args)) => {
-                if let Some(sig) = functions.get(n) {
-                    if names.len() > sig.outputs.len() {
-                        return Err(error(
-                            1,
-                            format!("{n} supplies only {} outputs", sig.outputs.len()),
-                        ));
+        let result = (|| -> Result<(), Error> {
+            match &s.kind {
+                StmtKind::Assign(Target::Name(n), e) => {
+                    if let Some(t) = expr_ty(e, types, vars, functions)? {
+                        assign_type(types, n, t)?
                     }
-                    for (name, t) in names.iter().zip(&sig.outputs) {
-                        if let Some(t) = t {
-                            assign_type(types, name, *t)?
+                }
+                StmtKind::Assign(Target::Index(n, _), e) => {
+                    if let Some(t) = expr_ty(e, types, vars, functions)? {
+                        let target = types.get(n).copied().unwrap_or(t).array();
+                        assign_type(types, n, target)?
+                    }
+                }
+                StmtKind::Assign(Target::Many(names), e) if names.len() == 1 => {
+                    if let Some(t) = expr_ty(e, types, vars, functions)? {
+                        assign_type(types, &names[0], t)?;
+                    }
+                }
+                StmtKind::Assign(Target::Many(names), Expr::Apply(n, args)) => {
+                    if let Some(sig) = functions.get(n) {
+                        if names.len() > sig.outputs.len() {
+                            return Err(error(
+                                1,
+                                format!("{n} supplies only {} outputs", sig.outputs.len()),
+                            ));
+                        }
+                        for (name, t) in names.iter().zip(&sig.outputs) {
+                            if let Some(t) = t {
+                                assign_type(types, name, *t)?
+                            }
+                        }
+                    } else {
+                        let Some(argtypes) = args
+                            .iter()
+                            .map(|e| expr_ty(e, types, vars, functions))
+                            .collect::<Result<Option<Vec<_>>, _>>()?
+                        else {
+                            return Ok(());
+                        };
+                        if n != "size" || names.len() != 2 {
+                            return Err(error(1, format!("multiple outputs unsupported for {n}")));
+                        }
+                        for (i, name) in names.iter().enumerate() {
+                            let t = if n == "size" {
+                                Ty::Number
+                            } else if i == 0 {
+                                builtin_ty(n, &argtypes)?.numeric()
+                            } else {
+                                Ty::Numbers
+                            };
+                            assign_type(types, name, t)?
                         }
                     }
-                } else {
-                    let Some(argtypes) = args
-                        .iter()
-                        .map(|e| expr_ty(e, types, vars, functions))
-                        .collect::<Result<Option<Vec<_>>, _>>()?
-                    else {
-                        continue;
-                    };
-                    if !["size", "min", "max", "sort", "find"].contains(&n.as_str()) {
-                        return Err(error(1, format!("multiple outputs unsupported for {n}")));
+                }
+                StmtKind::Assign(Target::Many(_), _) => {
+                    return Err(error(1, "multiple assignment requires a function call"));
+                }
+                StmtKind::For(n, e, b) => {
+                    if let Some(t) = expr_ty(e, types, vars, functions)? {
+                        assign_type(
+                            types,
+                            n,
+                            if matches!(e, Expr::Range(..)) && scalar_loops.contains(n) {
+                                Ty::Number
+                            } else {
+                                t.array()
+                            },
+                        )?
                     }
-                    for (i, name) in names.iter().enumerate() {
-                        let t = if n == "size" {
-                            Ty::Number
-                        } else if i == 0 {
-                            builtin_ty(n, &argtypes)?.numeric()
-                        } else {
-                            Ty::Numbers
-                        };
-                        assign_type(types, name, t)?
+                    infer_body(b, types, vars, functions, budget, scalar_loops)?
+                }
+                StmtKind::While(_, b) => {
+                    infer_body(b, types, vars, functions, budget, scalar_loops)?
+                }
+                StmtKind::If(branches, other) => {
+                    for (_, b) in branches {
+                        infer_body(b, types, vars, functions, budget, scalar_loops)?
                     }
+                    infer_body(other, types, vars, functions, budget, scalar_loops)?
                 }
+                _ => {}
             }
-            Stmt::Assign(Target::Many(_), _) => {
-                return Err(error(1, "multiple assignment requires a function call"));
-            }
-            Stmt::For(n, e, b) => {
-                if let Some(t) = expr_ty(e, types, vars, functions)? {
-                    assign_type(types, n, t.array())?
-                }
-                infer_body(b, types, vars, functions, budget)?
-            }
-            Stmt::While(_, b) => infer_body(b, types, vars, functions, budget)?,
-            Stmt::If(branches, other) => {
-                for (_, b) in branches {
-                    infer_body(b, types, vars, functions, budget)?
-                }
-                infer_body(other, types, vars, functions, budget)?
-            }
-            _ => {}
-        }
+            Ok(())
+        })();
+        result.map_err(|error| at_statement(error, s.line))?;
     }
     Ok(())
 }
@@ -345,13 +498,15 @@ fn scope_types(
     args: &[(String, Ty)],
     functions: &BTreeMap<String, Signature>,
     budget: &mut usize,
+    outputs: &[String],
 ) -> Result<(Types, BTreeSet<String>), Error> {
+    let (scalar_loops, _) = loop_types(body, outputs);
     let mut vars = args.iter().map(|(n, _)| n.clone()).collect();
     assigned(body, &mut vars);
     let mut types: Types = args.iter().cloned().collect();
     for _ in 0..(vars.len().saturating_mul(3) + 1).min(50_000) {
         let before = types.clone();
-        infer_body(body, &mut types, &vars, functions, budget)?;
+        infer_body(body, &mut types, &vars, functions, budget, &scalar_loops)?;
         if before == types {
             break;
         }
@@ -376,7 +531,6 @@ fn call_evidence_expr(
                 }
                 for (slot, arg) in slots.iter_mut().zip(args) {
                     if let Some(t) = expr_ty(arg, types, vars, functions)? {
-                        let t = if t == Ty::Text { Ty::Text } else { t.array() };
                         *slot = Some(if let Some(old) = *slot {
                             join(old, t)?
                         } else {
@@ -416,29 +570,33 @@ fn call_evidence(
     evidence: &mut BTreeMap<String, Vec<Option<Ty>>>,
 ) -> Result<(), Error> {
     for s in body {
-        match s {
-            Stmt::Assign(target, e) => {
-                call_evidence_expr(e, types, vars, functions, evidence)?;
-                if let Target::Index(_, args) = target {
-                    for e in args {
-                        call_evidence_expr(e, types, vars, functions, evidence)?;
+        let result = (|| -> Result<(), Error> {
+            match &s.kind {
+                StmtKind::Assign(target, e) => {
+                    call_evidence_expr(e, types, vars, functions, evidence)?;
+                    if let Target::Index(_, args) = target {
+                        for e in args {
+                            call_evidence_expr(e, types, vars, functions, evidence)?;
+                        }
                     }
                 }
-            }
-            Stmt::Call(e) => call_evidence_expr(e, types, vars, functions, evidence)?,
-            Stmt::If(branches, other) => {
-                for (c, b) in branches {
-                    call_evidence_expr(c, types, vars, functions, evidence)?;
+                StmtKind::Call(e) => call_evidence_expr(e, types, vars, functions, evidence)?,
+                StmtKind::If(branches, other) => {
+                    for (c, b) in branches {
+                        call_evidence_expr(c, types, vars, functions, evidence)?;
+                        call_evidence(b, types, vars, functions, evidence)?;
+                    }
+                    call_evidence(other, types, vars, functions, evidence)?;
+                }
+                StmtKind::While(e, b) | StmtKind::For(_, e, b) => {
+                    call_evidence_expr(e, types, vars, functions, evidence)?;
                     call_evidence(b, types, vars, functions, evidence)?;
                 }
-                call_evidence(other, types, vars, functions, evidence)?;
+                _ => {}
             }
-            Stmt::While(e, b) | Stmt::For(_, e, b) => {
-                call_evidence_expr(e, types, vars, functions, evidence)?;
-                call_evidence(b, types, vars, functions, evidence)?;
-            }
-            _ => {}
-        }
+            Ok(())
+        })();
+        result.map_err(|error| at_statement(error, s.line))?;
     }
     Ok(())
 }
@@ -488,8 +646,8 @@ fn definite(
     outputs: &[String],
 ) -> BTreeSet<String> {
     for s in body {
-        match s {
-            Stmt::Assign(target, e) => {
+        match &s.kind {
+            StmtKind::Assign(target, e) => {
                 reads(e, vars, &defined, optional);
                 match target {
                     Target::Name(n) => {
@@ -507,8 +665,8 @@ fn definite(
                     }
                 }
             }
-            Stmt::Call(e) => reads(e, vars, &defined, optional),
-            Stmt::If(branches, other) => {
+            StmtKind::Call(e) => reads(e, vars, &defined, optional),
+            StmtKind::If(branches, other) => {
                 let mut endings = vec![];
                 for (c, b) in branches {
                     reads(c, vars, &defined, optional);
@@ -520,16 +678,16 @@ fn definite(
                     .reduce(|a, b| a.intersection(&b).cloned().collect())
                     .unwrap_or(defined);
             }
-            Stmt::While(e, b) => {
+            StmtKind::While(e, b) => {
                 reads(e, vars, &defined, optional);
                 definite(b, vars, defined.clone(), optional, outputs);
             }
-            Stmt::For(n, e, b) => {
+            StmtKind::For(n, e, b) => {
                 reads(e, vars, &defined, optional);
                 defined.insert(n.clone());
                 definite(b, vars, defined.clone(), optional, outputs);
             }
-            Stmt::Return => {
+            StmtKind::Return => {
                 for n in outputs {
                     if !defined.contains(n) {
                         optional.insert(n.clone());
@@ -545,6 +703,10 @@ struct TypedGenerator<'a> {
     types: Types,
     vars: BTreeSet<String>,
     optional: BTreeSet<String>,
+    borrowed: BTreeSet<String>,
+    mutable: BTreeSet<String>,
+    hidden_loops: BTreeSet<String>,
+    inline: BTreeSet<String>,
     functions: &'a BTreeMap<String, Signature>,
     outputs: Vec<String>,
     serial: usize,
@@ -555,13 +717,47 @@ impl TypedGenerator<'_> {
         expr_ty(e,&self.types,&self.vars,self.functions)?.ok_or_else(||error(1,"cannot determine expression type; recursive functions require a resolvable output type"))
     }
     fn variable(&self, n: &str) -> String {
+        let scalar = self.types[n].scalar();
         if self.optional.contains(n) {
-            format!(
-                "v_{n}.as_ref().ok_or_else(|| {:?}.to_string())?.clone()",
-                format!("undefined variable '{n}'")
-            )
+            let reference = format!("v_{n}.as_ref().ok_or_else(|| rt::Error::undefined({n:?}))?");
+            if scalar {
+                format!("*({reference})")
+            } else {
+                format!("({reference}).clone()")
+            }
+        } else if scalar {
+            format!("v_{n}")
+        } else if self.borrowed.contains(n) {
+            format!("(*v_{n}).clone()")
         } else {
             format!("v_{n}.clone()")
+        }
+    }
+    fn borrow_variable(&self, n: &str) -> String {
+        if self.optional.contains(n) {
+            format!("v_{n}.as_ref().ok_or_else(|| rt::Error::undefined({n:?}))?")
+        } else if self.borrowed.contains(n) {
+            format!("v_{n}")
+        } else {
+            format!("&v_{n}")
+        }
+    }
+    fn move_variable(&self, n: &str) -> String {
+        if self.optional.contains(n) {
+            format!("v_{n}.ok_or_else(|| rt::Error::undefined({n:?}))?")
+        } else if self.borrowed.contains(n) {
+            format!("(*v_{n}).clone()")
+        } else {
+            format!("v_{n}")
+        }
+    }
+    fn borrow(&mut self, e: &Expr, end: Option<&str>) -> Result<String, Error> {
+        if let Expr::Var(n) = e
+            && self.vars.contains(n)
+        {
+            Ok(self.borrow_variable(n))
+        } else {
+            Ok(format!("&({})", self.expr(e, end)?))
         }
     }
     fn cast(&self, code: String, from: Ty, to: Ty) -> String {
@@ -577,10 +773,13 @@ impl TypedGenerator<'_> {
         Ok(self.cast(c, t, Ty::Number))
     }
     fn args(&mut self, args: &[Expr], end: Option<&str>) -> Result<String, Error> {
+        if args.len() > 32 {
+            return Err(error(1, "built-in calls support at most 32 arguments"));
+        }
         args.iter()
-            .map(|e| Ok(format!("&({}) as &dyn rt::Matlab", self.expr(e, end)?)))
-            .collect::<Result<Vec<_>, Error>>()
-            .map(|v| v.join(", "))
+            .map(|e| self.borrow(e, end))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| argument_tuple(&v))
     }
     fn expr(&mut self, e: &Expr, end: Option<&str>) -> Result<String, Error> {
         let ty = self.ty(e)?;
@@ -609,17 +808,43 @@ impl TypedGenerator<'_> {
                 let v = self.expr(a, end)?;
                 match op.as_str() {
                     "+" if a_ty.scalar() => self.cast(v, a_ty, Ty::Number),
-                    "-" if a_ty.scalar() => format!("(-({}))", self.cast(v, a_ty, Ty::Number)),
+                    "-" if a_ty.scalar() => format!("-({})", self.cast(v, a_ty, Ty::Number)),
+                    "~" if a_ty == Ty::Bool => format!("!({v})"),
                     "~" if a_ty.scalar() => format!("!rt::scalar_truth(&({v}))?"),
                     "'" | ".'" if a_ty.scalar() => v,
-                    _ => format!("rt::unary::<{}>({op:?}, &({v}))?", ty.rust()),
+                    _ => {
+                        let name = match op.as_str() {
+                            "+" => "positive",
+                            "-" => "negative",
+                            "~" => "not",
+                            "'" | ".'" => "transpose",
+                            _ => return Err(error(1, "unsupported unary operator")),
+                        };
+                        format!("rt::{name}::<{}>({})?", ty.rust(), self.borrow(a, end)?)
+                    }
                 }
             }
             Expr::Binary(op, a, b) => {
                 let (a_ty, b_ty) = (self.ty(a)?, self.ty(b)?);
                 let (a, b) = (self.expr(a, end)?, self.expr(b, end)?);
                 if op == "&&" || op == "||" {
-                    format!("(rt::scalar_truth(&({a}))? {op} rt::scalar_truth(&({b}))?)")
+                    {
+                        let a = if a_ty == Ty::Bool {
+                            a
+                        } else {
+                            format!("rt::scalar_truth(&({a}))?")
+                        };
+                        let b = if b_ty == Ty::Bool {
+                            b
+                        } else {
+                            format!("rt::scalar_truth(&({b}))?")
+                        };
+                        format!("({a}) {op} ({b})")
+                    }
+                } else if ["==", "~=", "<", "<=", ">", ">="].contains(&op.as_str())
+                    && matches!(e, Expr::Binary(_,left,right) if literal_nan(left)||literal_nan(right))
+                {
+                    format!("rt::{}::<{}>(&({a}), &({b}))?", binary_name(op)?, ty.rust())
                 } else if a_ty.scalar() && b_ty.scalar() {
                     let (a, b) = (
                         self.cast(a, a_ty, Ty::Number),
@@ -627,18 +852,46 @@ impl TypedGenerator<'_> {
                     );
                     match op.as_str() {
                         "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "==" => {
-                            format!("(({a}) {op} ({b}))")
+                            format!("({a}) {op} ({b})")
                         }
-                        ".*" => format!("(({a}) * ({b}))"),
-                        "./" => format!("(({a}) / ({b}))"),
-                        "\\" | ".\\" => format!("(({b}) / ({a}))"),
-                        "^" | ".^" => format!("rt::binary::<f64>({op:?}, &({a}), &({b}))?"),
-                        "~=" => format!("(({a}) != ({b}))"),
-                        "&" | "|" => format!("rt::binary::<bool>({op:?}, &({a}), &({b}))?"),
+                        ".*" => format!("({a}) * ({b})"),
+                        "./" => format!("({a}) / ({b})"),
+                        "\\" | ".\\" => format!("({b}) / ({a})"),
+                        "^" | ".^" => {
+                            let exponent = match e {
+                                Expr::Binary(_, _, right) => integer_literal(right),
+                                _ => None,
+                            };
+                            if let Some(exponent) = exponent {
+                                format!("({a}).powi({exponent})")
+                            } else {
+                                format!("rt::power::<f64>(&({a}), &({b}))?")
+                            }
+                        }
+                        "~=" => format!("({a}) != ({b})"),
+                        "&" | "|" => format!("rt::{}::<bool>(&({a}), &({b}))?", binary_name(op)?),
                         _ => return Err(error(1, format!("unsupported scalar operator {op}"))),
                     }
                 } else {
-                    format!("rt::binary::<{}>({op:?}, &({a}), &({b}))?", ty.rust())
+                    format!(
+                        "rt::{}::<{}>({}, {})?",
+                        binary_name(op)?,
+                        ty.rust(),
+                        self.borrow(
+                            match e {
+                                Expr::Binary(_, a, _) => a,
+                                _ => unreachable!(),
+                            },
+                            end
+                        )?,
+                        self.borrow(
+                            match e {
+                                Expr::Binary(_, _, b) => b,
+                                _ => unreachable!(),
+                            },
+                            end
+                        )?
+                    )
                 }
             }
             Expr::Range(a, b, c) => format!(
@@ -648,17 +901,23 @@ impl TypedGenerator<'_> {
                 self.scalar(c, end)?
             ),
             Expr::Array(rows) => {
+                if rows.len() > 32 {
+                    return Err(error(
+                        1,
+                        "typed array literals support at most 32 rows per concatenation",
+                    ));
+                }
                 let rows = rows
                     .iter()
-                    .map(|r| Ok(format!("&[{}]", self.args(r, end)?)))
-                    .collect::<Result<Vec<_>, Error>>()?;
-                format!("rt::concatenate::<{}>(&[{}])?", ty.rust(), rows.join(", "))
+                    .map(|row| self.args(row, end))
+                    .collect::<Result<Vec<_>, _>>()?;
+                format!("rt::concat::<{}>({})?", ty.rust(), argument_tuple(&rows))
             }
             Expr::Apply(n, args) if self.vars.contains(n) => {
-                let base = self.variable(n);
-                let indices = self.indices(args, "indexed")?;
+                let base = self.borrow_variable(n);
+                let indices = self.indices(args, "_indexed")?;
                 format!(
-                    "{{ let indexed = {base}; rt::index::<{}>(&indexed, &[{indices}])? }}",
+                    "{{ let _indexed = {base}; rt::index::<{}>(_indexed, &[{indices}])? }}",
                     ty.rust()
                 )
             }
@@ -677,7 +936,7 @@ impl TypedGenerator<'_> {
                 } else {
                     Ok(format!(
                         "rt::Index::values(&({}))?",
-                        self.expr(e, Some(&format!("rt::end(&{base}, {i}, {})?", args.len())))?
+                        self.expr(e, Some(&format!("rt::end({base}, {i}, {})?", args.len())))?
                     ))
                 }
             })
@@ -715,8 +974,17 @@ impl TypedGenerator<'_> {
             let mut values = vec![];
             for (e, t) in args.iter().zip(&sig.args) {
                 let from = self.ty(e)?;
-                let code = self.expr(e, end)?;
-                values.push(self.cast(code, from, *t));
+                if !t.scalar() && from == *t {
+                    values.push(self.borrow(e, end)?);
+                } else {
+                    let code = self.expr(e, end)?;
+                    let converted = self.cast(code, from, *t);
+                    values.push(if t.scalar() {
+                        converted
+                    } else {
+                        format!("&({converted})")
+                    });
+                }
             }
             let mut code = format!("f_{n}({})?", values.join(", "));
             if count == 1 && outputs.len() > 1 {
@@ -728,36 +996,59 @@ impl TypedGenerator<'_> {
                 return Err(error(1, format!("unsupported function '{n}'")));
             }
             let values = self.args(args, end)?;
-            if count == 0 {
-                return Ok((format!("rt::call_void({n:?}, &[{values}])?"), vec![]));
+            if count == 0 && ["disp", "assert", "error"].contains(&n) {
+                return Ok((format!("rt::{n}({values})?"), vec![]));
+            }
+            if count == 0 && n == "fprintf" {
+                return Ok((format!("rt::fprintf_void({values})?"), vec![]));
             }
             let types = args
                 .iter()
                 .map(|e| self.ty(e))
                 .collect::<Result<Vec<_>, _>>()?;
-            let ty = builtin_ty(n, &types)?;
-            if count == 1 {
-                Ok((
-                    format!("rt::call::<{}>({n:?}, &[{values}])?", ty.rust()),
-                    vec![ty],
-                ))
+            let ty = flattened_reduction(n, args, &self.vars)
+                .map(Ok)
+                .unwrap_or_else(|| builtin_ty(n, &types))?;
+            if count <= 1 {
+                if n == "transpose" {
+                    if args.len() != 1 {
+                        return Err(error(1, "transpose expects one argument"));
+                    }
+                    return Ok((
+                        format!(
+                            "rt::transpose::<{}>({})?",
+                            ty.rust(),
+                            self.borrow(&args[0], end)?
+                        ),
+                        vec![ty],
+                    ));
+                }
+                let name = if n == "mod" { "modulo" } else { n };
+                Ok((format!("rt::{name}::<{}>({values})?", ty.rust()), vec![ty]))
             } else {
-                if !["size", "min", "max", "sort", "find"].contains(&n) {
+                if n != "size" || count != 2 {
                     return Err(error(1, format!("multiple outputs unsupported for {n}")));
                 }
                 Ok((
-                    format!("rt::call_outputs::<ArrayD<f64>>({n:?}, &[{values}], {count})?"),
+                    format!("rt::{n}_outputs::<ArrayD<f64>>({values}, {count})?"),
                     vec![Ty::Numbers; count],
                 ))
             }
         }
     }
-    fn store(&self, n: &str, code: String, from: Ty) -> Result<String, Error> {
+    fn store(&mut self, n: &str, code: String, from: Ty) -> Result<String, Error> {
         let to = *self
             .types
             .get(n)
             .ok_or_else(|| error(1, format!("cannot infer type of '{n}'")))?;
         let code = self.cast(code, from, to);
+        if self.inline.remove(n) {
+            return Ok(format!(
+                "let {}v_{n}: {} = {code};\n",
+                if self.mutable.contains(n) { "mut " } else { "" },
+                to.rust()
+            ));
+        }
         Ok(format!(
             "v_{n} = {};\n",
             if self.optional.contains(n) {
@@ -771,116 +1062,239 @@ impl TypedGenerator<'_> {
         let values = self
             .outputs
             .iter()
-            .map(|n| self.variable(n))
+            .map(|n| self.move_variable(n))
             .collect::<Vec<_>>();
         format!("Ok({})", tuple(&values))
     }
     fn body(&mut self, body: &[Stmt], depth: usize) -> Result<String, Error> {
         let mut out = String::new();
         for s in body {
-            match s {
-                Stmt::Assign(Target::Name(n), e) => {
-                    let t = self.ty(e)?;
-                    let c = self.expr(e, None)?;
-                    out.push_str(&self.store(n, c, t)?);
-                }
-                Stmt::Assign(Target::Index(n, args), e) => {
-                    let ty = *self
-                        .types
-                        .get(n)
-                        .ok_or_else(|| error(1, format!("cannot infer indexed variable '{n}'")))?;
-                    let value = self.expr(e, None)?;
-                    let indices = self.indices(args, "indexed")?;
-                    let base = if self.optional.contains(n) {
-                        format!(
-                            "v_{n}.clone().unwrap_or_else(|| ArrayD::from_shape_vec(ndarray::IxDyn(&[0, 0]), vec![]).expect(\"empty array\"))"
-                        )
-                    } else {
-                        self.variable(n)
-                    };
-                    out.push_str(&format!("{{ let assigned_value = {value}; let mut indexed: {} = {base}; let indices = [{indices}]; rt::assign(&mut indexed, &indices, &assigned_value)?; {} }}\n",ty.rust(),self.store(n,"indexed".into(),ty)?));
-                }
-                Stmt::Assign(Target::Many(names), e) if names.len() == 1 => {
-                    let t = self.ty(e)?;
-                    let c = self.expr(e, None)?;
-                    out.push_str(&self.store(&names[0], c, t)?);
-                }
-                Stmt::Assign(Target::Many(names), Expr::Apply(n, args)) => {
-                    self.serial += 1;
-                    let id = self.serial;
-                    let (code, types) = self.call(n, args, names.len(), None)?;
-                    out.push_str(&format!("{{ let result_{id} = {code};\n"));
-                    for (i, name) in names.iter().enumerate() {
-                        let c = if self.functions.contains_key(n) {
-                            if types.len() == 1 {
-                                format!("result_{id}.clone()")
-                            } else {
-                                format!("result_{id}.{i}.clone()")
-                            }
-                        } else {
-                            format!("result_{id}[{i}].clone()")
-                        };
-                        out.push_str(&self.store(name, c, types[i])?)
+            let result = (|| -> Result<(), Error> {
+                match &s.kind {
+                    StmtKind::Assign(Target::Name(n), e) => {
+                        let t = self.ty(e)?;
+                        let c = self.expr(e, None)?;
+                        out.push_str(&self.store(n, c, t)?);
                     }
-                    out.push_str("}\n");
-                }
-                Stmt::Assign(Target::Many(_), _) => {
-                    return Err(error(1, "multiple assignment requires a call"));
-                }
-                Stmt::Call(Expr::Apply(n, args)) => {
-                    let (code, _) = self.call(n, args, 0, None)?;
-                    out.push_str(&format!("let _ = {code};\n"));
-                }
-                Stmt::Call(_) => return Err(error(1, "bare expression display is unsupported")),
-                Stmt::If(branches, other) => {
-                    for (i, (c, b)) in branches.iter().enumerate() {
-                        let cond = self.expr(c, None)?;
+                    StmtKind::Assign(Target::Index(n, args), e) => {
+                        let ty = self.types[n];
+                        let value = self.expr(e, None)?;
+                        let indices = self.indices(args, "_indexed")?;
+                        out.push_str(&format!("{{ let assigned_value = {value};\n"));
+                        if self.optional.contains(n) {
+                            out.push_str(&format!("let empty: {} = ArrayD::from_shape_vec(ndarray::IxDyn(&[0,0]), vec![]).expect(\"empty array\");\nlet indices = {{ let _indexed = v_{n}.as_ref().unwrap_or(&empty); [{indices}] }};\nif v_{n}.is_none() {{ v_{n}=Some(empty); }}\nrt::assign(v_{n}.as_mut().expect(\"initialized array\"), &indices, &assigned_value)?;\n",ty.rust()));
+                        } else {
+                            out.push_str(&format!("let indices = {{ let _indexed = &v_{n}; [{indices}] }};\nrt::assign(&mut v_{n}, &indices, &assigned_value)?;\n"));
+                        }
+                        out.push_str("}\n");
+                    }
+                    StmtKind::Assign(Target::Many(names), e) if names.len() == 1 => {
+                        let t = self.ty(e)?;
+                        let c = self.expr(e, None)?;
+                        out.push_str(&self.store(&names[0], c, t)?);
+                    }
+                    StmtKind::Assign(Target::Many(names), Expr::Apply(n, args)) => {
+                        self.serial += 1;
+                        let id = self.serial;
+                        let (code, types) = self.call(n, args, names.len(), None)?;
+                        out.push_str(&format!("{{ let result_{id} = {code};\n"));
+                        for (i, name) in names.iter().enumerate() {
+                            let c = if self.functions.contains_key(n) {
+                                if types.len() == 1 {
+                                    format!("result_{id}.clone()")
+                                } else {
+                                    format!("result_{id}.{i}.clone()")
+                                }
+                            } else {
+                                format!("result_{id}[{i}].clone()")
+                            };
+                            out.push_str(&self.store(name, c, types[i])?)
+                        }
+                        out.push_str("}\n");
+                    }
+                    StmtKind::Assign(Target::Many(_), _) => {
+                        return Err(error(1, "multiple assignment requires a call"));
+                    }
+                    StmtKind::Call(Expr::Apply(n, args)) => {
+                        let (code, outputs) = self.call(n, args, 0, None)?;
                         out.push_str(&format!(
-                            "{}if rt::truth(&({cond}))? {{\n{} }}",
-                            if i == 0 { "" } else { " else " },
-                            self.body(b, depth)?
+                            "{}{code};\n",
+                            if outputs.is_empty() { "" } else { "let _ = " }
                         ));
                     }
-                    out.push_str(&format!(" else {{\n{} }}\n", self.body(other, depth)?));
-                }
-                Stmt::While(c, b) => {
-                    let cond = self.expr(c, None)?;
-                    out.push_str(&format!(
-                        "while rt::truth(&({cond}))? {{\n{} }}\n",
-                        self.body(b, depth + 1)?
-                    ));
-                }
-                Stmt::For(n, e, b) => {
-                    self.serial += 1;
-                    let id = self.serial;
-                    let from = self.ty(e)?;
-                    let ty = *self
-                        .types
-                        .get(n)
-                        .ok_or_else(|| error(1, "cannot infer loop variable type"))?;
-                    let value = self.expr(e, None)?;
-                    let converted = self.cast(format!("range_{id}.clone()"), from, ty);
-                    out.push_str(&format!("{{ let range_{id} = {value}; {} for column in rt::columns::<{}>(&range_{id})? {{ {} {} }} }}\n",self.store(n,converted,ty)?,ty.rust(),self.store(n,"column".into(),ty)?,self.body(b,depth+1)?));
-                }
-                Stmt::Break | Stmt::Continue => {
-                    if depth == 0 {
-                        return Err(error(1, "break/continue outside loop"));
+                    StmtKind::Call(_) => {
+                        return Err(error(1, "bare expression display is unsupported"));
                     }
-                    out.push_str(if matches!(s, Stmt::Break) {
-                        "break;\n"
-                    } else {
-                        "continue;\n"
-                    });
-                }
-                Stmt::Return => {
-                    if !self.in_function {
-                        return Err(error(1, "return outside function"));
+                    StmtKind::If(branches, other) => {
+                        for (i, (c, b)) in branches.iter().enumerate() {
+                            let cond = if self.ty(c)? == Ty::Bool {
+                                self.expr(c, None)?
+                            } else {
+                                format!("rt::truth({})?", self.borrow(c, None)?)
+                            };
+                            out.push_str(&format!(
+                                "{}if {cond} {{\n{} }}",
+                                if i == 0 { "" } else { " else " },
+                                self.body(b, depth)?
+                            ));
+                        }
+                        out.push_str(&format!(" else {{\n{} }}\n", self.body(other, depth)?));
                     }
-                    out.push_str(&format!("return {};\n", self.returns()));
+                    StmtKind::While(c, b) => {
+                        let cond = self.borrow(c, None)?;
+                        out.push_str(&format!(
+                            "while rt::truth({cond})? {{\n{} }}\n",
+                            self.body(b, depth + 1)?
+                        ));
+                    }
+                    StmtKind::For(n, e, b) => {
+                        self.serial += 1;
+                        let id = self.serial;
+                        let ty = self.types[n];
+                        if let Expr::Range(start, step, stop) = e {
+                            let start = self.scalar(start, None)?;
+                            let step = self.scalar(step, None)?;
+                            let stop = self.scalar(stop, None)?;
+                            out.push_str(&format!("{{ let range_start_{id}={start}; let values_{id}=rt::range_iter(range_start_{id}, {step}, {stop})?;\n"));
+                            if !self.hidden_loops.contains(n) {
+                                let initial = if ty.scalar() {
+                                    format!("range_start_{id}")
+                                } else {
+                                    "rt::array(1, 0, vec![])?".to_string()
+                                };
+                                out.push_str(&self.store(n, initial, ty)?);
+                            }
+                            out.push_str(&format!("for range_value_{id} in values_{id} {{\n"));
+                            if self.hidden_loops.contains(n) {
+                                let mut writes = BTreeSet::new();
+                                assigned(b, &mut writes);
+                                let value = self.cast(format!("range_value_{id}"), Ty::Number, ty);
+                                out.push_str(&format!(
+                                    "let {}v_{n}: {} = {value};\n",
+                                    if writes.contains(n) { "mut " } else { "" },
+                                    ty.rust()
+                                ));
+                            } else {
+                                out.push_str(&self.store(
+                                    n,
+                                    format!("range_value_{id}"),
+                                    Ty::Number,
+                                )?);
+                            }
+                            out.push_str(&self.body(b, depth + 1)?);
+                            out.push_str("} }\n");
+                        } else {
+                            let from = self.ty(e)?;
+                            let value = self.expr(e, None)?;
+                            let converted = self.cast(format!("range_{id}.clone()"), from, ty);
+                            out.push_str(&format!("{{ let range_{id}={value}; {} for column in rt::columns::<{}>(&range_{id})? {{ {} {} }} }}\n",self.store(n,converted,ty)?,ty.rust(),self.store(n,"column".into(),ty)?,self.body(b,depth+1)?));
+                        }
+                    }
+                    StmtKind::Break | StmtKind::Continue => {
+                        if depth == 0 {
+                            return Err(error(1, "break/continue outside loop"));
+                        }
+                        out.push_str(if matches!(&s.kind, StmtKind::Break) {
+                            "break;\n"
+                        } else {
+                            "continue;\n"
+                        });
+                    }
+                    StmtKind::Return => {
+                        if !self.in_function {
+                            return Err(error(1, "return outside function"));
+                        }
+                        out.push_str(&format!("return {};\n", self.returns()));
+                    }
                 }
-            }
+                Ok(())
+            })();
+            result.map_err(|error| at_statement(error, s.line))?;
         }
         Ok(out)
+    }
+}
+fn literal_nan(e: &Expr) -> bool {
+    matches!(e,Expr::Var(n) if n=="NaN"||n=="nan")
+}
+fn integer_literal(e: &Expr) -> Option<i32> {
+    let n = match e {
+        Expr::Number(n) => *n,
+        Expr::Unary(op, n) if op == "-" => -f64::from(integer_literal(n)?),
+        _ => return None,
+    };
+    (n.is_finite() && n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64)
+        .then_some(n as i32)
+}
+fn binary_name(op: &str) -> Result<&'static str, Error> {
+    Ok(match op {
+        "+" => "add",
+        "-" => "subtract",
+        ".*" => "times",
+        "./" => "rdivide",
+        ".\\" => "ldivide",
+        ".^" => "power",
+        "*" => "mtimes",
+        "/" => "mrdivide",
+        "\\" => "mldivide",
+        "^" => "mpower",
+        "==" => "eq",
+        "~=" => "ne",
+        "<" => "lt",
+        "<=" => "le",
+        ">" => "gt",
+        ">=" => "ge",
+        "&" => "and",
+        "|" => "or",
+        _ => return Err(error(1, "unsupported binary operator")),
+    })
+}
+fn argument_tuple(values: &[String]) -> String {
+    if values.is_empty() {
+        "()".into()
+    } else {
+        format!("({},)", values.join(", "))
+    }
+}
+fn assignment_counts(body: &[Stmt], counts: &mut BTreeMap<String, usize>, in_loop: bool) {
+    for s in body {
+        match &s.kind {
+            StmtKind::Assign(t, _) => {
+                let names = match t {
+                    Target::Name(n) | Target::Index(n, _) => vec![n],
+                    Target::Many(ns) => ns.iter().collect(),
+                };
+                for n in names {
+                    *counts.entry(n.clone()).or_default() += if in_loop { 2 } else { 1 };
+                }
+            }
+            StmtKind::For(n, _, b) => {
+                *counts.entry(n.clone()).or_default() += 2;
+                assignment_counts(b, counts, true);
+            }
+            StmtKind::While(_, b) => assignment_counts(b, counts, true),
+            StmtKind::If(branches, other) => {
+                let mut maximum = BTreeMap::<String, usize>::new();
+                for b in branches
+                    .iter()
+                    .map(|(_, b)| b)
+                    .chain(std::iter::once(other))
+                {
+                    let mut branch = BTreeMap::new();
+                    assignment_counts(b, &mut branch, in_loop);
+                    for (name, count) in branch {
+                        maximum
+                            .entry(name)
+                            .and_modify(|old| *old = (*old).max(count))
+                            .or_insert(count);
+                    }
+                }
+                for (name, count) in maximum {
+                    *counts.entry(name).or_default() += count;
+                }
+            }
+            _ => {}
+        }
     }
 }
 fn tuple(values: &[String]) -> String {
@@ -898,16 +1312,51 @@ fn field_name(name: &str) -> String {
     }
     format!("r#{name}")
 }
+fn inline_names(body: &[Stmt], args: &[String], optional: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut seen: BTreeSet<_> = args.iter().cloned().collect();
+    let mut inline = BTreeSet::new();
+    for s in body {
+        match &s.kind {
+            StmtKind::Assign(Target::Name(n), _) => {
+                if !seen.contains(n) && !optional.contains(n) {
+                    inline.insert(n.clone());
+                }
+            }
+            StmtKind::Assign(Target::Many(names), _) => {
+                for n in names {
+                    if !seen.contains(n) && !optional.contains(n) {
+                        inline.insert(n.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        assigned(std::slice::from_ref(s), &mut seen);
+    }
+    inline
+}
 fn declarations(generator: &TypedGenerator<'_>, args: &BTreeSet<String>) -> String {
     generator
         .types
         .iter()
-        .filter(|(n, _)| !args.contains(*n))
+        .filter(|(n, _)| {
+            !args.contains(*n)
+                && !generator.hidden_loops.contains(*n)
+                && !generator.inline.contains(*n)
+        })
         .map(|(n, t)| {
             if generator.optional.contains(n) {
                 format!("let mut v_{n}: Option<{}> = None;\n", t.rust())
             } else {
-                format!("let mut v_{n}: {};\n", t.rust())
+                format!(
+                    "let {}v_{n}: {};\n",
+                    if generator.mutable.contains(n) {
+                        "mut "
+                    } else {
+                        ""
+                    },
+                    t.rust()
+                )
             }
         })
         .collect()
@@ -920,23 +1369,13 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
         pos: 0,
         depth: 0,
     };
-    if parser
-        .tokens
-        .iter()
-        .any(|s| matches!(&s.token,Token::Name(n) if n=="arguments"))
-    {
-        return Err(error(
-            1,
-            "MATLAB arguments blocks are not yet supported by typed code generation",
-        ));
-    }
     let script = parser.body()?;
     let mut functions = vec![];
     while parser.named("function") {
         if functions.len() >= 64 {
             return Err(error(1, "typed source exceeds 64-function limit"));
         }
-        let function = parser.function()?;
+        let function = parser.function_typed()?;
         if function.args.len() > 256 || function.outputs.len() > 256 {
             return Err(error(1, "typed function exceeds 256-argument/output limit"));
         }
@@ -961,7 +1400,43 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
             .insert(
                 f.name.clone(),
                 Signature {
-                    args: vec![Ty::Numbers; f.args.len()],
+                    args: f
+                        .args
+                        .iter()
+                        .map(|name| {
+                            f.declarations.get(name).map_or(Ty::Numbers, |declaration| {
+                                let scalar = declaration.dimensions == [Some(1), Some(1)];
+                                match declaration.kind {
+                                    ArgumentKind::Double => {
+                                        if scalar {
+                                            Ty::Number
+                                        } else {
+                                            Ty::Numbers
+                                        }
+                                    }
+                                    ArgumentKind::Logical => {
+                                        if scalar {
+                                            Ty::Bool
+                                        } else {
+                                            Ty::Bools
+                                        }
+                                    }
+                                    ArgumentKind::Character => {
+                                        if declaration.dimensions[0] == Some(1) {
+                                            Ty::Text
+                                        } else {
+                                            Ty::Chars
+                                        }
+                                    }
+                                }
+                            })
+                        })
+                        .collect(),
+                    declared: f
+                        .args
+                        .iter()
+                        .map(|name| f.declarations.contains_key(name))
+                        .collect(),
                     outputs: vec![None; f.outputs.len()],
                 },
             )
@@ -974,7 +1449,7 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
         let mut changed = false;
         let mut evidence = BTreeMap::new();
         let (script_types, script_vars) =
-            scope_types(&script, &[], &signatures, &mut inference_budget)?;
+            scope_types(&script, &[], &signatures, &mut inference_budget, &[])?;
         call_evidence(
             &script,
             &script_types,
@@ -986,8 +1461,11 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
         // otherwise a legitimate logical/character parameter is mistaken for fallback numeric.
         for (name, observed) in &evidence {
             let sig = signatures.get_mut(name).unwrap();
-            for (parameter, observed) in sig.args.iter_mut().zip(observed) {
-                if let Some(t) = observed
+            for ((parameter, declared), observed) in
+                sig.args.iter_mut().zip(&sig.declared).zip(observed)
+            {
+                if !*declared
+                    && let Some(t) = observed
                     && *parameter != *t
                 {
                     *parameter = *t;
@@ -1002,13 +1480,22 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
                 .cloned()
                 .zip(signatures[&f.name].args.iter().copied())
                 .collect::<Vec<_>>();
-            let (types, vars) = scope_types(&f.body, &args, &signatures, &mut inference_budget)?;
+            let (types, vars) = scope_types(
+                &f.body,
+                &args,
+                &signatures,
+                &mut inference_budget,
+                &f.outputs,
+            )?;
             call_evidence(&f.body, &types, &vars, &signatures, &mut evidence)?;
         }
         for (name, observed) in evidence {
             let sig = signatures.get_mut(&name).unwrap();
-            for (parameter, observed) in sig.args.iter_mut().zip(observed) {
-                if let Some(t) = observed
+            for ((parameter, declared), observed) in
+                sig.args.iter_mut().zip(&sig.declared).zip(observed)
+            {
+                if !*declared
+                    && let Some(t) = observed
                     && *parameter != t
                 {
                     *parameter = t;
@@ -1023,7 +1510,13 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
                 .cloned()
                 .zip(signatures[&f.name].args.iter().copied())
                 .collect::<Vec<_>>();
-            let (types, _) = scope_types(&f.body, &args, &signatures, &mut inference_budget)?;
+            let (types, _) = scope_types(
+                &f.body,
+                &args,
+                &signatures,
+                &mut inference_budget,
+                &f.outputs,
+            )?;
             let sig = signatures.get_mut(&f.name).unwrap();
             for (n, t) in f.outputs.iter().zip(&mut sig.outputs) {
                 if let Some(next) = types.get(n) {
@@ -1040,7 +1533,7 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
         }
     }
     let mut out = String::from(
-        "// Generated typed Rust. MATLAB indexing remains one-based in runtime helpers.\n#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments, non_snake_case, unreachable_code, unused_parens)]\nuse ndarray::ArrayD;\nuse unlinked_matlab_rt as rt;\n",
+        "// Generated typed Rust. MATLAB indexing remains one-based in runtime helpers.\nuse unlinked_matlab_rt as rt;\n",
     );
     for f in &functions {
         let sig = &signatures[&f.name];
@@ -1050,7 +1543,13 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
             .cloned()
             .zip(sig.args.iter().copied())
             .collect::<Vec<_>>();
-        let (types, vars) = scope_types(&f.body, &args, &signatures, &mut inference_budget)?;
+        let (types, vars) = scope_types(
+            &f.body,
+            &args,
+            &signatures,
+            &mut inference_budget,
+            &f.outputs,
+        )?;
         for n in &vars {
             if !types.contains_key(n) {
                 return Err(error(1, format!("cannot infer type of '{n}'")));
@@ -1069,10 +1568,27 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
                 return Err(error(1, format!("function output '{n}' is never assigned")));
             }
         }
+        let mut counts = BTreeMap::new();
+        assignment_counts(&f.body, &mut counts, false);
+        let borrowed = args
+            .iter()
+            .filter(|(n, t)| !t.scalar() && !counts.contains_key(n))
+            .map(|(n, _)| n.clone())
+            .collect();
+        let mutable = counts
+            .iter()
+            .filter(|(n, count)| **count > 1 || optional.contains(*n))
+            .map(|(n, _)| n.clone())
+            .collect();
+        let inline = inline_names(&f.body, &f.args, &optional);
         let mut generator = TypedGenerator {
             types,
             vars,
             optional,
+            inline,
+            borrowed,
+            mutable,
+            hidden_loops: loop_types(&f.body, &f.outputs).1,
             functions: &signatures,
             outputs: f.outputs.clone(),
             serial: 0,
@@ -1080,7 +1596,18 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
         };
         let params = args
             .iter()
-            .map(|(n, t)| format!("mut v_{n}: {}", t.rust()))
+            .map(|(n, t)| {
+                format!(
+                    "{}v_{n}: {}{}",
+                    if t.scalar() && generator.types[n] == *t && counts.contains_key(n) {
+                        "mut "
+                    } else {
+                        ""
+                    },
+                    if t.scalar() { "" } else { "&" },
+                    t.rust()
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let output_types = f
@@ -1089,16 +1616,48 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
             .map(|n| generator.types[n].rust().to_string())
             .collect::<Vec<_>>();
         out.push_str(&format!(
-            "pub fn f_{}({params}) -> Result<{}, String> {{\n",
+            "#[allow(non_snake_case, unused_variables, unused_assignments)]\npub fn f_{}({params}) -> rt::Result<{}> {{\n",
             f.name,
             tuple(&output_types)
         ));
+        for (name, declaration) in &f.declarations {
+            let ty = sig.args[f.args.iter().position(|n| n == name).unwrap()];
+            if !ty.scalar() {
+                if ty == Ty::Text {
+                    if let Some(columns) = declaration.dimensions[1] {
+                        out.push_str(&format!("if v_{name}.len() != {columns} {{ return Err(rt::Error::Shape({:?}.into())); }}\n",format!("argument {name} must have {columns} characters")));
+                    }
+                } else {
+                    out.push_str(&format!("if v_{name}.ndim() != 2 {{ return Err(rt::Error::UnsupportedRank {{ rank: v_{name}.ndim() }}); }}\n"));
+                    for (axis, dimension) in declaration.dimensions.iter().enumerate() {
+                        if let Some(dimension) = dimension {
+                            out.push_str(&format!("if v_{name}.shape()[{axis}] != {dimension} {{ return Err(rt::Error::Shape({:?}.into())); }}\n",format!("argument {name} dimension {} must equal {dimension}",axis+1)));
+                        }
+                    }
+                }
+            }
+        }
         // Argument assignments can promote types; preserve incoming ABI and convert once.
         for (n, t) in &args {
             if generator.types[n] != *t {
                 out.push_str(&format!(
-                    "let mut v_{n}: {} = rt::convert(&v_{n})?;\n",
-                    generator.types[n].rust()
+                    "let {}v_{n}: {} = rt::convert({}v_{n})?;\n",
+                    if generator.mutable.contains(n) {
+                        "mut "
+                    } else {
+                        ""
+                    },
+                    generator.types[n].rust(),
+                    if t.scalar() { "&" } else { "" }
+                ));
+            } else if !t.scalar() && counts.contains_key(n) {
+                out.push_str(&format!(
+                    "let {}v_{n} = (*v_{n}).clone();\n",
+                    if generator.mutable.contains(n) {
+                        "mut "
+                    } else {
+                        ""
+                    }
                 ));
             }
         }
@@ -1107,7 +1666,7 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
         out.push_str(&format!("{}\n}}\n", generator.returns()));
     }
     if !library {
-        let (types, vars) = scope_types(&script, &[], &signatures, &mut inference_budget)?;
+        let (types, vars) = scope_types(&script, &[], &signatures, &mut inference_budget, &[])?;
         for n in &vars {
             if !types.contains_key(n) {
                 return Err(error(1, format!("cannot infer type of '{n}'")));
@@ -1120,17 +1679,32 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
                 optional.insert(n.clone());
             }
         }
+        let mut counts = BTreeMap::new();
+        assignment_counts(&script, &mut counts, false);
+        let mutable = counts
+            .iter()
+            .filter(|(n, count)| **count > 1 || optional.contains(*n))
+            .map(|(n, _)| n.clone())
+            .collect();
+        let inline = inline_names(&script, &[], &optional);
         let mut generator = TypedGenerator {
             types,
             vars,
             optional,
+            inline,
+            borrowed: BTreeSet::new(),
+            mutable,
+            hidden_loops: loop_types(&script, &[]).1,
             functions: &signatures,
             outputs: vec![],
             serial: 0,
             in_function: false,
         };
-        out.push_str("#[derive(Debug)]\npub struct ScriptOutput {\n");
+        out.push_str("#[derive(Debug)]\n#[allow(non_snake_case)]\npub struct ScriptOutput {\n");
         for (n, t) in &generator.types {
+            if generator.hidden_loops.contains(n) {
+                continue;
+            }
             out.push_str(&format!(
                 "pub {}: {},\n",
                 field_name(n),
@@ -1141,13 +1715,16 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
                 }
             ));
         }
-        out.push_str("}\npub fn run_script() -> Result<ScriptOutput, String> {\n");
+        out.push_str("}\n#[allow(non_snake_case, unused_assignments)]\npub fn run_script() -> rt::Result<ScriptOutput> {\n");
         out.push_str(&declarations(&generator, &BTreeSet::new()));
         out.push_str(&generator.body(&script, 0)?);
         out.push_str("Ok(ScriptOutput {\n");
         for n in generator.types.keys() {
+            if generator.hidden_loops.contains(n) {
+                continue;
+            }
             let value = if defined.contains(n) {
-                generator.variable(n)
+                generator.move_variable(n)
             } else {
                 format!("v_{n}")
             };
@@ -1158,7 +1735,10 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
     if out.len() > 4 * 1024 * 1024 {
         return Err(error(1, "generated typed Rust exceeds 4 MiB limit"));
     }
-    Ok(out)
+    if out.contains("ArrayD<") {
+        out.insert_str(0, "use ndarray::ArrayD;\n");
+    }
+    crate::format_generated(&out)
 }
 
 #[cfg(test)]
@@ -1167,8 +1747,8 @@ mod tests {
     #[test]
     fn scalar_locals_are_typed_and_only_uncertain_variables_are_optional() {
         let code = transpile_typed("x=2; y=x*x+3; if y>5; z=4; end; disp(z);", false).unwrap();
-        assert!(code.contains("let mut v_x: f64;"));
-        assert!(code.contains("let mut v_y: f64;"));
+        assert!(code.contains("let v_x: f64 ="));
+        assert!(code.contains("let v_y: f64 ="));
         assert!(code.contains("let mut v_z: Option<f64> = None;"));
         assert!(!code.contains("Environment"));
         assert!(!code.contains("Value"));
@@ -1189,17 +1769,17 @@ mod tests {
                 .contains("logical")
         );
         let code = transpile_typed("a=[1 2]; b=a(false);", false).unwrap();
-        assert!(code.contains("let mut v_b: ArrayD<f64>;"));
+        assert!(code.contains("let v_b: ArrayD<f64> ="));
         let code = transpile_typed("x=1; x(2)=true;", false).unwrap();
-        assert!(code.contains("let mut v_x: ArrayD<f64>;"));
+        assert!(code.contains("let mut v_x: ArrayD<f64> ="));
     }
     #[test]
     fn char_calls_specialize_while_unknown_inputs_remain_numeric_arrays() {
         let code =
             transpile_typed("y=f('abc'); function y=f(x); y=strcmp(x,'abc'); end", false).unwrap();
-        assert!(code.contains("f_f(mut v_x: String) -> Result<bool, String>"));
+        assert!(code.contains("f_f(v_x: &String) -> rt::Result<bool>"));
         let code = transpile_typed("function y=f(x); y=x*2; end", true).unwrap();
-        assert!(code.contains("v_x: ArrayD<f64>"));
+        assert!(code.contains("v_x: &ArrayD<f64>"));
     }
     #[test]
     fn one_output_brackets_and_rust_reserved_names_emit_valid_forms() {
@@ -1208,13 +1788,23 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(code.contains("let mut v_a: ArrayD<f64>;"));
-        assert!(code.contains("v_c = (f_f()?).0;"));
+        assert!(code.contains("let v_a: ArrayD<f64> ="));
+        assert!(code.contains("(f_f()?).0"));
         assert!(code.contains("pub matlab_field__: f64,"));
         assert!(!code.contains("result_1.0"));
         let code =
             transpile_typed("disp(f(true)); function y=f(x); x=false;y=x;end", false).unwrap();
-        assert!(code.contains("v_x: ArrayD<bool>"));
+        assert!(code.contains("v_x: bool"));
+    }
+    #[test]
+    fn typed_diagnostics_report_statement_lines() {
+        let error = transpile_typed("x=1;\n\nx='text';", false).unwrap_err();
+        assert_eq!(error.line, 3);
+        let error =
+            transpile_typed("x=1;\nif true\n y=unsupported_thing(x);\nend", false).unwrap_err();
+        assert_eq!(error.line, 3);
+        let error = transpile_typed("x=1;\n\nbreak;", false).unwrap_err();
+        assert_eq!(error.line, 3);
     }
     #[test]
     fn recursive_types_and_inference_work_have_bounded_diagnostics() {

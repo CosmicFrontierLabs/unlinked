@@ -1,6 +1,8 @@
 //! In-process initialization scripts. This interpreter never invokes generated
 //! code, user functions, I/O builtins, or external tools.
-use super::{ArrayBudget, BUILTINS, Expr, Parser, Stmt, Target, Token, assigned, error, eval, lex};
+use super::{
+    ArrayBudget, BUILTINS, Expr, Parser, Stmt, StmtKind, Target, Token, assigned, error, eval, lex,
+};
 use crate::{
     Error,
     array_runtime::{Environment, Index, Value},
@@ -127,13 +129,13 @@ fn validate_expr(expr: &Expr, names: &BTreeSet<String>) -> Result<(), String> {
 }
 fn validate_body(body: &[Stmt], names: &BTreeSet<String>, loops: usize) -> Result<(), String> {
     for stmt in body {
-        match stmt {
-            Stmt::Assign(Target::Many(_), _) => {
+        match &stmt.kind {
+            StmtKind::Assign(Target::Many(_), _) => {
                 return Err(
                     "multiple-output assignment is unavailable in initialization scripts".into(),
                 );
             }
-            Stmt::Assign(target, value) => {
+            StmtKind::Assign(target, value) => {
                 if let Target::Index(_, args) = target {
                     for arg in args {
                         validate_expr(arg, names)?;
@@ -141,27 +143,29 @@ fn validate_body(body: &[Stmt], names: &BTreeSet<String>, loops: usize) -> Resul
                 }
                 validate_expr(value, names)?;
             }
-            Stmt::If(branches, other) => {
+            StmtKind::If(branches, other) => {
                 for (condition, branch) in branches {
                     validate_expr(condition, names)?;
                     validate_body(branch, names, loops)?;
                 }
                 validate_body(other, names, loops)?;
             }
-            Stmt::For(_, value, body) | Stmt::While(value, body) => {
+            StmtKind::For(_, value, body) | StmtKind::While(value, body) => {
                 validate_expr(value, names)?;
                 validate_body(body, names, loops + 1)?;
             }
-            Stmt::Break | Stmt::Continue if loops == 0 => {
+            StmtKind::Break | StmtKind::Continue if loops == 0 => {
                 return Err("break/continue outside a loop".into());
             }
-            Stmt::Break | Stmt::Continue => {}
-            Stmt::Call(_) => {
+            StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Call(_) => {
                 return Err(
                     "call statements and printing are unavailable in initialization scripts".into(),
                 );
             }
-            Stmt::Return => return Err("return is unavailable in initialization scripts".into()),
+            StmtKind::Return => {
+                return Err("return is unavailable in initialization scripts".into());
+            }
         }
     }
     Ok(())
@@ -208,12 +212,12 @@ impl Interpreter<'_> {
     fn body(&mut self, statements: &[Stmt]) -> Result<Flow, String> {
         for statement in statements {
             self.tick()?;
-            match statement {
-                Stmt::Assign(Target::Name(name), expression) => {
+            match &statement.kind {
+                StmtKind::Assign(Target::Name(name), expression) => {
                     let value = self.expression(expression)?;
                     self.store(name, value)?;
                 }
-                Stmt::Assign(Target::Index(name, args), expression) => {
+                StmtKind::Assign(Target::Index(name, args), expression) => {
                     let rhs = self.expression(expression)?;
                     if args.is_empty() || args.len() > 2 {
                         return Err("one or two array indices required".into());
@@ -237,7 +241,7 @@ impl Interpreter<'_> {
                     self.budget.shaped_value(&value)?;
                     self.store(name, value)?;
                 }
-                Stmt::If(branches, other) => {
+                StmtKind::If(branches, other) => {
                     let mut chosen = other;
                     for (condition, body) in branches {
                         if self.expression(condition)?.truth()? {
@@ -250,7 +254,7 @@ impl Interpreter<'_> {
                         return Ok(flow);
                     }
                 }
-                Stmt::For(name, expression, body) => {
+                StmtKind::For(name, expression, body) => {
                     let values = self.expression(expression)?;
                     if values.rows == 0 || values.cols == 0 {
                         self.store(name, values)?;
@@ -265,7 +269,7 @@ impl Interpreter<'_> {
                         }
                     }
                 }
-                Stmt::While(condition, body) => loop {
+                StmtKind::While(condition, body) => loop {
                     self.tick()?;
                     if !self.expression(condition)?.truth()? {
                         break;
@@ -274,8 +278,8 @@ impl Interpreter<'_> {
                         break;
                     }
                 },
-                Stmt::Break => return Ok(Flow::Break),
-                Stmt::Continue => return Ok(Flow::Continue),
+                StmtKind::Break => return Ok(Flow::Break),
+                StmtKind::Continue => return Ok(Flow::Continue),
                 _ => return Err("unsupported initialization statement".into()),
             }
         }

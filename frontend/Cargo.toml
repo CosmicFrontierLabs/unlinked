@@ -9,7 +9,7 @@ yew = { version = "0.21", features = ["csr"] }
 yew-router = "0.18"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Element", "HtmlElement", "HtmlInputElement", "File", "FileList", "DragEvent", "DataTransfer", "WheelEvent", "MouseEvent", "EventTarget", "DomRect", "Window", "Storage", "HtmlSelectElement", "HtmlTextAreaElement", "console"] }
+web-sys = { version = "0.3", features = ["Element", "HtmlElement", "HtmlInputElement", "File", "FileList", "DragEvent", "DataTransfer", "WheelEvent", "MouseEvent", "EventTarget", "DomRect", "Window", "Storage", "HtmlSelectElement", "HtmlTextAreaElement", "console", "Blob", "BlobPropertyBag", "Url"] }
 gloo-net = "0.6"
 gloo-timers = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -30,4 +30,3 @@ rizzma = { version = "1.13.0", default-features = false, features = ["wasm"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 
 zip = { version = "8.6.0", default-features = false }
-base64 = "0.22"

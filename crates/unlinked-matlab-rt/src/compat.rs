@@ -3,7 +3,6 @@ use ndarray::{Array2, ShapeBuilder};
 use std::io::Write;
 
 pub type ArrayResult<T> = Result<T, String>;
-pub const MAX_ELEMENTS: usize = 1_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
     Numeric,
@@ -23,8 +22,13 @@ pub enum Index {
 }
 fn checked_size(rows: usize, cols: usize) -> ArrayResult<usize> {
     let size = rows.checked_mul(cols).ok_or("matrix dimensions overflow")?;
-    if rows > MAX_ELEMENTS || cols > MAX_ELEMENTS || size > MAX_ELEMENTS {
-        return Err("matrix exceeds one million element/dimension limit".into());
+    if rows > isize::MAX as usize
+        || cols > isize::MAX as usize
+        || size
+            .checked_mul(std::mem::size_of::<f64>())
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
+    {
+        return Err("matrix shape cannot be represented in the address space".into());
     }
     Ok(size)
 }
@@ -301,9 +305,9 @@ fn index_positions(index: &Index, length: usize, grow: bool) -> ArrayResult<Vec<
             .flat()
             .iter()
             .map(|x| {
-                if !x.is_finite() || *x < 1.0 || x.fract() != 0.0 || *x > MAX_ELEMENTS as f64 {
+                if !x.is_finite() || *x < 1.0 || x.fract() != 0.0 || *x >= usize::MAX as f64 {
                     return Err(
-                        "indices must be positive finite integers within the element limit".into(),
+                        "indices must be positive finite integers representable by usize".into(),
                     );
                 }
                 let i = *x as usize - 1;
@@ -391,29 +395,11 @@ pub fn concatenate(rows: Vec<Vec<Value>>) -> ArrayResult<Value> {
     Ok(value)
 }
 pub fn range(start: &Value, step: &Value, stop: &Value) -> ArrayResult<Value> {
-    let (start, step, stop) = (start.number()?, step.number()?, stop.number()?);
-    if !start.is_finite() || !step.is_finite() || !stop.is_finite() {
-        return Err("range operands must be finite".into());
-    }
-    if step == 0.0 {
-        return Value::new(1, 0, vec![]);
-    }
-    let intervals = (stop - start) / step;
-    let count = if intervals < 0.0 {
-        0
-    } else {
-        let count = (intervals + 4.0 * f64::EPSILON * intervals.abs().max(1.0)).floor() + 1.0;
-        if !count.is_finite() || count > MAX_ELEMENTS as f64 {
-            return Err("range exceeds one million elements".into());
-        }
-        count as usize
-    };
-    Value::new(
-        1,
-        count,
-        (0..count).map(|i| start + i as f64 * step).collect(),
-    )
+    let iter = crate::range_iter(start.number()?, step.number()?, stop.number()?)
+        .map_err(|e| e.to_string())?;
+    Value::new(1, iter.len(), iter.collect())
 }
+
 pub fn unary(op: &str, value: &Value) -> ArrayResult<Value> {
     match op {
         "+" => {
@@ -530,9 +516,6 @@ fn multiply(a: &Value, b: &Value) -> ArrayResult<Value> {
     if size == 0 {
         return Value::new(a.rows(), b.cols(), Vec::new());
     }
-    if size.saturating_mul(a.cols()) > 10_000_000 {
-        return Err("matrix product exceeds ten million multiply-add operations".into());
-    }
     let product = nalgebra::DMatrix::from_column_slice(a.rows(), a.cols(), a.flat())
         * nalgebra::DMatrix::from_column_slice(b.rows(), b.cols(), b.flat());
     Value::new(a.rows(), b.cols(), product.as_slice().to_vec())
@@ -550,10 +533,6 @@ fn solve(a: &Value, b: &Value) -> ArrayResult<Value> {
     }
     if a.rows() != a.cols() || a.rows() != b.rows() {
         return Err("left division supports square nonsingular coefficient matrices only".into());
-    }
-    let n = a.rows();
-    if n.saturating_mul(n).saturating_mul(n + b.cols()) > 10_000_000 {
-        return Err("linear solve exceeds operation limit".into());
     }
     if a.flat().iter().chain(b.flat()).any(|v| !v.is_finite()) {
         return Err("linear solve requires finite inputs".into());
@@ -588,12 +567,10 @@ pub fn binary(op: &str, a: &Value, b: &Value) -> ArrayResult<Value> {
                 return elementwise(".^", a, b);
             }
             let exponent = b.number()?;
-            if a.rows() != a.cols()
-                || !exponent.is_finite()
-                || exponent.fract() != 0.0
-                || exponent.abs() > 1024.0
-            {
-                return Err("matrix powers require a square matrix and integer exponent between -1024 and 1024".into());
+            if a.rows() != a.cols() || !exponent.is_finite() || exponent.fract() != 0.0 {
+                return Err(
+                    "matrix powers require a square matrix and a finite integer exponent".into(),
+                );
             }
             let mut base = if exponent < 0.0 {
                 solve(a, &identity(a.rows())?)?
@@ -601,13 +578,13 @@ pub fn binary(op: &str, a: &Value, b: &Value) -> ArrayResult<Value> {
                 a.clone()
             };
             let mut result = identity(a.rows())?;
-            let mut power = exponent.abs() as u32;
-            while power > 0 {
-                if power & 1 == 1 {
+            let mut power = exponent.abs();
+            while power > 0.0 {
+                if power % 2.0 == 1.0 {
                     result = multiply(&result, &base)?;
                 }
-                power /= 2;
-                if power > 0 {
+                power = (power / 2.0).floor();
+                if power > 0.0 {
                     base = multiply(&base, &base)?;
                 }
             }
@@ -621,8 +598,8 @@ fn dimension(value: &Value) -> ArrayResult<usize> {
         return Err("dimensions must be numeric".into());
     }
     let n = value.number()?;
-    if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > MAX_ELEMENTS as f64 {
-        Err("dimensions must be nonnegative integers within the element limit".into())
+    if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n >= usize::MAX as f64 {
+        Err("dimensions must be nonnegative integers representable by usize".into())
     } else {
         Ok(n as usize)
     }
@@ -641,6 +618,31 @@ fn shape(args: &[Value]) -> ArrayResult<(usize, usize)> {
         _ => Err("expected one size or two dimensions".into()),
     }
 }
+// Every finite IEEE double has a terminating decimal expansion within 1074
+// fractional places. Beyond that, append zeros explicitly instead of passing
+// enormous precision/width to std::fmt's internally bounded argument encoding.
+fn decimal_format(x: f64, precision: usize, scientific: bool) -> ArrayResult<String> {
+    let digits = precision.min(1074);
+    let mut text = if scientific {
+        format!("{x:.digits$e}")
+    } else {
+        format!("{x:.digits$}")
+    };
+    if x.is_finite() && precision > digits {
+        let zeros = precision - digits;
+        let exponent = if scientific {
+            Some(text.split_off(text.rfind('e').unwrap()))
+        } else {
+            None
+        };
+        text.try_reserve(zeros).map_err(|e| e.to_string())?;
+        text.extend(std::iter::repeat_n('0', zeros));
+        if let Some(exponent) = exponent {
+            text.push_str(&exponent);
+        }
+    }
+    Ok(text)
+}
 fn significant(x: f64, precision: usize) -> String {
     if !x.is_finite() {
         return if x.is_nan() {
@@ -656,8 +658,8 @@ fn significant(x: f64, precision: usize) -> String {
     }
     let p = precision.max(1);
     let exp = x.abs().log10().floor() as i32;
-    if exp < -4 || exp >= p as i32 {
-        let s = format!("{:.*e}", p - 1, x);
+    if exp < -4 || exp >= 0 && exp as usize >= p {
+        let s = format!("{:.*e}", (p - 1).min(1074), x);
         let (mantissa, exponent) = s.split_once('e').unwrap();
         format!(
             "{}e{}",
@@ -665,8 +667,13 @@ fn significant(x: f64, precision: usize) -> String {
             exponent
         )
     } else {
-        let decimals = (p as i32 - 1 - exp).max(0) as usize;
-        let s = format!("{x:.decimals$}");
+        let decimals = if exp >= 0 {
+            p.saturating_sub(1 + exp as usize)
+        } else {
+            p.saturating_add((-exp) as usize).saturating_sub(1)
+        };
+        let digits = decimals.min(1074);
+        let s = format!("{x:.digits$}");
         if decimals == 0 {
             s
         } else {
@@ -757,9 +764,6 @@ fn formatted(args: &[Value]) -> ArrayResult<String> {
                 } else {
                     None
                 };
-                if width > 1024 || precision.is_some_and(|p| p > 32) {
-                    return Err("format width/precision exceeds subset limit".into());
-                }
                 let spec = *chars.get(i).ok_or("incomplete format specifier")?;
                 i += 1;
                 let value = values
@@ -775,17 +779,23 @@ fn formatted(args: &[Value]) -> ArrayResult<String> {
                         }
                         format!("{}", n.trunc() as i64)
                     }
-                    'f' => format!("{:.*}", precision.unwrap_or(6), value.number()?),
-                    'e' => format!("{:.*e}", precision.unwrap_or(6), value.number()?),
+                    'f' | 'e' => {
+                        decimal_format(value.number()?, precision.unwrap_or(6), spec == 'e')?
+                    }
                     'g' => significant(value.number()?, precision.unwrap_or(6)),
                     _ => return Err(format!("unsupported format specifier %{spec}")),
                 };
-                out.push_str(&format!("{text:>width$}"));
+                let padding = width.saturating_sub(text.len());
+                out.try_reserve(
+                    padding
+                        .checked_add(text.len())
+                        .ok_or("formatted size overflow")?,
+                )
+                .map_err(|e| e.to_string())?;
+                out.extend(std::iter::repeat_n(' ', padding));
+                out.push_str(&text);
             } else {
                 out.push(c);
-            }
-            if out.len() > 4_000_000 {
-                return Err("formatted output exceeds four MB".into());
             }
         }
         if next >= values.len() {
@@ -909,9 +919,6 @@ pub fn builtin(name: &str, args: Vec<Value>, outputs: usize) -> ArrayResult<Vec<
             }
             if a.flat().iter().any(|x| !x.is_finite()) {
                 return Err("det requires finite inputs".into());
-            }
-            if a.rows().saturating_pow(3) > 10_000_000 {
-                return Err("det exceeds operation limit".into());
             }
             Value::scalar(
                 nalgebra::DMatrix::from_column_slice(a.rows(), a.cols(), a.flat()).determinant(),

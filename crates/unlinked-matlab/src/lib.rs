@@ -271,16 +271,6 @@ fn builtin(name: &str) -> Option<usize> {
         _ => None,
     }
 }
-/// Generate a typed Rust script using ndarray and nalgebra-backed helpers.
-/// Use `generate_project` for its dependency manifest and vendored helper crate.
-pub fn transpile(source: &str) -> Result<String, Error> {
-    transpile_typed(source, false)
-}
-/// Generate typed public functions; script statements are rejected.
-pub fn transpile_library(source: &str) -> Result<String, Error> {
-    transpile_typed(source, true)
-}
-
 /// Evaluate one scalar parameter expression using an explicit variable workspace.
 /// No assignments, user-defined functions, file access or process execution occur.
 pub fn eval_expr(source: &str, workspace: &BTreeMap<String, f64>) -> Result<f64, Error> {
@@ -411,4 +401,50 @@ fn scalar_mod(x: f64, y: f64) -> f64 {
         return 0.0_f64.copysign(y);
     }
     x - q.floor() * y
+}
+
+/// Format generated source without requiring rustfmt or launching a process.
+fn format_generated(source: &str) -> Result<String, Error> {
+    let mut syntax = syn::parse_file(source).map_err(|e| Error {
+        line: 1,
+        message: format!("generated Rust syntax error: {e}"),
+    })?;
+    struct CleanAtoms;
+    impl syn::visit_mut::VisitMut for CleanAtoms {
+        fn visit_expr_mut(&mut self, expression: &mut syn::Expr) {
+            syn::visit_mut::visit_expr_mut(self, expression);
+            let condition = match expression {
+                syn::Expr::If(value) => Some(&mut value.cond),
+                syn::Expr::While(value) => Some(&mut value.cond),
+                _ => None,
+            };
+            if let Some(condition) = condition {
+                while let syn::Expr::Paren(parenthesized) = condition.as_ref() {
+                    *condition = parenthesized.expr.clone();
+                }
+            }
+            if let syn::Expr::Paren(parenthesized) = expression
+                && matches!(
+                    *parenthesized.expr,
+                    syn::Expr::Lit(_)
+                        | syn::Expr::Path(_)
+                        | syn::Expr::Call(_)
+                        | syn::Expr::MethodCall(_)
+                        | syn::Expr::Index(_)
+                        | syn::Expr::Field(_)
+                )
+            {
+                *expression = (*parenthesized.expr).clone();
+            }
+        }
+    }
+    syn::visit_mut::VisitMut::visit_file_mut(&mut CleanAtoms, &mut syntax);
+    let formatted = prettyplease::unparse(&syntax);
+    if formatted.len() > 4 * 1024 * 1024 {
+        return Err(Error {
+            line: 1,
+            message: "generated typed Rust exceeds 4 MiB limit".into(),
+        });
+    }
+    Ok(formatted)
 }

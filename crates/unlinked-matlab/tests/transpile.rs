@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use unlinked_matlab::{eval_expr, transpile};
+use unlinked_matlab::{eval_expr, transpile_typed};
 
 #[test]
 fn expression_semantics() {
@@ -33,9 +33,9 @@ fn diagnostics_reject_unsupported_and_unbound() {
         "function y=f(x)\nend",
         "function y=f(x,x)\ny=x\nend",
     ] {
-        assert!(transpile(source).is_err(), "accepted {source}");
+        assert!(transpile_typed(source, false).is_err(), "accepted {source}");
     }
-    let error = transpile("a = 1;\nb = [2,,3];").unwrap_err();
+    let error = transpile_typed("a = 1;\nb = [2,,3];", false).unwrap_err();
     assert_eq!(error.line, 2);
 }
 
@@ -44,8 +44,8 @@ fn bounded_parser_rejects_deep_or_large_input() {
     let vars = BTreeMap::new();
     assert!(eval_expr(&format!("{}1{}", "(".repeat(70), ")".repeat(70)), &vars).is_err());
     assert!(eval_expr(&"1+".repeat(1000), &vars).is_err());
-    assert!(transpile(&"\n".repeat(20_000)).is_err());
-    assert!(transpile(&" ".repeat(270_000)).is_err());
+    assert!(transpile_typed(&"\n".repeat(20_000), false).is_err());
+    assert!(transpile_typed(&" ".repeat(270_000), false).is_err());
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn arbitrary_malformed_input_does_not_panic() {
                 })
                 .collect();
             let result = std::panic::catch_unwind(|| {
-                let _ = transpile(&source);
+                let _ = transpile_typed(&source, false);
                 let _ = eval_expr(&source, &BTreeMap::new());
             });
             assert!(result.is_ok(), "parser panic for {source:?}");
@@ -82,5 +82,5 @@ fn arbitrary_malformed_input_does_not_panic() {
     // A flat chain constructs a deep left-associated AST without nested parentheses.
     let long_chain = vec!["1"; 500].join("+");
     assert_eq!(eval_expr(&long_chain, &BTreeMap::new()).unwrap(), 500.0);
-    assert!(transpile(&format!("x={long_chain};")).is_err());
+    assert!(transpile_typed(&format!("x={long_chain};"), false).is_err());
 }

@@ -51,6 +51,17 @@ impl Projects {
         let dir = self.root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         for (path, content) in project.files() {
+            // Distinct package identities prevent Cargo from reusing another
+            // fixture's binary when projects share a target cache and mtimes.
+            let content = if path == "Cargo.toml" {
+                assert!(content.contains(r#"name = "generated_matlab""#));
+                content.replace(
+                    r#"name = "generated_matlab""#,
+                    &format!(r#"name = "generated_{}""#, name.replace('-', "_")),
+                )
+            } else {
+                content
+            };
             let path = dir.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, content).unwrap();
@@ -63,6 +74,7 @@ impl Projects {
             .arg(dir.join("Cargo.toml"))
             .env("CARGO_TARGET_DIR", self.root.join("target"))
             .env("CARGO_INCREMENTAL", "0")
+            .env("RUSTFLAGS", "-Dwarnings")
             .env("CARGO_PROFILE_DEV_DEBUG", "0")
             .output()
             .unwrap();
@@ -71,6 +83,23 @@ impl Projects {
             "{name}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        if name == "arguments" {
+            let lint = Command::new("cargo")
+                .args(["clippy", "--offline", "--quiet", "--manifest-path"])
+                .arg(dir.join("Cargo.toml"))
+                .args(["--all-targets", "--", "-Dwarnings"])
+                .env("CARGO_TARGET_DIR", self.root.join("target"))
+                .env("CARGO_INCREMENTAL", "0")
+                .env("CARGO_PROFILE_DEV_DEBUG", "0")
+                .env("RUSTFLAGS", "-Dwarnings")
+                .output()
+                .unwrap();
+            assert!(
+                lint.status.success(),
+                "generated scalar API clippy: {}",
+                String::from_utf8_lossy(&lint.stderr)
+            );
+        }
         if success {
             String::from_utf8(output.stdout).unwrap()
         } else {
@@ -141,6 +170,7 @@ fn typed_projects_match_interpreter_and_octave() {
     let projects = Projects::new();
     typed_library_exports_arrays_and_multiple_outputs_without_dynamic_environment(&projects);
     optional_typed_corpus(&projects);
+    typed_codegen_edge_regressions(&projects);
     let bounds = projects.run_failure("bad-index", "A=[1 2];disp(A(0));");
     assert!(bounds.contains("indices"), "{bounds}");
     let unassigned = "if false\nx=1;\nend\ndisp(x);";
@@ -310,6 +340,7 @@ fn typed_projects_match_interpreter_and_octave() {
     if let Some(reference) = octave(&reference) {
         assert_numbers(&generated, &reference, "nalgebra inv/det vs Octave");
     }
+    typed_arguments_export_scalar_signature(&projects);
 }
 
 fn typed_library_exports_arrays_and_multiple_outputs_without_dynamic_environment(
@@ -335,11 +366,11 @@ fn print_array(a: &ArrayD<f64>) {
 }
 fn main() {
     let x = Array::from_shape_vec((2,3).f(), vec![1.,4.,2.,5.,3.,6.]).unwrap().into_dyn();
-    let (a,b) = generated::f_edges(x).unwrap();
+    let (a,b) = generated::f_edges(&x).unwrap();
     print_array(&a);
     print_array(&b);
     let scalar = Array::from_shape_vec((1,1).f(), vec![7.]).unwrap().into_dyn();
-    let (a,b) = generated::f_edges(scalar).unwrap();
+    let (a,b) = generated::f_edges(&scalar).unwrap();
     print_array(&a);
     print_array(&b);
 }
@@ -476,4 +507,118 @@ fn marked_numbers(text: &str) -> Vec<f64> {
     }
     assert!(!inside);
     result
+}
+
+fn typed_codegen_edge_regressions(projects: &Projects) {
+    for (name, expression, diagnostic) in [
+        ("fractional-power", "(-1)^0.5", "complex powers"),
+        ("nan-and", "NaN&1", "NaN cannot be converted"),
+        ("nan-or", "NaN|0", "NaN cannot be converted"),
+    ] {
+        assert!(eval_array_expr(expression, &BTreeMap::new()).is_err());
+        let error = projects.run_failure(name, &format!("y={expression};"));
+        assert!(error.contains(diagnostic), "{name}: {error}");
+    }
+    let script = "[a]=zeros(1,2);[b]=sort([2 1]);[c]=two();\nlogical_result=reset(true);\niterations=0;empty_column=7;\nfor empty_column=zeros(0,3)\niterations=iterations+1;\nend\nA=[1 2];empty_selection=A(false);\n";
+    let functions = "function [x,y]=two()\nx=1;y=2;\nend\nfunction y=reset(x)\nx=false;y=x;\nend\n";
+    let mut source = script.to_owned();
+    let mut reference = format!("{functions}\n{script}");
+    let mut expected = Vec::new();
+    let mut false_index_offset = 0;
+    for name in [
+        "a",
+        "b",
+        "c",
+        "logical_result",
+        "iterations",
+        "empty_column",
+        "empty_selection",
+    ] {
+        if name == "empty_selection" {
+            false_index_offset = expected.len();
+        }
+        source.push_str(&emit_result(name));
+        reference.push_str(&octave_result(name));
+        let oracle = format!("function result=primary()\n{script}result={name};\nend\n{functions}");
+        expected.extend(value_numbers(
+            &unlinked_matlab::eval_function(&oracle, vec![]).unwrap()[0],
+        ));
+    }
+    // The sandboxed evaluator intentionally requires variable names to begin
+    // with a letter; standalone Octave-compatible generated code accepts `_`.
+    let identifiers = "_=3;matlab_field__=4;disp(_);disp(matlab_field__);\n";
+    assert!(eval_script("_=3;", &BTreeMap::new()).is_err());
+    source.push_str(identifiers);
+    reference.push_str(identifiers);
+    expected.extend([3., 4.]);
+    source.push_str(functions);
+    let actual = numbers(&projects.run("codegen-edges", &source, false, None));
+    assert_numbers(
+        &actual,
+        &expected,
+        "typed codegen edge regressions vs evaluator",
+    );
+    if let Some(mut reference) = octave(&reference) {
+        // The evaluator preserves the row orientation for A(false); Octave
+        // produces 0x0 specifically for the scalar false index. Both are empty.
+        assert_eq!(
+            &expected[false_index_offset..false_index_offset + 2],
+            &[1., 0.]
+        );
+        assert_eq!(
+            &reference[false_index_offset..false_index_offset + 2],
+            &[0., 0.]
+        );
+        reference[false_index_offset..false_index_offset + 2]
+            .copy_from_slice(&expected[false_index_offset..false_index_offset + 2]);
+        assert_numbers(
+            &actual,
+            &reference,
+            "typed codegen edge regressions vs Octave",
+        );
+    }
+}
+
+fn typed_arguments_export_scalar_signature(projects: &Projects) {
+    let source = "function y=polynomial(x)\narguments\nx (1,1) double\nend\ny=x^2+2*x+1;\nend\nfunction y=first_column(A)\narguments\nA (2,:) double\nend\ny=A(:,1);\nend\n";
+    let caller = r#"
+#[path="lib.rs"] mod generated;
+fn main() {
+    let polynomial: fn(f64) -> Result<f64, unlinked_matlab_rt::Error> = generated::f_polynomial;
+    println!("{}", polynomial(3.0).unwrap());
+    use ndarray::{Array, ShapeBuilder};
+    let good = Array::from_shape_vec((2,2).f(),vec![1.,2.,3.,4.]).unwrap().into_dyn();
+    let first = generated::f_first_column(&good).unwrap();
+    assert_eq!(first.shape(), &[2,1]);
+    assert_eq!(first.iter().copied().collect::<Vec<_>>(), vec![1.,2.]);
+    let bad = Array::from_shape_vec((3,2).f(),vec![1.,2.,3.,4.,5.,6.]).unwrap().into_dyn();
+    assert!(generated::f_first_column(&bad).is_err());
+}
+"#;
+    let output = numbers(&projects.run("arguments", source, true, Some(caller)));
+    assert_numbers(&output, &[16.], "arguments scalar signature");
+    assert!(unlinked_matlab::eval_function(source, vec![Value::scalar(3.)]).is_err());
+    for declaration in [
+        "arguments\nx (1,1) double = 2\nend",
+        "arguments\nx (1,1) double {mustBePositive}\nend",
+        "arguments (Input)\nx (1,1) double\nend",
+    ] {
+        let invalid = format!("function y=f(x)\n{declaration}\ny=x;\nend\n");
+        assert!(
+            generate_project(&invalid, true).is_err(),
+            "unsupported arguments syntax accepted: {declaration}"
+        );
+    }
+    // The pure evaluator intentionally does not accept arguments declarations;
+    // its unchanged numeric body remains the independent execution oracle.
+    let oracle = "function y=polynomial(x)\ny=x^2+2*x+1;\nend\n";
+    let expected = unlinked_matlab::eval_function(oracle, vec![Value::scalar(3.)]).unwrap();
+    assert_numbers(
+        &output,
+        &expected[0].data,
+        "arguments scalar result vs evaluator",
+    );
+    if let Some(reference) = octave(&format!("{oracle}\ndisp(polynomial(3));")) {
+        assert_numbers(&output, &reference, "arguments scalar result vs Octave");
+    }
 }

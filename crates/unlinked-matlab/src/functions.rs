@@ -1,7 +1,7 @@
 //! Parsed, bounded, pure MATLAB function evaluation for simulation blocks.
 use super::script::{validate_name, validate_value, validate_workspace};
 use super::{
-    ArrayBudget, BUILTINS, Expr, Function, Parser, Stmt, Target, Token, assigned, error,
+    ArrayBudget, BUILTINS, Expr, Function, Parser, Stmt, StmtKind, Target, Token, assigned, error,
     eval_with_calls, lex,
 };
 use crate::{
@@ -205,8 +205,8 @@ impl FunctionProgram {
         loops: usize,
     ) -> Result<(), String> {
         for statement in body {
-            match statement {
-                Stmt::Assign(target, value) => {
+            match &statement.kind {
+                StmtKind::Assign(target, value) => {
                     match target {
                         Target::Name(name) => validate_name(name)?,
                         Target::Many(names) => {
@@ -223,24 +223,24 @@ impl FunctionProgram {
                     }
                     self.validate_expr(value, names)?;
                 }
-                Stmt::Call(expr) => self.validate_expr(expr, names)?,
-                Stmt::If(branches, other) => {
+                StmtKind::Call(expr) => self.validate_expr(expr, names)?,
+                StmtKind::If(branches, other) => {
                     for (condition, body) in branches {
                         self.validate_expr(condition, names)?;
                         self.validate_body(body, names, loops)?;
                     }
                     self.validate_body(other, names, loops)?;
                 }
-                Stmt::For(name, value, body) => {
+                StmtKind::For(name, value, body) => {
                     validate_name(name)?;
                     self.validate_expr(value, names)?;
                     self.validate_body(body, names, loops + 1)?;
                 }
-                Stmt::While(value, body) => {
+                StmtKind::While(value, body) => {
                     self.validate_expr(value, names)?;
                     self.validate_body(body, names, loops + 1)?;
                 }
-                Stmt::Break | Stmt::Continue if loops == 0 => {
+                StmtKind::Break | StmtKind::Continue if loops == 0 => {
                     return Err("break/continue outside a loop".into());
                 }
                 _ => {}
@@ -256,17 +256,17 @@ fn body_stack(body: &[Stmt]) -> usize {
     use super::expression_depth;
     body.iter()
         .map(|stmt| {
-            1 + match stmt {
-                Stmt::Assign(Target::Index(_, args), value) => expression_depth(value)
+            1 + match &stmt.kind {
+                StmtKind::Assign(Target::Index(_, args), value) => expression_depth(value)
                     .max(args.iter().map(expression_depth).max().unwrap_or(0)),
-                Stmt::Assign(_, value) | Stmt::Call(value) => expression_depth(value),
-                Stmt::If(branches, other) => branches
+                StmtKind::Assign(_, value) | StmtKind::Call(value) => expression_depth(value),
+                StmtKind::If(branches, other) => branches
                     .iter()
                     .map(|(condition, body)| expression_depth(condition).max(body_stack(body)))
                     .max()
                     .unwrap_or(0)
                     .max(body_stack(other)),
-                Stmt::For(_, value, body) | Stmt::While(value, body) => {
+                StmtKind::For(_, value, body) | StmtKind::While(value, body) => {
                     expression_depth(value).max(body_stack(body))
                 }
                 _ => 0,
@@ -355,12 +355,12 @@ impl Interpreter<'_> {
     fn body(&mut self, statements: &[Stmt]) -> Result<Flow, String> {
         for statement in statements {
             self.tick()?;
-            match statement {
-                Stmt::Assign(Target::Name(name), expression) => {
+            match &statement.kind {
+                StmtKind::Assign(Target::Name(name), expression) => {
                     let value = self.expression(expression)?;
                     self.store(name, value)?;
                 }
-                Stmt::Assign(Target::Index(name, args), expression) => {
+                StmtKind::Assign(Target::Index(name, args), expression) => {
                     let rhs = self.expression(expression)?;
                     if args.is_empty() || args.len() > 2 {
                         return Err("one or two array indices required".into());
@@ -393,7 +393,7 @@ impl Interpreter<'_> {
                     self.budget.shaped_value(&value)?;
                     self.store(name, value)?;
                 }
-                Stmt::If(branches, other) => {
+                StmtKind::If(branches, other) => {
                     let mut chosen = other;
                     for (condition, body) in branches {
                         if self.expression(condition)?.truth()? {
@@ -406,7 +406,7 @@ impl Interpreter<'_> {
                         return Ok(flow);
                     }
                 }
-                Stmt::For(name, expression, body) => {
+                StmtKind::For(name, expression, body) => {
                     let values = self.expression(expression)?;
                     if values.rows == 0 || values.cols == 0 {
                         self.store(name, values)?;
@@ -423,7 +423,7 @@ impl Interpreter<'_> {
                         }
                     }
                 }
-                Stmt::While(condition, body) => loop {
+                StmtKind::While(condition, body) => loop {
                     self.tick()?;
                     if !self.expression(condition)?.truth()? {
                         break;
@@ -434,16 +434,16 @@ impl Interpreter<'_> {
                         _ => {}
                     }
                 },
-                Stmt::Break => return Ok(Flow::Break),
-                Stmt::Continue => return Ok(Flow::Continue),
-                Stmt::Return => return Ok(Flow::Return),
-                Stmt::Assign(Target::Many(names), expr) => {
+                StmtKind::Break => return Ok(Flow::Break),
+                StmtKind::Continue => return Ok(Flow::Continue),
+                StmtKind::Return => return Ok(Flow::Return),
+                StmtKind::Assign(Target::Many(names), expr) => {
                     let values = self.outputs(expr, names.len())?;
                     for (name, value) in names.iter().zip(values) {
                         self.store(name, value)?;
                     }
                 }
-                Stmt::Call(expr) => {
+                StmtKind::Call(expr) => {
                     self.outputs(expr, 0)?;
                 }
             }

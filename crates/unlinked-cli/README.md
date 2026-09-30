@@ -57,7 +57,10 @@ then run with `cargo run --manifest-path NEW_DIRECTORY/Cargo.toml`.
 `--emit rust` writes only the generated source to stdout or the specified file;
 it still requires the dependency manifest/helper from a complete project.
 `--emit llvm-ir -o generated.ll` builds a temporary Cargo project with
-`cargo rustc --emit=llvm-ir`, then copies the generated module to the output.
+`cargo rustc --emit=llvm-ir`, then copies the generated module to the output. This is the generated crate’s
+LLVM module, not a self-contained linked program: ndarray, nalgebra and helper
+calls may remain external declarations. Keep the exported Cargo project to
+rebuild and link its dependencies.
 Cargo may fetch and build dependencies; the generated program is never executed.
 Compilation is a local CLI operation, not an uploaded-code server endpoint.
 

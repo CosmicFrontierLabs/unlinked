@@ -227,7 +227,12 @@ enum Target {
     Many(Vec<String>),
 }
 #[derive(Debug)]
-enum Stmt {
+struct Stmt {
+    line: usize,
+    kind: StmtKind,
+}
+#[derive(Debug)]
+enum StmtKind {
     Assign(Target, Expr),
     Call(Expr),
     If(Vec<(Expr, Vec<Stmt>)>, Vec<Stmt>),
@@ -237,9 +242,21 @@ enum Stmt {
     Continue,
     Return,
 }
+#[derive(Clone, Copy)]
+enum ArgumentKind {
+    Double,
+    Logical,
+    Character,
+}
+#[derive(Clone)]
+struct ArgumentDeclaration {
+    kind: ArgumentKind,
+    dimensions: [Option<usize>; 2],
+}
 struct Function {
     name: String,
     args: Vec<String>,
+    declarations: BTreeMap<String, ArgumentDeclaration>,
     outputs: Vec<String>,
     body: Vec<Stmt>,
 }
@@ -481,6 +498,11 @@ impl Parser {
         self.finish()
     }
     fn statement(&mut self) -> Result<Stmt, Error> {
+        let line = self.tokens[self.pos].line;
+        let kind = self.statement_kind()?;
+        Ok(Stmt { line, kind })
+    }
+    fn statement_kind(&mut self) -> Result<StmtKind, Error> {
         if self.named("if") {
             self.pos += 1;
             let condition = self.expr(0, false)?;
@@ -502,7 +524,7 @@ impl Parser {
                 vec![]
             };
             self.end()?;
-            return Ok(Stmt::If(branches, other));
+            return Ok(StmtKind::If(branches, other));
         }
         if self.named("for") {
             self.pos += 1;
@@ -512,7 +534,7 @@ impl Parser {
             self.finish()?;
             let body = self.body()?;
             self.end()?;
-            return Ok(Stmt::For(name, values, body));
+            return Ok(StmtKind::For(name, values, body));
         }
         if self.named("while") {
             self.pos += 1;
@@ -520,12 +542,12 @@ impl Parser {
             self.finish()?;
             let body = self.body()?;
             self.end()?;
-            return Ok(Stmt::While(condition, body));
+            return Ok(StmtKind::While(condition, body));
         }
         for (name, stmt) in [
-            ("break", Stmt::Break),
-            ("continue", Stmt::Continue),
-            ("return", Stmt::Return),
+            ("break", StmtKind::Break),
+            ("continue", StmtKind::Continue),
+            ("return", StmtKind::Return),
         ] {
             if self.named(name) {
                 self.pos += 1;
@@ -554,7 +576,7 @@ impl Parser {
                 }
                 let value = self.expr(0, false)?;
                 self.finish()?;
-                return Ok(Stmt::Assign(Target::Many(names), value));
+                return Ok(StmtKind::Assign(Target::Many(names), value));
             }
             self.pos = checkpoint;
         }
@@ -565,22 +587,29 @@ impl Parser {
                 Expr::Apply(n, args) => Target::Index(n, args),
                 _ => return Err(self.fail("invalid assignment target")),
             };
-            Stmt::Assign(target, self.expr(0, false)?)
+            StmtKind::Assign(target, self.expr(0, false)?)
         } else {
             if !matches!(lhs, Expr::Apply(..)) {
                 return Err(
                     self.fail("bare expression display is unsupported; use disp(expression)")
                 );
             }
-            Stmt::Call(lhs)
+            StmtKind::Call(lhs)
         };
         self.finish()?;
         Ok(result)
     }
-    fn function(&mut self) -> Result<Function, Error> {
-        self.function_with_implicit_end(false)
+    fn function_typed(&mut self) -> Result<Function, Error> {
+        self.function_with_declarations(false, true)
     }
     fn function_with_implicit_end(&mut self, implicit: bool) -> Result<Function, Error> {
+        self.function_with_declarations(implicit, false)
+    }
+    fn function_with_declarations(
+        &mut self,
+        implicit: bool,
+        declarations_allowed: bool,
+    ) -> Result<Function, Error> {
         self.pos += 1;
         let mut outputs = Vec::new();
         let name;
@@ -620,6 +649,62 @@ impl Parser {
             }
         }
         self.finish()?;
+        let mut declarations = BTreeMap::new();
+        if self.named("arguments") {
+            if !declarations_allowed {
+                return Err(self.fail("arguments blocks are supported by typed compilation, not by the bounded interpreter"));
+            }
+            self.pos += 1;
+            self.finish()
+                .map_err(|_| self.fail("arguments block attributes are unsupported"))?;
+            while !self.named("end") {
+                let argument = self.name()?;
+                if !args.contains(&argument) {
+                    return Err(self.fail("arguments declaration must name a function input"));
+                }
+                let mut dimensions = [None, None];
+                if self.op("(") {
+                    for (axis, dimension) in dimensions.iter_mut().enumerate() {
+                        if !self.op(":") {
+                            let Token::Number(value) = self.token() else {
+                                return Err(self.fail(
+                                    "argument dimensions require positive integer literals or ':'",
+                                ));
+                            };
+                            if *value < 1.0 || *value > 1_000_000.0 || value.fract() != 0.0 {
+                                return Err(self
+                                    .fail("argument dimension must be an integer in 1..=1000000"));
+                            }
+                            *dimension = Some(*value as usize);
+                            self.pos += 1;
+                        }
+                        if axis == 0 {
+                            self.expect(",")?;
+                        }
+                    }
+                    self.expect(")")?;
+                }
+                let kind = match self.name()?.as_str() {
+                    "double" => ArgumentKind::Double,
+                    "logical" => ArgumentKind::Logical,
+                    "char" => ArgumentKind::Character,
+                    _ => {
+                        return Err(
+                            self.fail("typed arguments support only double, logical, and char")
+                        );
+                    }
+                };
+                if declarations
+                    .insert(argument, ArgumentDeclaration { kind, dimensions })
+                    .is_some()
+                {
+                    return Err(self.fail("duplicate arguments declaration"));
+                }
+                self.finish()
+                    .map_err(|_| self.fail("argument defaults and validators are unsupported"))?;
+            }
+            self.end()?;
+        }
         let body = self.body()?;
         if !(implicit && matches!(self.token(), Token::Eof)) {
             self.end()?;
@@ -627,6 +712,7 @@ impl Parser {
         Ok(Function {
             name,
             args,
+            declarations,
             outputs,
             body,
         })
@@ -686,19 +772,19 @@ const BUILTINS: &[&str] = &[
 ];
 fn assigned(body: &[Stmt], vars: &mut BTreeSet<String>) {
     for statement in body {
-        match statement {
-            Stmt::Assign(target, _) => match target {
+        match &statement.kind {
+            StmtKind::Assign(target, _) => match target {
                 Target::Name(n) | Target::Index(n, _) => {
                     vars.insert(n.clone());
                 }
                 Target::Many(names) => vars.extend(names.iter().cloned()),
             },
-            Stmt::For(n, _, body) => {
+            StmtKind::For(n, _, body) => {
                 vars.insert(n.clone());
                 assigned(body, vars);
             }
-            Stmt::While(_, body) => assigned(body, vars),
-            Stmt::If(branches, other) => {
+            StmtKind::While(_, body) => assigned(body, vars),
+            StmtKind::If(branches, other) => {
                 for (_, body) in branches {
                     assigned(body, vars);
                 }

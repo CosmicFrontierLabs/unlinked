@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use unlinked_matlab::{array_runtime::Value, eval_function, eval_script, transpile};
+use unlinked_matlab::{array_runtime::Value, eval_function, eval_script, transpile_typed};
 
 const FUNCTION: &str = "function y=f(x)\ny=x+1;\n  %{ \n y=999;\n %{\n system('must never execute');\n %}\n y=888;\n  %} \ny=y*2;\nend\n";
 
@@ -34,7 +34,7 @@ fn malformed_unclosed_and_overdeep_block_comments_are_diagnostics() {
         "%{\nx=1;\n%} trailing text\n",
     ] {
         assert!(eval_script(source, &BTreeMap::new()).is_err(), "{source}");
-        assert!(transpile(source).is_err(), "{source}");
+        assert!(transpile_typed(source, false).is_err(), "{source}");
         let function = format!("function y=f()\ny=1;\n{source}\nend");
         assert!(eval_function(&function, vec![]).is_err(), "{source}");
     }
