@@ -5,6 +5,7 @@ use crate::diagram::DiagramView;
 use crate::editor::ModelEditor;
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
 use crate::sim::SimulationPanel;
+use crate::transpiler::Transpiler;
 use crate::Route;
 use chrono::{DateTime, Utc};
 use shared::{
@@ -726,6 +727,8 @@ pub fn file_page(props: &FileProps) -> Html {
     };
 
     let model_file = matches!(&*file, Fetch::Ready(f) if is_model(&f.path));
+    let matlab_file =
+        matches!(&*file, Fetch::Ready(f) if f.path.to_ascii_lowercase().ends_with(".m"));
     let version_list = move |vs: &Vec<FileVersionInfo>| -> Html {
         let current = version_id.or_else(|| vs.first().map(|v| v.id));
         html! {
@@ -795,8 +798,21 @@ pub fn file_page(props: &FileProps) -> Html {
                         fit_key={AttrValue::from(format!("{:p}", Rc::as_ptr(m)))}
                         on_saved={on_saved.clone()} />
                 } else if let Some(version) = shown_version {
-                    <SimulationPanel key={version} {file_id} {version} config={m.config.clone()}
+                    <SimulationPanel key={version} {project_id} {file_id} {version} config={m.config.clone()}
                         outports={m.root.blocks.iter().filter(|b| b.block_type == "Outport").map(|b| b.name.clone()).collect::<Vec<_>>()} />
+                }
+            </>
+        },
+        Content::Text(t) if matlab_file => html! {
+            <>
+                <div class="tabs">
+                    { tab_button(Tab::Diagram, "Source") }
+                    { tab_button(Tab::Simulate, "MATLAB to Rust") }
+                </div>
+                if *tab == Tab::Diagram {
+                    <pre class="source">{ t }</pre>
+                } else {
+                    <Transpiler source={AttrValue::from(t.clone())} />
                 }
             </>
         },

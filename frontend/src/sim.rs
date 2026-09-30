@@ -1,5 +1,5 @@
 //! Run simulations of a stored model version and plot the streamed traces
-//! with rizzma (oscilloscope-styled, zoom/pan in the canvas).
+//! with rizzma (zoom/pan in the canvas).
 //!
 //! Streaming state lives in one [`Controller`] shared by the render function
 //! and the async tasks. Every data set (a live run or a loaded historical
@@ -7,13 +7,14 @@
 //! generation, so a stale stream or response can never overwrite newer data.
 
 use crate::api;
-use crate::fetch::{use_fetch, use_reload, view, Reload};
+use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
 use crate::plot::{self, PlotSession};
 use futures_util::future::{AbortHandle, Abortable};
 use rizzma::wasm::WasmFigure;
 use shared::{
-    SimulationClientMsg, SimulationOptions, SimulationRequest, SimulationRun, SimulationServerMsg,
-    SimulationSignal, SimulationSocket, SimulationStatus, Solver,
+    FileInfo, SimulationClientMsg, SimulationInitScript, SimulationOptions, SimulationRequest,
+    SimulationRun, SimulationServerMsg, SimulationSignal, SimulationSocket, SimulationStatus,
+    Solver,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -32,6 +33,8 @@ const REFRESH_MS: f64 = 120.0;
 
 #[derive(Properties, PartialEq)]
 pub struct SimProps {
+    /// Project holding the model; its `.m` files are offered as init scripts.
+    pub project_id: Uuid,
     pub file_id: Uuid,
     /// Version number to simulate (pinned by the server).
     pub version: i32,
@@ -136,10 +139,10 @@ impl Controller {
             return Ok(());
         }
         let err = |e: wasm_bindgen::JsValue| e.as_string().unwrap_or_else(|| "plot error".into());
+        // Standard axes with data ticks: simulation results need readable
+        // time and value scales, not scope-style corner readouts.
         let mut fig = WasmFigure::new((width_px / 100.0).max(4.0), 3.6);
-        fig.set_facecolor("#1a1b26").map_err(err)?;
         let ax = fig.add_subplot(1, 1, 1).map_err(err)?;
-        fig.oscilloscope(ax).map_err(err)?;
         fig.set_xlabel(ax, "time (s)").map_err(err)?;
         for &i in &self.plotted {
             let y = self.columns.get(i).map(Vec::as_slice).unwrap_or(&[]);
@@ -336,6 +339,15 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let plot_host = use_node_ref();
     let reload = use_reload();
     let runs = use_fetch((props.file_id, reload.0), |(f, _)| api::simulation_runs(f));
+    let scripts = use_fetch(props.project_id, |p| async move {
+        let files = api::files(p).await?;
+        Ok(files
+            .into_iter()
+            .filter(|f| f.path.to_ascii_lowercase().ends_with(".m"))
+            .collect::<Vec<FileInfo>>())
+    });
+    // Selected init script as (file, pinned version number).
+    let init_script = use_state(|| None::<(Uuid, i32)>);
     let canvas_id = format!("sim-plot-{}", props.file_id);
 
     {
@@ -386,7 +398,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         );
         let (file_id, version) = (props.file_id, props.version);
         let outports = props.outports.clone();
+        let init_script = init_script.clone();
         Callback::from(move |_: MouseEvent| {
+            let init_script = *init_script;
             let ws_vars = match parse_workspace(&workspace) {
                 Ok(v) => v,
                 Err(e) => {
@@ -398,7 +412,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 options: (*options).clone(),
                 workspace: ws_vars,
                 version: Some(version),
-                init_script: None,
+                init_script: init_script.map(|(file_id, version)| SimulationInitScript {
+                    file_id,
+                    version: Some(version),
+                }),
             };
             let conn = match ws_bridge::yew_client::connect::<SimulationSocket>() {
                 Ok(c) => c,
@@ -544,6 +561,33 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             options.set(o);
         })
     };
+    let set_init = {
+        let (init_script, scripts) = (init_script.clone(), scripts.clone());
+        Callback::from(move |e: Event| {
+            let id = e.target_unchecked_into::<HtmlSelectElement>().value();
+            let chosen = match &*scripts {
+                Fetch::Ready(files) => files
+                    .iter()
+                    .find(|f| f.id.to_string() == id)
+                    .map(|f| (f.id, f.latest.version)),
+                _ => None,
+            };
+            init_script.set(chosen);
+        })
+    };
+    let init_picker = view(&scripts, |files: &Vec<FileInfo>| {
+        let selected = init_script.map(|(id, _)| id);
+        html! {
+            <select onchange={set_init.clone()}>
+                <option value="" selected={selected.is_none()}>{ "none" }</option>
+                { for files.iter().map(|f| html! {
+                    <option value={f.id.to_string()} selected={selected == Some(f.id)}>
+                        { format!("{} (v{})", f.path, f.latest.version) }
+                    </option>
+                }) }
+            </select>
+        }
+    });
     let set_workspace = {
         let workspace = workspace.clone();
         Callback::from(move |e: InputEvent| {
@@ -608,7 +652,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     <label>{ "Rel tol" }<input type="number" step="any" value={o.relative_tolerance.to_string()} oninput={set_num(|o, v| o.relative_tolerance = v)} /></label>
                     <label>{ "Abs tol" }<input type="number" step="any" value={o.absolute_tolerance.to_string()} oninput={set_num(|o, v| o.absolute_tolerance = v)} /></label>
                 }
-                <label class="grow">{ "Workspace (NAME = EXPR per line)" }
+                <label title="A project .m script run before simulating; its numeric variables fill the workspace. The chosen version is pinned.">
+                    { "Init script" }{ init_picker }
+                </label>
+                <label class="grow">{ "Workspace overrides (NAME = EXPR per line)" }
                     <textarea rows="2" value={(*workspace).clone()} oninput={set_workspace} placeholder="K = 2\nw = 2*pi*5" />
                 </label>
                 <div class="sim-actions">
