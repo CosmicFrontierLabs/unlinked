@@ -5,7 +5,7 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::path::{Path, PathBuf};
-use unlinked_render::{render_system_svg, RenderOptions};
+use unlinked_render::{render_chart_view_svg, render_system_svg, RenderOptions, Theme};
 
 fn corpus_dir() -> Option<PathBuf> {
     let dir = match std::env::var_os("UNLINKED_TEST_CASES") {
@@ -83,4 +83,45 @@ fn corpus_renders_well_formed_svg() {
         }
     }
     eprintln!("rendered {rendered} systems");
+}
+
+#[test]
+fn corpus_charts_render_well_formed_svg() {
+    let Some(dir) = corpus_dir() else { return };
+    let out_dir = std::env::var_os("UNLINKED_RENDER_OUT").map(PathBuf::from);
+    let mut files = Vec::new();
+    models(&dir, &mut files);
+    files.sort();
+    let mut rendered = 0;
+    for f in &files {
+        let bytes = std::fs::read(f).unwrap();
+        let model = unlinked_import::import(&f.display().to_string(), &bytes).unwrap();
+        for (i, chart) in model.charts.iter().enumerate() {
+            let views = std::iter::once(None).chain(
+                chart
+                    .states
+                    .iter()
+                    .filter(|s| chart.is_subchart(&s.id))
+                    .map(|s| Some(s.id.as_str())),
+            );
+            for (v, view) in views.enumerate() {
+                for theme in [Theme::Light, Theme::Dark] {
+                    let opts = RenderOptions {
+                        theme,
+                        ..Default::default()
+                    };
+                    let svg = render_chart_view_svg(chart, view, &opts).unwrap();
+                    block_groups(&svg).unwrap_or_else(|e| panic!("{}: {e}", chart.name));
+                    if let (Some(out), Theme::Light) = (&out_dir, theme) {
+                        let stem = f.file_stem().unwrap().to_string_lossy();
+                        std::fs::write(out.join(format!("{stem}-chart{i:02}-{v:02}.svg")), &svg)
+                            .unwrap();
+                    }
+                }
+                rendered += 1;
+            }
+        }
+    }
+    eprintln!("rendered {rendered} chart views");
+    assert!(rendered > 0);
 }

@@ -283,8 +283,21 @@ code {
     cursor: pointer;
 }
 
-.diagram g.block[data-subsystem] {
+.diagram g.block[data-subsystem],
+.diagram g.state[data-subchart] {
     cursor: zoom-in;
+}
+
+.inspector pre.script {
+    margin: 0;
+    padding: 0.5rem;
+    max-height: 60vh;
+    overflow: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    white-space: pre;
+    background: var(--panel);
+    border-radius: 4px;
 }
 
 .inspector {
