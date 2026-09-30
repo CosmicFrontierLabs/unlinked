@@ -2,7 +2,7 @@
 
 The [machine-readable inventory](corpus-coverage.json) records import, rendering and compilation outcomes for the pinned public corpus at revision `7684ab11500cda4d0f1192287360d1d767dafe4c`. It is a baseline, not a general compatibility guarantee.
 
-All 31 model fixtures import and render. With no external input bindings or workspace overrides, one model compiles for execution: the synthetic analytic reference. Existing models commonly require external inputs, workspace values, unsupported masks, libraries or blocks. The report retains each compiler diagnostic.
+All 31 model fixtures import and render, including imported Stateflow charts and MATLAB Function code. With no external input bindings or workspace overrides, one model compiles for execution: the synthetic analytic reference. Existing models commonly require external inputs, workspace values, unsupported masks, libraries or blocks. The report retains each compiler diagnostic.
 
 With explicit root input bindings, the original AutoLayout MDL and SLX files both execute and produce identical traces across 35 scalar signals. Reproduce either run with:
 
@@ -13,6 +13,8 @@ unlinked sim path/to/AutoLayoutDemo.mdl \
 ```
 
 This checks equivalent file encodings; it is not an independent MathWorks numerical oracle. Separate solver tests compare analytic trajectories, transfer/state-space responses and discrete recurrences. The synthetic corpus model has the independent formula `y = 1 + 10*t` and is checked within `1e-9`.
+
+An unchanged scalar MATLAB Function chart extracted from `rovSim_los.slx` is also exercised against its piecewise formula. The test isolates that block with explicit inputs; it does not establish full ROV model execution.
 
 All nine collected MATLAB functions compile to Rust and match Octave on the recorded test inputs. Additional differential tests cover arrays and initialization scripts. The pure function interpreter deliberately rejects printing; its tests distinguish original files from test-only projections with printing statements removed. Supported operations, bounds, and MATLAB/Octave differences are listed in the [compiler README](../crates/unlinked-matlab/README.md). The [simulator README](../crates/unlinked-sim/README.md) documents supported block and solver semantics.
 
