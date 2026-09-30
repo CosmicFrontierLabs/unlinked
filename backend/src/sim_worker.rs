@@ -15,7 +15,7 @@ const CHUNK_SAMPLES: usize = 128;
 #[derive(Debug)]
 pub enum Event {
     Started {
-        signals: Vec<(String, String)>,
+        signals: Vec<shared::SimulationSignal>,
     },
     Samples {
         time: Vec<f64>,
@@ -23,6 +23,12 @@ pub enum Event {
     },
     Completed,
     Failed(String),
+}
+
+#[derive(Debug)]
+pub struct CompletedSimulation {
+    pub trace: Trace,
+    pub signals: Vec<shared::SimulationSignal>,
 }
 
 pub struct Worker {
@@ -103,7 +109,9 @@ pub fn start(
     bytes: Vec<u8>,
     request: shared::SimulationRequest,
     init_script: Option<String>,
-    complete: impl FnOnce(&Result<Trace, Failure>, &Options) -> Result<(), String> + Send + 'static,
+    complete: impl FnOnce(&Result<CompletedSimulation, Failure>, &Options) -> Result<(), String>
+        + Send
+        + 'static,
 ) -> Result<Worker, String> {
     let mut options = request.options;
     if bytes.len() > 16 * 1024 * 1024 {
@@ -125,7 +133,7 @@ pub fn start(
             })
         };
         let mut result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || -> Result<Trace, Failure> {
+            || -> Result<CompletedSimulation, Failure> {
                 let mut model =
                     unlinked_import::import(&filename, &bytes).map_err(|e| e.to_string())?;
                 let evaluation_cancel = cancelled.clone();
@@ -210,12 +218,16 @@ pub fn start(
                         cancelled: true,
                     });
                 }
+                let signals: Vec<_> = graph
+                    .nodes
+                    .iter()
+                    .map(|node| shared::SimulationSignal {
+                        id: node.id.clone(),
+                        name: format!("{}:1", node.name),
+                    })
+                    .collect();
                 send(Event::Started {
-                    signals: graph
-                        .nodes
-                        .iter()
-                        .map(|n| (n.id.clone(), format!("{}:1", n.name)))
-                        .collect(),
+                    signals: signals.clone(),
                 })
                 .map_err(|_| "client disconnected".to_string())?;
                 let mut times = Vec::with_capacity(CHUNK_SAMPLES);
@@ -271,7 +283,7 @@ pub fn start(
                     })
                     .map_err(|_| "client disconnected".to_string())?;
                 }
-                Ok(trace)
+                Ok(CompletedSimulation { trace, signals })
             },
         ))
         .unwrap_or_else(|_| Err(Failure::from("simulation worker panicked")));
@@ -345,7 +357,10 @@ mod tests {
                 Some("K=4;".into()),
                 move |result, _| {
                     if let Some(expected) = expected {
-                        assert_eq!(result.as_ref().unwrap().signals["2"], vec![expected; 2]);
+                        assert_eq!(
+                            result.as_ref().unwrap().trace.signals["2"],
+                            vec![expected; 2]
+                        );
                     } else {
                         assert!(result.is_err());
                     }
@@ -374,6 +389,8 @@ mod tests {
     async fn streams_named_bounded_samples_and_persists_before_completion() {
         let completed = Arc::new(AtomicBool::new(false));
         let flag = completed.clone();
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_result = captured.clone();
         let mut worker = start(
             reserve(uuid::Uuid::new_v4()).unwrap(),
             "scalar.mdl".into(),
@@ -391,18 +408,26 @@ mod tests {
             },
             None,
             move |result, _options| {
-                assert!(result.is_ok());
+                let result = result.as_ref().unwrap();
+                assert_eq!(result.signals.len(), result.trace.signals.len());
+                assert!(result
+                    .signals
+                    .iter()
+                    .all(|signal| result.trace.signals.contains_key(&signal.id)));
+                *captured_result.lock().unwrap() = Some(result.signals.clone());
                 flag.store(true, Ordering::SeqCst);
                 Ok(())
             },
         )
         .unwrap();
         let mut count = 0;
+        let mut streamed_signals = Vec::new();
         while let Some(event) = worker.events.recv().await {
             match event {
                 Event::Started { signals } => {
                     assert_eq!(signals.len(), 3);
-                    assert!(signals.iter().all(|s| s.1.ends_with(":1")));
+                    assert!(signals.iter().all(|s| s.name.ends_with(":1")));
+                    streamed_signals = signals;
                 }
                 Event::Samples { time, values } => {
                     assert_eq!(time.len(), values.len());
@@ -416,6 +441,7 @@ mod tests {
             }
         }
         assert_eq!(count, 3);
+        assert_eq!(captured.lock().unwrap().as_ref(), Some(&streamed_signals));
     }
 }
 
