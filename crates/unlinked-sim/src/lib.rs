@@ -98,9 +98,22 @@ pub enum Kind {
     Integrator {
         initial: f64,
     },
-    /// Single-rate only: one tick per requested simulation step.
+    /// One tick per requested simulation step.
     UnitDelay {
         initial: f64,
+    },
+    /// Delay sampled at positive integer multiples of the observation step.
+    RateDelay {
+        initial: f64,
+        period_ticks: usize,
+    },
+    /// Simulation time sampled at positive integer multiples of the step.
+    DigitalClock {
+        period_ticks: usize,
+    },
+    /// Direct-feedthrough sampling at hits, held during continuous solver stages.
+    SampleHold {
+        period_ticks: usize,
     },
     /// Scalar numeric switch. All three inputs are evaluated; no lazy branch execution.
     Switch,
@@ -115,22 +128,50 @@ pub enum Kind {
     Unary {
         operation: String,
     },
+    /// Pure, stateless function with scalar inputs and exactly one scalar output.
+    MatlabFunction {
+        script: String,
+        inputs: usize,
+    },
     Sink,
 }
 impl Kind {
     fn input_count(&self) -> usize {
         match self {
-            Self::Constant { .. } | Self::Step { .. } | Self::Sine { .. } | Self::Clock => 0,
+            Self::Constant { .. }
+            | Self::Step { .. }
+            | Self::Sine { .. }
+            | Self::Clock
+            | Self::DigitalClock { .. } => 0,
             Self::Switch => 3,
             Self::Relational { .. } => 2,
-            Self::Logic { inputs, .. } => *inputs,
+            Self::Logic { inputs, .. } | Self::MatlabFunction { inputs, .. } => *inputs,
             Self::Sum { signs } => signs.len(),
             Self::Product { divide } => divide.len(),
             _ => 1,
         }
     }
     fn is_state(&self) -> bool {
-        matches!(self, Self::Integrator { .. } | Self::UnitDelay { .. })
+        matches!(
+            self,
+            Self::Integrator { .. }
+                | Self::UnitDelay { .. }
+                | Self::RateDelay { .. }
+                | Self::DigitalClock { .. }
+                | Self::SampleHold { .. }
+        )
+    }
+    fn direct_feedthrough(&self) -> bool {
+        !self.is_state() || matches!(self, Self::SampleHold { .. })
+    }
+    fn period(&self) -> Option<usize> {
+        match self {
+            Self::UnitDelay { .. } => Some(1),
+            Self::RateDelay { period_ticks, .. }
+            | Self::DigitalClock { period_ticks }
+            | Self::SampleHold { period_ticks } => Some(*period_ticks),
+            _ => None,
+        }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -163,6 +204,7 @@ struct Compiled<'a> {
     inputs: Vec<Vec<usize>>,
     order: Vec<usize>,
     states: Vec<usize>,
+    matlab: matlab_function::Runtime,
 }
 fn on_grid(ticks: f64) -> bool {
     ticks == 0.0 || (ticks.round() >= 1.0 && (ticks - ticks.round()).abs() <= 1e-9)
@@ -176,6 +218,7 @@ fn block_error(id: &str, message: impl Into<String>) -> Error {
 }
 impl<'a> Compiled<'a> {
     fn new(graph: &'a Graph) -> Result<Self, Error> {
+        let matlab = matlab_function::Runtime::prepare(graph)?;
         let mut ids = BTreeMap::new();
         for (i, node) in graph.nodes.iter().enumerate() {
             if ids.insert(node.id.as_str(), i).is_some() {
@@ -203,9 +246,17 @@ impl<'a> Compiled<'a> {
                     }
                     vec![*lower, *upper]
                 }
-                Kind::Integrator { initial } | Kind::UnitDelay { initial } => vec![*initial],
+                Kind::Integrator { initial }
+                | Kind::UnitDelay { initial }
+                | Kind::RateDelay { initial, .. } => vec![*initial],
                 _ => vec![],
             };
+            if node.kind.period().is_some_and(|p| p == 0 || p > 1_000_000) {
+                return Err(block_error(
+                    &node.id,
+                    "sample period requires 1 to 1,000,000 ticks",
+                ));
+            }
             if values.iter().any(|v| !v.is_finite()) {
                 return Err(block_error(&node.id, "non-finite parameter"));
             }
@@ -283,7 +334,7 @@ impl<'a> Compiled<'a> {
         let mut remaining = vec![0; graph.nodes.len()];
         let mut ready = BTreeSet::new();
         for (i, node) in graph.nodes.iter().enumerate() {
-            if !node.kind.is_state() {
+            if node.kind.direct_feedthrough() {
                 remaining[i] = inputs[i].len();
                 for &source in &inputs[i] {
                     dependents[source].push(i);
@@ -297,7 +348,7 @@ impl<'a> Compiled<'a> {
         let mut visited = 0;
         while let Some(i) = ready.pop_first() {
             visited += 1;
-            if !graph.nodes[i].kind.is_state() {
+            if graph.nodes[i].kind.direct_feedthrough() {
                 order.push(i);
             }
             for &target in &dependents[i] {
@@ -324,9 +375,19 @@ impl<'a> Compiled<'a> {
             inputs,
             order,
             states,
+            matlab,
         })
     }
     fn evaluate(&self, t: f64, state: &[f64], left_limit: bool) -> Result<Vec<f64>, Error> {
+        self.evaluate_sample(t, state, left_limit, None)
+    }
+    fn evaluate_sample(
+        &self,
+        t: f64,
+        state: &[f64],
+        left_limit: bool,
+        sample: Option<usize>,
+    ) -> Result<Vec<f64>, Error> {
         let mut values = vec![0.0; self.graph.nodes.len()];
         for (s, i) in self.states.iter().enumerate() {
             values[*i] = state[s];
@@ -404,8 +465,23 @@ impl<'a> Compiled<'a> {
                     "sqrt" => x(0).sqrt(),
                     _ => unreachable!(),
                 },
+                Kind::MatlabFunction { inputs, .. } => self.matlab.evaluate(
+                    i,
+                    &self.graph.nodes[i].id,
+                    (0..*inputs).map(x).collect(),
+                )?,
                 Kind::Sink => x(0),
-                Kind::Integrator { .. } | Kind::UnitDelay { .. } => unreachable!(),
+                Kind::SampleHold { period_ticks } => {
+                    if sample.is_some_and(|tick| tick % period_ticks == 0) {
+                        x(0)
+                    } else {
+                        values[i]
+                    }
+                }
+                Kind::Integrator { .. }
+                | Kind::UnitDelay { .. }
+                | Kind::RateDelay { .. }
+                | Kind::DigitalClock { .. } => unreachable!(),
             };
             if !value.is_finite() {
                 return Err(block_error(
@@ -451,6 +527,22 @@ pub struct Sample<'a> {
 pub fn simulate_with_observer(
     graph: &Graph,
     options: &Options,
+    observer: impl FnMut(Sample<'_>) -> bool,
+) -> Result<Trace, Error> {
+    simulate_with_observer_and_budget(
+        graph,
+        options,
+        unlinked_matlab::ArrayBudget::default(),
+        observer,
+    )
+}
+
+/// As `simulate_with_observer`, with one function-execution budget shared across
+/// all blocks, samples and solver stages. The budget may carry a deadline check.
+pub fn simulate_with_observer_and_budget(
+    graph: &Graph,
+    options: &Options,
+    budget: unlinked_matlab::ArrayBudget,
     mut observer: impl FnMut(Sample<'_>) -> bool,
 ) -> Result<Trace, Error> {
     let o = options;
@@ -476,8 +568,7 @@ pub fn simulate_with_observer(
         return Err(Error::Options("Rk45 requires 0 < relative_tolerance <= 1, positive finite absolute_tolerance, and 1..=1,000,000 internal steps".into()));
     }
     let ticks = (o.stop - o.start) / o.step;
-    let near_integer = (ticks == 0.0 || ticks.round() >= 1.0)
-        && (ticks - ticks.round()).abs() <= 8.0 * f64::EPSILON * ticks.abs().max(1.0);
+    let near_integer = on_grid(ticks);
     let intervals = if near_integer {
         ticks.round()
     } else {
@@ -492,15 +583,11 @@ pub fn simulate_with_observer(
     if graph.nodes.len() > 100_000 || graph.wires.len() > 1_000_000 {
         return Err(Error::Options("graph budget exceeded".into()));
     }
-    if graph
-        .nodes
-        .iter()
-        .any(|n| matches!(n.kind, Kind::UnitDelay { .. }))
-    {
+    if graph.nodes.iter().any(|n| n.kind.period().is_some()) {
         let ticks = (o.stop - o.start) / o.step;
         if !on_grid(ticks) {
             return Err(Error::Options(
-                "UnitDelay requires stop time on the fixed-step grid".into(),
+                "discrete blocks require stop time on the fixed-step grid".into(),
             ));
         }
     }
@@ -510,6 +597,11 @@ pub fn simulate_with_observer(
         ));
     }
     for node in &graph.nodes {
+        if let Some(period) = node.kind.period() {
+            if period == 0 || period > 1_000_000 || !on_grid(o.start / (period as f64 * o.step)) {
+                return Err(block_error(&node.id, "discrete sample period must be bounded and simulation start must align with its zero-phase grid"));
+            }
+        }
         if let Kind::Step { time, .. } = node.kind {
             let ticks = (time - o.start) / o.step;
             if time > o.start && time < o.stop && !on_grid(ticks) {
@@ -532,11 +624,15 @@ pub fn simulate_with_observer(
     }
     let graph = &normalized;
     let compiled = Compiled::new(graph)?;
+    compiled.matlab.budget.replace(budget);
     let mut state: Vec<f64> = compiled
         .states
         .iter()
         .map(|&i| match graph.nodes[i].kind {
-            Kind::Integrator { initial } | Kind::UnitDelay { initial } => initial,
+            Kind::Integrator { initial }
+            | Kind::UnitDelay { initial }
+            | Kind::RateDelay { initial, .. } => initial,
+            Kind::DigitalClock { .. } | Kind::SampleHold { .. } => 0.0,
             _ => unreachable!(),
         })
         .collect();
@@ -549,6 +645,7 @@ pub fn simulate_with_observer(
             .collect(),
         solver: o.solver,
     };
+    let mut pending = state.clone();
     let mut adaptive = adaptive::Adaptive::new(o.step);
     for sample in 0..count {
         let t = if sample + 1 == count {
@@ -556,7 +653,31 @@ pub fn simulate_with_observer(
         } else {
             (o.start + sample as f64 * o.step).min(o.stop)
         };
-        let values = compiled.evaluate(t, &state, false)?;
+        for (slot, &node) in compiled.states.iter().enumerate() {
+            match graph.nodes[node].kind {
+                Kind::DigitalClock { period_ticks } if sample % period_ticks == 0 => {
+                    state[slot] = t
+                }
+                Kind::UnitDelay { .. } if sample > 0 => state[slot] = pending[slot],
+                Kind::RateDelay { period_ticks, .. }
+                    if sample > 0 && sample % period_ticks == 0 =>
+                {
+                    state[slot] = pending[slot]
+                }
+                _ => {}
+            }
+        }
+        let values = compiled.evaluate_sample(t, &state, false, Some(sample))?;
+        for (slot, &node) in compiled.states.iter().enumerate() {
+            match graph.nodes[node].kind {
+                Kind::SampleHold { .. } => state[slot] = values[node],
+                Kind::UnitDelay { .. } => pending[slot] = values[compiled.inputs[node][0]],
+                Kind::RateDelay { period_ticks, .. } if sample % period_ticks == 0 => {
+                    pending[slot] = values[compiled.inputs[node][0]]
+                }
+                _ => {}
+            }
+        }
         if !observer(Sample {
             time: t,
             nodes: &graph.nodes,
@@ -578,7 +699,7 @@ pub fn simulate_with_observer(
             ));
         }
         let k1 = compiled.derivative(&values);
-        let mut next = match o.solver {
+        let next = match o.solver {
             Solver::Rk45 => {
                 let end = if sample + 2 == count {
                     o.stop
@@ -619,9 +740,6 @@ pub fn simulate_with_observer(
             }
         };
         for (s, &i) in compiled.states.iter().enumerate() {
-            if matches!(graph.nodes[i].kind, Kind::UnitDelay { .. }) {
-                next[s] = values[compiled.inputs[i][0]];
-            }
             if !next[s].is_finite() {
                 return Err(block_error(
                     &graph.nodes[i].id,
@@ -635,9 +753,11 @@ pub fn simulate_with_observer(
 }
 
 mod adaptive;
+mod chart_lowering;
 mod flatten;
 mod import;
 mod inputs;
+mod matlab_function;
 pub use inputs::{compile_with_inputs, evaluate_inputs, simulate_model_with_inputs, InputValues};
 mod state_space;
 mod transfer;

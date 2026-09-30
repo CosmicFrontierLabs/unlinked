@@ -1,0 +1,746 @@
+{
+  "description": "Import, all-system SVG render and simulation compilation only. No simulation is run; compilation does not establish numerical equivalence. No workspace overrides or callbacks are evaluated.",
+  "models": [
+    {
+      "block_types": {
+        "BusSelector": 3,
+        "Demux": 1,
+        "Ground": 1,
+        "Inport": 1,
+        "Mux": 3,
+        "Outport": 4,
+        "Reference": 2,
+        "S-Function": 1,
+        "Stop": 1,
+        "SubSystem": 2,
+        "Terminator": 1,
+        "ToWorkspace": 4
+      },
+      "blocks": 24,
+      "name": "Calibrating_The_AR_Drone_Sensors_Model",
+      "path": "ardrone/AR_Drone_Models/Calibration_Models/Calibrating_The_AR_Drone_Sensors_Model.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 1723: MATLAB Function: line 5: bare expression display is unsupported; use disp(expression)",
+      "systems": 3,
+      "version": "R2016a"
+    },
+    {
+      "block_types": {
+        "Display": 1,
+        "Reference": 1
+      },
+      "blocks": 2,
+      "name": "Example_Getting_Started",
+      "path": "ardrone/AR_Drone_Models/Example_Models/Example_Getting_Started.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 1: subsystems, masks and library links require explicit lowering before simulation",
+      "systems": 1,
+      "version": "R2016a"
+    },
+    {
+      "block_types": {
+        "BusSelector": 1,
+        "Gain": 1,
+        "Inport": 1,
+        "Mux": 3,
+        "Outport": 4,
+        "Reference": 2,
+        "Scope": 7,
+        "SubSystem": 1
+      },
+      "blocks": 20,
+      "name": "Example_Reading_And_Logging_Sensor_Data",
+      "path": "ardrone/AR_Drone_Models/Example_Models/Example_Reading_And_Logging_Sensor_Data.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 24: subsystems, masks and library links require explicit lowering before simulation",
+      "systems": 2,
+      "version": "R2016a"
+    },
+    {
+      "block_types": {
+        "Constant": 1,
+        "Demux": 1,
+        "Inport": 6,
+        "Outport": 4,
+        "Reference": 2,
+        "S-Function": 1,
+        "SubSystem": 3,
+        "Sum": 3,
+        "Terminator": 1
+      },
+      "blocks": 22,
+      "name": "Child_Model",
+      "path": "ardrone/AR_Drone_Models/PIL_Test/Child_Model.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 15: only unmasked virtual subsystems can be flattened",
+      "systems": 4,
+      "version": "R2014a"
+    },
+    {
+      "block_types": {
+        "Constant": 2,
+        "Display": 1,
+        "ModelReference": 1,
+        "Outport": 1
+      },
+      "blocks": 5,
+      "name": "Parent_Model",
+      "path": "ardrone/AR_Drone_Models/PIL_Test/Parent_Model.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 1: unsupported block type ModelReference",
+      "systems": 1,
+      "version": "R2014a"
+    },
+    {
+      "block_types": {
+        "From": 2,
+        "Gain": 5,
+        "Goto": 2,
+        "Inport": 7,
+        "Integrator": 8,
+        "Outport": 8,
+        "Product": 2,
+        "SubSystem": 2,
+        "Sum": 1
+      },
+      "blocks": 37,
+      "name": "AutoLayoutDemo",
+      "path": "auto-layout/example/AutoLayoutDemo.mdl",
+      "render_errors": [],
+      "simulation_compile_error": "block 9: unsupported block type Inport",
+      "systems": 3,
+      "version": "7.8"
+    },
+    {
+      "block_types": {
+        "From": 2,
+        "Gain": 5,
+        "Goto": 2,
+        "Inport": 7,
+        "Integrator": 8,
+        "Outport": 8,
+        "Product": 2,
+        "SubSystem": 2,
+        "Sum": 1
+      },
+      "blocks": 37,
+      "name": "AutoLayout_Cover",
+      "path": "auto-layout/imgs/AutoLayout_Cover.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 9: unsupported block type Inport",
+      "systems": 3,
+      "version": "R2016b"
+    },
+    {
+      "block_types": {
+        "Inport": 40,
+        "Outport": 26
+      },
+      "blocks": 66,
+      "name": "DISCON_Empty",
+      "path": "discon/Simulink_64bit/DISCON_Empty.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 3409: unsupported block type Inport",
+      "systems": 1,
+      "version": "R2015b"
+    },
+    {
+      "block_types": {
+        "Clock": 1,
+        "Constant": 26,
+        "Demux": 5,
+        "DiscreteIntegrator": 1,
+        "DiscreteStateSpace": 2,
+        "From": 1,
+        "Gain": 3,
+        "Goto": 1,
+        "Inport": 92,
+        "Lookup_n-D": 2,
+        "Outport": 43,
+        "S-Function": 5,
+        "Saturate": 3,
+        "SubSystem": 13,
+        "Sum": 3,
+        "Terminator": 5
+      },
+      "blocks": 206,
+      "name": "DISCON_NREL5MW",
+      "path": "discon/Simulink_64bit/DISCON_NREL5MW.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 7101: MATLAB Function signature must match input ports and declare exactly one output",
+      "systems": 14,
+      "version": "R2018b"
+    },
+    {
+      "block_types": {
+        "BusCreator": 1,
+        "BusSelector": 2,
+        "Constant": 4,
+        "Demux": 2,
+        "ForEach": 1,
+        "Inport": 10,
+        "MessageViewer": 1,
+        "Outport": 20,
+        "S-Function": 2,
+        "SubSystem": 5,
+        "Terminator": 4
+      },
+      "blocks": 52,
+      "name": "can_decoder",
+      "path": "icub/boards/amcbldc/messaging/can_decoder.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 245: only pure MATLAB Function charts are supported; Stateflow state charts are not executable",
+      "systems": 6,
+      "version": "R2026a"
+    },
+    {
+      "block_types": {
+        "BusCreator": 7,
+        "BusSelector": 4,
+        "Concatenate": 1,
+        "Constant": 14,
+        "DataTypeConversion": 4,
+        "Demux": 2,
+        "Gain": 3,
+        "Inport": 15,
+        "Outport": 7,
+        "Product": 1,
+        "S-Function": 2,
+        "SubSystem": 8,
+        "Terminator": 2
+      },
+      "blocks": 70,
+      "name": "can_encoder",
+      "path": "icub/boards/amcbldc/messaging/can_encoder.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 86: MATLAB Function: line 1: unsupported pure function 'uint8'",
+      "systems": 7,
+      "version": "R2026a"
+    },
+    {
+      "block_types": {
+        "Demux": 1,
+        "Inport": 6,
+        "Outport": 2,
+        "S-Function": 1,
+        "SubSystem": 1,
+        "Terminator": 1
+      },
+      "blocks": 12,
+      "name": "format_can_id",
+      "path": "icub/boards/amcbldc/messaging/format_can_id.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 4: MATLAB Function: line 1: unsupported pure function 'uint16'",
+      "systems": 2,
+      "version": "R2025a"
+    },
+    {
+      "block_types": {
+        "BusCreator": 1,
+        "BusSelector": 3,
+        "Constant": 5,
+        "Demux": 2,
+        "From": 27,
+        "Gain": 9,
+        "Goto": 17,
+        "Ground": 3,
+        "Inport": 36,
+        "LookupNDDirect": 1,
+        "MinMax": 2,
+        "Mux": 2,
+        "Outport": 18,
+        "Product": 6,
+        "Reference": 10,
+        "S-Function": 1,
+        "Saturate": 3,
+        "Selector": 2,
+        "SignalSpecification": 1,
+        "SubSystem": 11,
+        "Sum": 7,
+        "Switch": 3,
+        "Terminator": 8,
+        "Trigonometry": 3,
+        "UnitConversion": 1,
+        "UnitDelay": 1
+      },
+      "blocks": 183,
+      "name": "control_foc",
+      "path": "icub/boards/common/models/motion_control/control/control_foc.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 514: MATLAB Function: line 1: unsupported pure function 'wrapTo2Pi'",
+      "systems": 12,
+      "version": "R2025b"
+    },
+    {
+      "block_types": {
+        "Constant": 3,
+        "DataTypeConversion": 2,
+        "DiscreteFilter": 1,
+        "From": 1,
+        "Gain": 1,
+        "Goto": 1,
+        "Inport": 10,
+        "Math": 1,
+        "Mux": 2,
+        "Outport": 3,
+        "Product": 4,
+        "SubSystem": 1,
+        "Sum": 4
+      },
+      "blocks": 34,
+      "name": "thermal_model",
+      "path": "icub/boards/common/models/motion_control/estimation/thermal_model.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 343: unsupported block type Inport",
+      "systems": 2,
+      "version": "R2024b"
+    },
+    {
+      "block_types": {
+        "Demux": 1,
+        "Inport": 13,
+        "MessageViewer": 1,
+        "Outport": 8,
+        "S-Function": 1,
+        "SubSystem": 1,
+        "Terminator": 2
+      },
+      "blocks": 27,
+      "name": "supervisor",
+      "path": "icub/boards/common/models/motion_control/supervision/supervisor.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 1: only pure MATLAB Function charts are supported; Stateflow state charts are not executable",
+      "systems": 2,
+      "version": "R2026a"
+    },
+    {
+      "block_types": {
+        "ActionPort": 16,
+        "ArgIn": 16,
+        "ArgOut": 10,
+        "BusAssignment": 7,
+        "BusSelector": 12,
+        "Constant": 19,
+        "DataStoreMemory": 1,
+        "DataStoreRead": 13,
+        "DataStoreWrite": 8,
+        "DataTypeConversion": 3,
+        "EnablePort": 1,
+        "EventListener": 1,
+        "From": 99,
+        "FunctionCaller": 5,
+        "Gain": 19,
+        "Goto": 64,
+        "If": 7,
+        "Inport": 61,
+        "Logic": 3,
+        "Merge": 14,
+        "Outport": 44,
+        "Product": 13,
+        "Reference": 6,
+        "RelationalOperator": 3,
+        "SubSystem": 35,
+        "Sum": 34,
+        "Switch": 8,
+        "SwitchCase": 1,
+        "TriggerPort": 15
+      },
+      "blocks": 538,
+      "name": "MinimumJerkPlanner",
+      "path": "icub/boards/joint-motioncontrol/models/planners/MinimumJerkPlanner.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 243: only unmasked virtual subsystems can be flattened",
+      "systems": 36,
+      "version": "R2024b"
+    },
+    {
+      "block_types": {
+        "Constant": 3,
+        "DataTypeConversion": 3,
+        "Inport": 1,
+        "Outport": 1,
+        "Product": 3,
+        "Sum": 1
+      },
+      "blocks": 12,
+      "name": "adc2ft",
+      "path": "icub/ft_sensor/adc2ft.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 10: unsupported block type Inport",
+      "systems": 1,
+      "version": "R2021a"
+    },
+    {
+      "block_types": {
+        "EnablePort": 1,
+        "Inport": 11,
+        "Outport": 2,
+        "Reference": 1,
+        "SubSystem": 1
+      },
+      "blocks": 16,
+      "name": "kalman_filter",
+      "path": "icub/kalman_filter/kalman_filter.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 7: only unmasked virtual subsystems can be flattened",
+      "systems": 2,
+      "version": "R2021b"
+    },
+    {
+      "block_types": {
+        "Abs": 6,
+        "Constant": 16,
+        "Demux": 17,
+        "FirstOrderHold": 1,
+        "From": 2,
+        "Gain": 2,
+        "Goto": 1,
+        "Inport": 24,
+        "Math": 24,
+        "Mux": 13,
+        "Outport": 29,
+        "PMIOPort": 164,
+        "Reference": 433,
+        "RelationalOperator": 6,
+        "S-Function": 3,
+        "Scope": 14,
+        "SignalGenerator": 3,
+        "Sin": 3,
+        "Sqrt": 12,
+        "SubSystem": 89,
+        "Sum": 20,
+        "Switch": 8,
+        "Terminator": 9,
+        "UnitDelay": 1,
+        "ZeroOrderHold": 2
+      },
+      "blocks": 902,
+      "name": "spherical_wrist",
+      "path": "icub/wrist_mk2_1/spherical_wrist.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 2819: commented or commented-through blocks are unsupported",
+      "systems": 90,
+      "version": "R2024b"
+    },
+    {
+      "block_types": {
+        "BusCreator": 2,
+        "Clock": 1,
+        "Constant": 8,
+        "Gain": 1,
+        "ManualSwitch": 1,
+        "Mux": 1,
+        "Reference": 1,
+        "S-Function": 3,
+        "Terminator": 3
+      },
+      "blocks": 21,
+      "name": "test_messages_local",
+      "path": "mavlink/Examples/test_messages_local.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 5: unsupported block type BusCreator",
+      "systems": 1,
+      "version": "R2017a"
+    },
+    {
+      "block_types": {
+        "Constant": 5,
+        "Demux": 1,
+        "Gain": 14,
+        "Inport": 4,
+        "Integrator": 4,
+        "Mux": 2,
+        "Outport": 6,
+        "Product": 4,
+        "Reference": 3,
+        "Saturate": 1,
+        "Scope": 2,
+        "Selector": 2,
+        "SubSystem": 4,
+        "Sum": 7,
+        "Trigonometry": 2
+      },
+      "blocks": 61,
+      "name": "IP_LQR_Design",
+      "path": "pendulum/IP_LQR_Design.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 70: only unmasked virtual subsystems can be flattened",
+      "systems": 5,
+      "version": "R2018a"
+    },
+    {
+      "block_types": {
+        "Constant": 1,
+        "Demux": 1,
+        "Gain": 10,
+        "Inport": 2,
+        "Integrator": 4,
+        "Mux": 1,
+        "Outport": 4,
+        "Product": 4,
+        "Reference": 3,
+        "Scope": 1,
+        "Selector": 2,
+        "Step": 1,
+        "SubSystem": 2,
+        "Sum": 5,
+        "Trigonometry": 2
+      },
+      "blocks": 43,
+      "name": "IP_Nonlinear_model",
+      "path": "pendulum/IP_Nonlinear_model.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 70: only unmasked virtual subsystems can be flattened",
+      "systems": 3,
+      "version": "R2018a"
+    },
+    {
+      "block_types": {
+        "Abs": 1,
+        "ActionPort": 2,
+        "Constant": 8,
+        "Demux": 1,
+        "Gain": 26,
+        "If": 1,
+        "Inport": 14,
+        "Integrator": 4,
+        "Math": 3,
+        "Merge": 1,
+        "Mux": 2,
+        "Outport": 11,
+        "Product": 9,
+        "Reference": 7,
+        "Saturate": 2,
+        "Scope": 5,
+        "Selector": 8,
+        "Signum": 1,
+        "SubSystem": 9,
+        "Sum": 13,
+        "Trigonometry": 5
+      },
+      "blocks": 133,
+      "name": "IP_SwingUp_Design",
+      "path": "pendulum/IP_SwingUp_Design.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 191: commented or commented-through blocks are unsupported",
+      "systems": 10,
+      "version": "R2018a"
+    },
+    {
+      "block_types": {
+        "DigitalClock": 1,
+        "Gain": 3,
+        "Inport": 2,
+        "Outport": 3,
+        "Sum": 1
+      },
+      "blocks": 10,
+      "name": "dllModel",
+      "path": "python-simulink/Example1/dllModel.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 1: unsupported block type Inport",
+      "systems": 1,
+      "version": "R2018b"
+    },
+    {
+      "block_types": {
+        "Constant": 1,
+        "DigitalClock": 1,
+        "DiscreteTransferFcn": 1,
+        "Outport": 2
+      },
+      "blocks": 5,
+      "name": "discrete_tf",
+      "path": "python-simulink/Example2/discrete_tf.mdl",
+      "render_errors": [],
+      "simulation_compile_error": "block 13: Value: line 1: undefined variable 'InputSignal'",
+      "systems": 1,
+      "version": "8.6"
+    },
+    {
+      "block_types": {
+        "Ground": 1,
+        "Inport": 4,
+        "Outport": 1,
+        "Terminator": 4
+      },
+      "blocks": 10,
+      "name": "baseline",
+      "path": "spaaro/simulink/vms/baseline.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 1: unsupported block type Inport",
+      "systems": 1,
+      "version": "R2021a"
+    },
+    {
+      "block_types": {
+        "ActionPort": 5,
+        "BusCreator": 9,
+        "BusSelector": 8,
+        "Constant": 34,
+        "DataTypeConversion": 18,
+        "Demux": 3,
+        "DiscreteIntegrator": 1,
+        "DiscreteTransferFcn": 2,
+        "From": 50,
+        "Gain": 12,
+        "Goto": 41,
+        "Ground": 3,
+        "Inport": 47,
+        "Merge": 4,
+        "Mux": 4,
+        "Outport": 32,
+        "Polyval": 8,
+        "Product": 15,
+        "Reference": 13,
+        "RelationalOperator": 2,
+        "Rounding": 1,
+        "SubSystem": 19,
+        "Sum": 11,
+        "Switch": 1,
+        "SwitchCase": 2,
+        "Terminator": 3,
+        "UnitDelay": 2
+      },
+      "blocks": 350,
+      "name": "sig_kadet",
+      "path": "spaaro/simulink/vms/sig_kadet.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 231: only unmasked virtual subsystems can be flattened",
+      "systems": 20,
+      "version": "R2021a"
+    },
+    {
+      "block_types": {
+        "Constant": 2,
+        "Gain": 1,
+        "Integrator": 1,
+        "Outport": 1,
+        "Sum": 1
+      },
+      "blocks": 6,
+      "name": "constant_gain_sum_integrator",
+      "path": "synthetic/constant_gain_sum_integrator.mdl",
+      "render_errors": [],
+      "simulation_compile_error": null,
+      "systems": 1,
+      "version": "8.0"
+    },
+    {
+      "block_types": {
+        "Clock": 1,
+        "Constant": 5,
+        "Demux": 2,
+        "Gain": 3,
+        "Inport": 9,
+        "Mux": 1,
+        "Outport": 10,
+        "Product": 1,
+        "S-Function": 3,
+        "Saturate": 1,
+        "SubSystem": 4,
+        "Sum": 3,
+        "Terminator": 2
+      },
+      "blocks": 45,
+      "name": "rovSim_trj",
+      "path": "uuv/extra/rovSim_trj.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 121: MATLAB Function: line 14: bare expression display is unsupported; use disp(expression)",
+      "systems": 5,
+      "version": "R2017a"
+    },
+    {
+      "block_types": {
+        "Abs": 1,
+        "Constant": 6,
+        "Demux": 4,
+        "Gain": 1,
+        "Inport": 18,
+        "Mux": 2,
+        "Outport": 15,
+        "Product": 2,
+        "Reference": 4,
+        "S-Function": 4,
+        "Saturate": 2,
+        "SubSystem": 5,
+        "Sum": 4,
+        "Terminator": 5,
+        "Trigonometry": 2
+      },
+      "blocks": 75,
+      "name": "rovSim_los",
+      "path": "uuv/models/rovSim_los.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 99: MATLAB Function: line 12: bare expression display is unsupported; use disp(expression)",
+      "systems": 6,
+      "version": "R2017a"
+    },
+    {
+      "block_types": {
+        "Constant": 2,
+        "Mux": 1,
+        "Outport": 2,
+        "S-Function": 1,
+        "Terminator": 1
+      },
+      "blocks": 7,
+      "name": "uuvSim_simple",
+      "path": "uuv/models/uuvSim_simple.slx",
+      "render_errors": [],
+      "simulation_compile_error": "block 12: Value: line 1: undefined variable 'v_c'",
+      "systems": 1,
+      "version": "R2017a"
+    }
+  ],
+  "simulation_options": {
+    "absolute_tolerance": 1e-09,
+    "max_internal_steps": 100000,
+    "max_samples": 100001,
+    "relative_tolerance": 1e-06,
+    "solver": "rk4",
+    "start": 0.0,
+    "step": 0.01,
+    "stop": 10.0
+  },
+  "summary": {
+    "all_systems_rendered": 31,
+    "imported": 31,
+    "models": 31,
+    "simulation_compiled": 1
+  },
+  "corpus_revision": "7684ab11500cda4d0f1192287360d1d767dafe4c",
+  "configured_execution_scenarios": [
+    {
+      "models": [
+        "auto-layout/example/AutoLayoutDemo.mdl",
+        "auto-layout/imgs/AutoLayout_Cover.slx"
+      ],
+      "inputs": {
+        "9": "1",
+        "24": "2",
+        "1": "3"
+      },
+      "solver": "rk4",
+      "start": 0,
+      "stop": 0.2,
+      "step": 0.1,
+      "signals": 35,
+      "result": "Both original encodings run and produce identical traces. This compares formats, not an independent Simulink numerical oracle."
+    },
+    {
+      "models": [
+        "synthetic/constant_gain_sum_integrator.mdl"
+      ],
+      "result": "Analytic fixture matches y=1+10*t within 1e-9."
+    }
+  ],
+  "isolated_block_scenarios": [
+    {
+      "model": "uuv/models/rovSim_los.slx",
+      "chart": "PID Control/ud",
+      "result": "Original imported scalar MATLAB Function executed with explicit inputs and checked against its piecewise formula. Full enclosing model is not executed."
+    }
+  ],
+  "implementation_revision": "8653349f2d53176d002ea7dc029df5cbf1efd857"
+}

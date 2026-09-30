@@ -444,7 +444,7 @@ mod tests {
             .upload(
                 project.id,
                 "init.m",
-                b"K = 1; for i=1:4; K = K+1; end".to_vec(),
+                b"K = 1; for i=1:4; K = K+1; end; label = 'example'; tmp = [];".to_vec(),
             )
             .await
             .json();
@@ -477,6 +477,33 @@ mod tests {
             .await
             .json();
         assert_eq!(overridden.trace.unwrap().signals["2"], vec![12.0; 3]);
+        // Even a script readable by the requester cannot cross project boundaries.
+        let other_project: shared::Project = own
+            .json(
+                Method::POST,
+                &format!("/api/orgs/{}/projects", org.id),
+                &json!({"name":"separate initialization","default_role":"none"}),
+            )
+            .await
+            .json();
+        let other_script: shared::FileInfo = own
+            .upload(other_project.id, "init.m", b"K = 99;".to_vec())
+            .await
+            .json();
+        initialized.init_script.as_mut().unwrap().file_id = other_script.id;
+        let before: Vec<SimulationRun> = own.get(&parameter_route).await.json();
+        assert_eq!(
+            own.json(Method::POST, &parameter_route, &initialized)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        let after: Vec<SimulationRun> = own.get(&parameter_route).await.json();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "rejected initialization creates no run"
+        );
         initialized.init_script.as_mut().unwrap().file_id = Uuid::new_v4();
         assert_eq!(
             view.json(Method::POST, &parameter_route, &initialized)
@@ -492,6 +519,23 @@ mod tests {
             .await;
         assert!(removed.status.is_success());
         assert_eq!(view.get(&result_route).await.status, StatusCode::NOT_FOUND);
+        assert!(own
+            .json::<serde_json::Value>(
+                Method::DELETE,
+                &format!("/api/projects/{}/files/{}", project.id, script.id),
+                &json!({}),
+            )
+            .await
+            .status
+            .is_success());
+        initialized.init_script.as_mut().unwrap().file_id = script.id;
+        assert_eq!(
+            view.json(Method::POST, &parameter_route, &initialized)
+                .await
+                .status,
+            StatusCode::NOT_FOUND,
+            "deleted initialization scripts cannot be executed by old version reference"
+        );
         let abandoned = Uuid::new_v4();
         diesel::sql_query("INSERT INTO simulation_runs (id,file_version_id,requested_by,status,request,created_at) VALUES ($1,$2,$3,'running',$4::jsonb,NOW()-INTERVAL '10 minutes')")
             .bind::<SqlUuid,_>(abandoned).bind::<SqlUuid,_>(uploaded.latest.id).bind::<SqlUuid,_>(owner.user.id)

@@ -1,7 +1,10 @@
 //! Native Rust code generation for the real matrix and character-array subset.
+#[path = "functions.rs"]
+mod functions;
 #[path = "script.rs"]
 mod script;
 use crate::Error;
+pub use functions::{FunctionProgram, FunctionSignature, eval_function};
 pub use script::{eval_script, eval_script_with_budget};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,9 +58,7 @@ fn lex(source: &str) -> Result<Vec<Spanned>, Error> {
             continue;
         }
         if c == '%' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
+            crate::comments::skip(&chars, &mut i, &mut line)?;
             continue;
         }
         if chars.get(i..i + 3) == Some(&['.', '.', '.']) {
@@ -574,6 +575,9 @@ impl Parser {
         Ok(result)
     }
     fn function(&mut self) -> Result<Function, Error> {
+        self.function_with_implicit_end(false)
+    }
+    fn function_with_implicit_end(&mut self, implicit: bool) -> Result<Function, Error> {
         self.pos += 1;
         let mut outputs = Vec::new();
         let name;
@@ -614,7 +618,9 @@ impl Parser {
         }
         self.finish()?;
         let body = self.body()?;
-        self.end()?;
+        if !(implicit && matches!(self.token(), Token::Eof)) {
+            self.end()?;
+        }
         Ok(Function {
             name,
             args,
@@ -1212,6 +1218,25 @@ fn eval(
     end: Option<f64>,
     budget: &mut ArrayBudget,
 ) -> crate::array_runtime::ArrayResult<crate::array_runtime::Value> {
+    eval_with_calls(expr, workspace, end, budget, &mut |name, _, _| {
+        Err(format!("unsupported function '{name}'"))
+    })
+}
+
+type FunctionEvaluator<'a> = dyn FnMut(
+        &str,
+        Vec<crate::array_runtime::Value>,
+        &mut ArrayBudget,
+    ) -> crate::array_runtime::ArrayResult<Vec<crate::array_runtime::Value>>
+    + 'a;
+
+fn eval_with_calls(
+    expr: &Expr,
+    workspace: &BTreeMap<String, crate::array_runtime::Value>,
+    end: Option<f64>,
+    budget: &mut ArrayBudget,
+    calls: &mut FunctionEvaluator<'_>,
+) -> crate::array_runtime::ArrayResult<crate::array_runtime::Value> {
     use crate::array_runtime::{self as rt, Index, Value};
     budget.operations(1)?;
     let value = match expr {
@@ -1233,18 +1258,18 @@ fn eval(
         }
         Expr::End => Value::scalar(end.ok_or("'end' is only supported inside array indices")?),
         Expr::All => return Err("bare ':' requires an array index".into()),
-        Expr::Unary(op, x) => rt::unary(op, &eval(x, workspace, end, budget)?)?,
+        Expr::Unary(op, x) => rt::unary(op, &eval_with_calls(x, workspace, end, budget, calls)?)?,
         Expr::Binary(op, a, b) if op == "&&" => Value::logical(
-            eval(a, workspace, end, budget)?.scalar_truth()?
-                && eval(b, workspace, end, budget)?.scalar_truth()?,
+            eval_with_calls(a, workspace, end, budget, calls)?.scalar_truth()?
+                && eval_with_calls(b, workspace, end, budget, calls)?.scalar_truth()?,
         ),
         Expr::Binary(op, a, b) if op == "||" => Value::logical(
-            eval(a, workspace, end, budget)?.scalar_truth()?
-                || eval(b, workspace, end, budget)?.scalar_truth()?,
+            eval_with_calls(a, workspace, end, budget, calls)?.scalar_truth()?
+                || eval_with_calls(b, workspace, end, budget, calls)?.scalar_truth()?,
         ),
         Expr::Binary(op, a, b) => {
-            let a = eval(a, workspace, end, budget)?;
-            let b = eval(b, workspace, end, budget)?;
+            let a = eval_with_calls(a, workspace, end, budget, calls)?;
+            let b = eval_with_calls(b, workspace, end, budget, calls)?;
             let cost = match op.as_str() {
                 "*" if a.data.len() != 1 && b.data.len() != 1 => {
                     a.rows.saturating_mul(a.cols).saturating_mul(b.cols)
@@ -1267,15 +1292,15 @@ fn eval(
             rt::binary(op, &a, &b)?
         }
         Expr::Range(a, b, c) => rt::range(
-            &eval(a, workspace, end, budget)?,
-            &eval(b, workspace, end, budget)?,
-            &eval(c, workspace, end, budget)?,
+            &eval_with_calls(a, workspace, end, budget, calls)?,
+            &eval_with_calls(b, workspace, end, budget, calls)?,
+            &eval_with_calls(c, workspace, end, budget, calls)?,
         )?,
         Expr::Array(rows) => rt::concatenate(
             rows.iter()
                 .map(|row| {
                     row.iter()
-                        .map(|v| eval(v, workspace, end, budget))
+                        .map(|v| eval_with_calls(v, workspace, end, budget, calls))
                         .collect()
                 })
                 .collect::<Result<Vec<_>, _>>()?,
@@ -1298,11 +1323,12 @@ fn eval(
                     if matches!(arg, Expr::All) {
                         Ok(Index::All)
                     } else {
-                        Ok(Index::Values(eval(
+                        Ok(Index::Values(eval_with_calls(
                             arg,
                             workspace,
                             Some(value.end_value(i, args.len()).number()?),
                             budget,
+                            calls,
                         )?))
                     }
                 })
@@ -1310,19 +1336,20 @@ fn eval(
             value.index(&indices)?
         }
         Expr::Apply(name, args) => {
-            if ["disp", "fprintf", "sprintf", "error", "assert"].contains(&name.as_str()) {
-                return Err(format!(
-                    "'{name}' is unavailable in pure parameter expressions"
-                ));
-            }
             let args = args
                 .iter()
-                .map(|a| eval(a, workspace, end, budget))
+                .map(|a| eval_with_calls(a, workspace, end, budget, calls))
                 .collect::<Result<Vec<_>, _>>()?;
-            rt::builtin(name, args, 1)?
-                .into_iter()
-                .next()
-                .ok_or("builtin returned no value")?
+            (if BUILTINS.contains(&name.as_str())
+                && !["disp", "fprintf", "sprintf", "error", "assert"].contains(&name.as_str())
+            {
+                rt::builtin(name, args, 1)?
+            } else {
+                calls(name, args, budget)?
+            })
+            .into_iter()
+            .next()
+            .ok_or("builtin returned no value")?
         }
     };
     budget.shaped_value(&value)?;

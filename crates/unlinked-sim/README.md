@@ -38,7 +38,7 @@ are also available as named trace signals. Shape propagation rejects conflicting
 or unresolved dimensions and has a ten-million-work-item budget. Limits are
 1,024 elements per signal/array parameter, 100,000 lowered nodes, one million
 wires, and 100,000 total workspace elements; large expansions reject before
-allocating scalar node IDs. Multirate scheduling remains unsupported.
+allocating scalar node IDs.
 
 Euler, classical fourth-order Runge–Kutta, and adaptive Dormand–Prince 5(4)
 (`Solver::Rk45`, JSON `rk45`) advance continuous states simultaneously. Rk45
@@ -47,7 +47,7 @@ grid. Its maximum component error is scaled by `absolute_tolerance +
 relative_tolerance * max(abs(old), abs(new))`, defaulting to 1e-9 and 1e-6.
 These are local error targets, not a global-error guarantee. It stops at output
 boundaries rather than interpolating dense output. Defaults allow 100,000 total
-internal attempts (accepted plus rejected), with a hard cap of 1,000,000. UnitDelay updates once per requested step after solver stages.
+internal attempts (accepted plus rejected), with a hard cap of 1,000,000. Discrete states and held signals remain fixed during continuous solver stages.
 The initial sample is recorded, and the final step may be shorter to reach the
 requested stop time. Step discontinuities must align with the sampling grid.
 The solver uses the left limit at a transition when integrating the preceding
@@ -68,13 +68,25 @@ Initial states default to zero. Dynamic D tuning and MIMO dimensions reject.
 DiscreteTransferFcn supports proper descending-power z polynomials through order
 64 with direct-form-II states, including scalar/vector InitialStates. Raw denominator
 coefficients preserve the meaning of initial delay states. Coefficients must come
-from dialog expressions; external resets, frame processing, fixed-point arithmetic,
-and multirate sampling reject. Sample time must be inherited or match the output
-step. A discrete direct-feedthrough output reaching a continuous Integrator without
-an intervening UnitDelay rejects: the solver does not implement a zero-delay sample
-and hold for that coupling. Strictly proper discrete blocks and output-grid-only
-traces are supported. This coupling check conservatively rejects even constant
-sources on the unsupported path.
+from dialog expressions; external resets, frame processing, and fixed-point arithmetic reject.
+Direct outputs use an explicit sample-and-hold node. A direct-feedthrough discrete
+output reaching a continuous Integrator without an intervening UnitDelay still
+rejects conservatively pending broader mixed-rate validation; this includes constant
+sources. Strictly proper discrete outputs can drive continuous states.
+
+UnitDelay, DiscreteTransferFcn, and DigitalClock support independent positive sample
+periods that are integer multiples of the output step, capped at one million ticks.
+Inherited delays/transfer blocks use the output step in single-rate models.
+Multirate models require explicit sample times on every discrete state block;
+full inherited-rate propagation is unsupported. DigitalClock defaults to one
+second, following the [block reference](https://www.mathworks.com/help/simulink/slref/digitalclock.html).
+Scheduling uses integer ticks: each delay initially outputs its initial condition,
+samples its input at a hit, and publishes that sampled value at the next hit.
+Simultaneous hits commit all pending delay states before sampling any new inputs.
+Outputs hold between hits, including through every RK stage. Start time must align
+with every discrete block's zero-phase period, and stop time with the output grid.
+Noncommensurate periods, nonzero sample offsets, and general rate-transition/task
+priority semantics are unsupported.
 
 Generated internal states appear in the graph and trace with named paths; the
 original block ID remains its output signal. Dynamic matrix coefficients permit
@@ -84,12 +96,11 @@ Options explicitly override imported solver configuration. This is a supported
 subset, not a claim of general Simulink numerical equivalence. It rejects
 algebraic loops, missing/multiple drivers, non-finite signals, unknown block
 types, atomic/conditional subsystems, masks, library links, integer types,
-external resets and multirate sampling. Root Inports require explicit constant
+external resets and unsupported sample-rate configurations. Root Inports require explicit constant
 bindings through `evaluate_inputs` and `compile_with_inputs` or
 `simulate_model_with_inputs`. Bindings use original root block IDs, resolve model
 workspace expressions, validate declared dimensions and preserve datatype
-restrictions; unbound inputs never silently become zero. UnitDelay sample time must be inherited or equal to the
-requested step; the stop time must lie on its sampling grid. Workspace names overriding built-in constants reject to avoid
+restrictions; unbound inputs never silently become zero. Workspace names overriding built-in constants reject to avoid
 ambiguous dependency ordering. Scope and ToWorkspace values appear in the
 trace; these blocks do not produce external files.
 
@@ -103,3 +114,35 @@ between boundaries is bounded by the attempt limit.
 Tests compare feedback decay against `exp(-t)` and the closed-form Euler
 recurrence, check simultaneous delay updates and decimal step boundaries, and
 exercise importer diagnostics, resource budgets and invalid graphs.
+
+Pure `MatlabFunction` execution nodes support up to 256 scalar inputs and exactly
+one finite numeric/logical scalar output. The engine prepares each function once
+per graph execution and shares one `ArrayBudget` across all function nodes,
+observation samples and continuous solver stages. No subprocess or native
+compiler runs during simulation. `simulate_with_observer_and_budget` accepts a
+budget carrying a cooperative deadline/cancellation callback. Source totals are
+limited to 1 MiB and 1,024 functions per graph; individual interpreter limits also
+apply. Persistent/global state, printing, external access, non-scalar outputs and
+multiple output ports reject explicitly.
+
+Imported MATLAB Function charts lower to those execution nodes when their
+escaped model path, declared data, function signature and generated `sf_sfun`
+backing wiring agree. The supported imported subset is pure, scalar, fixed-size,
+real, double/inherited numeric data with inherited scheduling and one output.
+The legacy default transition calling `eML_blk_kernel()` is recognized only in
+its generated form. Additional chart actions, graphical state machines,
+parameters requiring external workspace semantics, altered backing wiring,
+conditional ports, masks and links fail explicitly. Chart-path matching does
+not change the imported model. The corpus test isolates the unchanged
+`PID Control/ud` function from `rovSim_los.slx` and checks its source formula;
+it does not claim that the complete ROV model or its stateful guidance chart runs.
+
+Function execution has a deterministic default budget of 20 million estimated
+operations across the entire run, including all solver stages. Adaptive RK45 can
+consume more function work than RK4 on the same output grid and may reach this
+limit sooner. Trusted native callers can pass an explicit `ArrayBudget` to
+`simulate_with_observer_and_budget`; server jobs retain the fixed budget, shared
+with initialization, plus the 30-second cooperative deadline and 25,001-sample
+cap. Budget exhaustion is an explicit error, never a partial successful trace.
+Blocks marked `Commented=on` or `Commented=through` are rejected until their
+removal/bypass semantics are implemented, including nested and routing blocks.

@@ -56,7 +56,7 @@ pub fn eval_script_with_budget(
     Ok(interpreter.env)
 }
 
-fn validate_workspace(env: &Environment) -> Result<usize, String> {
+pub(super) fn validate_workspace(env: &Environment) -> Result<usize, String> {
     if env.len() > MAX_VARIABLES {
         return Err("initialization workspace exceeds 256 variables".into());
     }
@@ -71,7 +71,7 @@ fn validate_workspace(env: &Environment) -> Result<usize, String> {
     }
     Ok(count)
 }
-fn validate_name(name: &str) -> Result<(), String> {
+pub(super) fn validate_name(name: &str) -> Result<(), String> {
     if name.len() > 63
         || !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
         || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
@@ -80,7 +80,7 @@ fn validate_name(name: &str) -> Result<(), String> {
     }
     Ok(())
 }
-fn validate_value(value: &Value) -> Result<(), String> {
+pub(super) fn validate_value(value: &Value) -> Result<(), String> {
     value.validate()?;
     if value.rows > MAX_VALUE_ELEMENTS || value.cols > MAX_VALUE_ELEMENTS {
         return Err("initialization variable dimensions exceed 1024".into());

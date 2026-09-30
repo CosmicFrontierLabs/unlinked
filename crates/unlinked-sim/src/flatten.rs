@@ -2,8 +2,11 @@
 use super::{block_error, Error};
 use std::collections::BTreeMap;
 use unlinked_model::*;
+#[path = "routing.rs"]
+mod routing;
 
 pub fn flatten(model: &Model) -> Result<Model, Error> {
+    let model = super::chart_lowering::lower_charts(routing::lower(model)?)?;
     fn id(prefix: &str, id: &BlockId) -> BlockId {
         BlockId(format!("{prefix}{}", id.0.replace('/', "//")))
     }
@@ -125,10 +128,10 @@ pub fn flatten(model: &Model) -> Result<Model, Error> {
         Ok(aliases)
     }
     if !model.root.blocks.iter().any(|b| b.subsystem.is_some()) {
-        return Ok(model.clone());
+        return Ok(model);
     }
-    let mut result = model.clone();
-    result.root = System::default();
-    system(&model.root, "", "", 0, &mut result.root)?;
+    let mut result = model;
+    let source = std::mem::take(&mut result.root);
+    system(&source, "", "", 0, &mut result.root)?;
     Ok(result)
 }

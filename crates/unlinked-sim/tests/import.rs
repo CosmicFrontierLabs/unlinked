@@ -177,3 +177,31 @@ fn logical_import_accepts_boolean_outputs_and_rejects_unsupported_modes() {
         .to_string()
         .contains("ZeroCross"));
 }
+
+#[test]
+fn commented_blocks_and_subsystems_never_execute_silently() {
+    for kind in ["Gain", "Goto", "SubSystem"] {
+        for setting in ["on", "through"] {
+            let mut m = model();
+            m.root.blocks[1].block_type = kind.into();
+            m.root.blocks[1]
+                .parameters
+                .insert("Commented".into(), setting.into());
+            assert!(compile(&m, &Options::default())
+                .unwrap_err()
+                .to_string()
+                .contains("commented"));
+        }
+    }
+    let mut m = model();
+    let mut sub = block("sub", "SubSystem", &[]);
+    sub.subsystem = Some(Box::new(System {
+        blocks: vec![block("nested", "Gain", &[("Commented", "on")])],
+        ..System::default()
+    }));
+    m.root.blocks.push(sub);
+    assert!(compile(&m, &Options::default())
+        .unwrap_err()
+        .to_string()
+        .contains("commented"));
+}

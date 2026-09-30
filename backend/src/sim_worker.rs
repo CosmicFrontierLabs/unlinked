@@ -128,17 +128,17 @@ pub fn start(
             || -> Result<Trace, Failure> {
                 let mut model =
                     unlinked_import::import(&filename, &bytes).map_err(|e| e.to_string())?;
+                let evaluation_cancel = cancelled.clone();
+                let mut evaluation_budget = unlinked_matlab::ArrayBudget::default()
+                    .with_cancellation(move || {
+                        evaluation_cancel.load(Ordering::Relaxed)
+                            || began.elapsed() > std::time::Duration::from_secs(30)
+                    });
                 if let Some(source) = init_script {
-                    let script_cancel = cancelled.clone();
-                    let mut budget =
-                        unlinked_matlab::ArrayBudget::default().with_cancellation(move || {
-                            script_cancel.load(Ordering::Relaxed)
-                                || began.elapsed() > std::time::Duration::from_secs(30)
-                        });
                     let values = unlinked_matlab::eval_script_with_budget(
                         &source,
                         &Default::default(),
-                        &mut budget,
+                        &mut evaluation_budget,
                     )
                     .map_err(|error| {
                         if cancelled.load(Ordering::Relaxed) {
@@ -153,7 +153,18 @@ pub fn start(
                         }
                     })?;
                     for (name, value) in values {
-                        model.workspace.insert(name, parameter_literal(&value)?);
+                        if value.kind == unlinked_matlab::array_runtime::ValueKind::Character
+                            || value.data.is_empty()
+                        {
+                            // Text labels and cleared temporaries are not numeric parameters.
+                            // Remove any old binding so a model referencing one fails instead
+                            // of silently using a stale model-workspace value.
+                            model.workspace.remove(&name);
+                            continue;
+                        }
+                        let literal = parameter_literal(&value)
+                            .map_err(|error| format!("init variable {name}: {error}"))?;
+                        model.workspace.insert(name, literal);
                     }
                 }
                 model.workspace.extend(workspace);
@@ -187,31 +198,49 @@ pub fn start(
                 let mut times = Vec::with_capacity(CHUNK_SAMPLES);
                 let mut values = Vec::with_capacity(CHUNK_SAMPLES);
                 let mut interrupted = None;
-                let trace = unlinked_sim::simulate_with_observer(&graph, &options, |sample| {
-                    if cancelled.load(Ordering::Relaxed) {
-                        interrupted = Some(Failure {
-                            message: "simulation cancelled".into(),
-                            cancelled: true,
-                        });
-                        return false;
-                    }
-                    if began.elapsed() > std::time::Duration::from_secs(30) {
-                        interrupted = Some(Failure::from("simulation deadline exceeded"));
-                        return false;
-                    }
-                    times.push(sample.time);
-                    values.push(sample.values.to_vec());
-                    if times.len() == CHUNK_SAMPLES {
-                        send(Event::Samples {
-                            time: std::mem::take(&mut times),
-                            values: std::mem::take(&mut values),
-                        })
-                        .is_ok()
-                    } else {
-                        true
-                    }
-                })
-                .map_err(|e| interrupted.unwrap_or_else(|| Failure::from(e.to_string())))?;
+                let trace = unlinked_sim::simulate_with_observer_and_budget(
+                    &graph,
+                    &options,
+                    evaluation_budget,
+                    |sample| {
+                        if cancelled.load(Ordering::Relaxed) {
+                            interrupted = Some(Failure {
+                                message: "simulation cancelled".into(),
+                                cancelled: true,
+                            });
+                            return false;
+                        }
+                        if began.elapsed() > std::time::Duration::from_secs(30) {
+                            interrupted = Some(Failure::from("simulation deadline exceeded"));
+                            return false;
+                        }
+                        times.push(sample.time);
+                        values.push(sample.values.to_vec());
+                        if times.len() == CHUNK_SAMPLES {
+                            send(Event::Samples {
+                                time: std::mem::take(&mut times),
+                                values: std::mem::take(&mut values),
+                            })
+                            .is_ok()
+                        } else {
+                            true
+                        }
+                    },
+                )
+                .map_err(|e| {
+                    interrupted.unwrap_or_else(|| {
+                        if cancelled.load(Ordering::Relaxed) {
+                            Failure {
+                                message: "simulation cancelled".into(),
+                                cancelled: true,
+                            }
+                        } else if began.elapsed() > std::time::Duration::from_secs(30) {
+                            Failure::from("simulation deadline exceeded")
+                        } else {
+                            Failure::from(e.to_string())
+                        }
+                    })
+                })?;
                 if !times.is_empty() {
                     send(Event::Samples {
                         time: times,

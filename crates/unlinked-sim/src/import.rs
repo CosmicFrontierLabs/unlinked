@@ -27,6 +27,36 @@ fn require(block: &Block, key: &str, allowed: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
+fn period_ticks(
+    block: &Block,
+    options: &Options,
+    ws: &BTreeMap<String, f64>,
+) -> Result<usize, Error> {
+    let value = parameter(
+        block,
+        "SampleTime",
+        if block.block_type == "DigitalClock" {
+            "1"
+        } else {
+            "-1"
+        },
+        ws,
+    )?;
+    if value == -1.0 && block.block_type != "DigitalClock" {
+        return Ok(1);
+    }
+    let ticks = value / options.step;
+    if !options.step.is_finite()
+        || options.step <= 0.0
+        || value <= 0.0
+        || !(1.0..=1_000_000.0).contains(&ticks.round())
+        || !on_grid(ticks)
+    {
+        return Err(block_error(&block.id.0, "sample time must be a positive integer multiple of simulation step (at most 1,000,000 ticks)"));
+    }
+    Ok(ticks.round() as usize)
+}
+
 /// Compile the root system, lowering ordinary virtual subsystems. Library links,
 /// masked/atomic/conditional subsystems and unimplemented block semantics
 /// produce diagnostics. Supported bounded vectors/matrices lower to scalar nodes.
@@ -61,6 +91,29 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         if before == pending.len() {
             let (key, error) = errors.remove(0);
             return Err(Error::Parameter(key, error));
+        }
+    }
+    // Full Simulink inherited-rate propagation is not implemented. In a
+    // multirate model require explicit state-block periods rather than silently
+    // assigning the observation rate to an inherited slower signal.
+    let mut has_multirate = false;
+    let mut inherited_discrete = None;
+    for block in &model.root.blocks {
+        if matches!(
+            block.block_type.as_str(),
+            "UnitDelay" | "DiscreteTransferFcn" | "DigitalClock"
+        ) {
+            has_multirate |= period_ticks(block, options, &ws)? > 1;
+            if block.block_type != "DigitalClock"
+                && parameter(block, "SampleTime", "-1", &ws)? == -1.0
+            {
+                inherited_discrete.get_or_insert(block.id.0.clone());
+            }
+        }
+    }
+    if has_multirate {
+        if let Some(id) = inherited_discrete {
+            return Err(block_error(&id, "inherited sample-rate propagation in multirate models is unsupported; specify every discrete state block's SampleTime explicitly"));
         }
     }
     let mut graph = Graph::default();
@@ -105,31 +158,51 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     "Inherit: Inherit via internal rule",
                     "Inherit: Inherit via back propagation",
                     "Inherit: Same as input",
+                    "Inherit: auto",
                     "double",
                 ],
             )?;
         }
         require(block, "SignalType", &["auto", "real"])?;
-        require(block, "SaturateOnIntegerOverflow", &["off"])?;
+        // All accepted numeric paths are doubles (integer/fixed-point types
+        // were rejected above), so integer-overflow saturation has no effect.
+        require(block, "SaturateOnIntegerOverflow", &["off", "on"])?;
         let p = |key, default| parameter(block, key, default, &ws);
-        if let Some(sample) = block.param("SampleTime") {
+        let discrete = matches!(
+            block.block_type.as_str(),
+            "UnitDelay" | "DiscreteTransferFcn" | "DigitalClock"
+        );
+        let period = if discrete {
+            period_ticks(block, options, &ws)?
+        } else {
+            1
+        };
+        if let Some(sample) = block.param("SampleTime").filter(|_| !discrete) {
             let value = unlinked_matlab::eval_expr(sample, &ws)
                 .map_err(|e| block_error(id, format!("SampleTime: {e}")))?;
-            let acceptable = if matches!(
-                block.block_type.as_str(),
-                "UnitDelay" | "DiscreteTransferFcn"
-            ) {
-                value == -1.0 || (value - options.step).abs() <= 1e-12 * options.step.abs()
-            } else {
-                value == -1.0
-                    || value == 0.0
-                    || (block.block_type == "Constant" && value == f64::INFINITY)
-            };
+            let acceptable = value == -1.0
+                || value == 0.0
+                || (block.block_type == "Constant" && value == f64::INFINITY);
             if !acceptable {
-                return Err(block_error(id,"multirate/sample-time semantics are unsupported; UnitDelay sample time must equal simulation step"));
+                return Err(block_error(
+                    id,
+                    "explicit sample times are supported only on discrete state/source blocks",
+                ));
             }
         }
         let kind = match block.block_type.as_str() {
+            "MatlabFunction" => {
+                let script = block
+                    .param("Script")
+                    .ok_or_else(|| block_error(id, "missing MATLAB Function script"))?
+                    .to_owned();
+                require(block, "SampleTime", &["-1", "0"])?;
+                Kind::MatlabFunction {
+                    script,
+                    inputs: block.ports.inputs as usize,
+                }
+            }
+
             "TransferFcn" => {
                 let input = super::transfer::lower(
                     block,
@@ -153,6 +226,7 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 continue;
             }
             "DiscreteTransferFcn" => {
+                let first_node = graph.nodes.len();
                 let (input, direct) = super::transfer::lower_discrete(
                     block,
                     &ws,
@@ -161,7 +235,45 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     &format!("{}/{}", model.name, block.name),
                 )?;
                 input_alias.insert(id.clone(), input);
+                for node in &mut graph.nodes[first_node..] {
+                    if let Kind::UnitDelay { initial } = node.kind {
+                        node.kind = Kind::RateDelay {
+                            initial,
+                            period_ticks: period,
+                        };
+                    }
+                }
                 if direct {
+                    if graph.nodes.len() >= 100_000 {
+                        return Err(Error::Options("lowered graph budget exceeded".into()));
+                    }
+                    let mut sampled = format!("{id}/sample-input");
+                    while !reserved.insert(sampled.clone()) {
+                        sampled.push('#');
+                    }
+                    let output = graph.nodes.iter_mut().find(|n| &n.id == id).unwrap();
+                    output.id = sampled.clone();
+                    let name = output.name.clone();
+                    for wire in &mut graph.wires {
+                        if wire.target == *id {
+                            wire.target = sampled.clone();
+                        }
+                        if wire.source == *id {
+                            wire.source = sampled.clone();
+                        }
+                    }
+                    graph.nodes.push(Node {
+                        id: id.clone(),
+                        name,
+                        kind: Kind::SampleHold {
+                            period_ticks: period,
+                        },
+                    });
+                    graph.wires.push(Wire {
+                        source: sampled,
+                        target: id.clone(),
+                        input: 0,
+                    });
                     direct_discrete.push(id.clone());
                 }
                 continue;
@@ -171,6 +283,9 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             },
             "Ground" => Kind::Constant { value: 0.0 },
             "Clock" => Kind::Clock,
+            "DigitalClock" => Kind::DigitalClock {
+                period_ticks: period,
+            },
             "Step" => {
                 let time = p("Time", "1")?;
                 let ticks = (time - options.start) / options.step;
@@ -263,8 +378,9 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     initial: p("InitialCondition", "0")?,
                 }
             }
-            "UnitDelay" => Kind::UnitDelay {
+            "UnitDelay" => Kind::RateDelay {
                 initial: p("InitialCondition", "0")?,
+                period_ticks: period,
             },
             "Switch" => {
                 // Nonzero criteria agrees for both numeric and boolean controls.
