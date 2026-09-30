@@ -8,6 +8,7 @@
 
 use crate::api;
 use crate::fetch::{use_fetch, use_reload, view, Reload};
+use futures_util::future::{AbortHandle, Abortable};
 use rizzma::wasm::{WasmFigure, WasmSession};
 use shared::{
     SimulationClientMsg, SimulationOptions, SimulationRequest, SimulationRun, SimulationServerMsg,
@@ -94,6 +95,8 @@ struct Controller {
     sender: Option<Sender<SimulationSocket>>,
     /// Server id of the live run, once known.
     run_id: Option<Uuid>,
+    /// Aborts the live run's socket task, dropping its receiver at once.
+    task: Option<AbortHandle>,
     last_refresh: f64,
 }
 
@@ -101,6 +104,9 @@ impl Controller {
     /// Start a new data set, invalidating every task of the previous one.
     fn reset(&mut self) -> u64 {
         self.generation += 1;
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
         self.signals.clear();
         self.plotted.clear();
         self.time.clear();
@@ -349,15 +355,15 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         let ctl = ctl.clone();
         use_effect_with((), move |_| {
             move || {
-                let live = {
+                let (sender, run_id) = {
                     let mut c = ctl.borrow_mut();
-                    c.generation += 1;
-                    c.session = None;
-                    c.sender.take().zip(c.run_id.take())
+                    let live = (c.sender.take(), c.run_id.take());
+                    c.reset();
+                    live
                 };
-                // The superseded stream task drops the receiver on its next
-                // message, closing the socket; cancel explicitly first.
-                if let Some((mut tx, run_id)) = live {
+                // Aborting the task dropped the receiver; ask the server to
+                // cancel, then drop the sender so the socket closes.
+                if let (Some(mut tx), Some(run_id)) = (sender, run_id) {
                     spawn_local(async move {
                         let _ = tx
                             .send(SimulationClientMsg::CancelSimulation { run_id })
@@ -410,7 +416,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 reload.clone(),
                 outports.clone(),
             );
-            spawn_local(async move {
+            let (abort, registration) = AbortHandle::new_pair();
+            ctl.borrow_mut().task = Some(abort);
+            let task = async move {
                 if let Err(e) = tx
                     .send(SimulationClientMsg::Simulate { file_id, request })
                     .await
@@ -424,6 +432,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 ctl.borrow_mut().sender = Some(tx);
                 stream(ctl, generation, rx, state, rebind, outports).await;
                 reload.dispatch(());
+            };
+            spawn_local(async move {
+                let _ = Abortable::new(task, registration).await;
             });
         })
     };
@@ -437,12 +448,19 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             let run_id = *run_id;
             let ctl = ctl.clone();
             spawn_local(async move {
-                let tx = ctl.borrow_mut().sender.take();
+                let (tx, generation) = {
+                    let mut c = ctl.borrow_mut();
+                    (c.sender.take(), c.generation)
+                };
                 if let Some(mut tx) = tx {
                     let _ = tx
                         .send(SimulationClientMsg::CancelSimulation { run_id })
                         .await;
-                    ctl.borrow_mut().sender.get_or_insert(tx);
+                    // Only restore the sender if its run is still current.
+                    let mut c = ctl.borrow_mut();
+                    if c.generation == generation {
+                        c.sender = Some(tx);
+                    }
                 }
             });
         })
