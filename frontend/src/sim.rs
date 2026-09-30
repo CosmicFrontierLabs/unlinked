@@ -8,8 +8,9 @@
 
 use crate::api;
 use crate::fetch::{use_fetch, use_reload, view, Reload};
+use crate::plot::{self, PlotSession};
 use futures_util::future::{AbortHandle, Abortable};
-use rizzma::wasm::{WasmFigure, WasmSession};
+use rizzma::wasm::WasmFigure;
 use shared::{
     SimulationClientMsg, SimulationOptions, SimulationRequest, SimulationRun, SimulationServerMsg,
     SimulationSignal, SimulationSocket, SimulationStatus, Solver,
@@ -91,7 +92,7 @@ struct Controller {
     plotted: Vec<usize>,
     time: Vec<f64>,
     columns: Vec<Vec<f64>>,
-    session: Option<WasmSession>,
+    session: Option<PlotSession>,
     sender: Option<Sender<SimulationSocket>>,
     /// Server id of the live run, once known.
     run_id: Option<Uuid>,
@@ -153,7 +154,7 @@ impl Controller {
                 .collect();
             fig.legend(ax, labels).map_err(err)?;
         }
-        self.session = Some(fig.bind(canvas_id).map_err(err)?);
+        self.session = Some(plot::bind(fig, canvas_id).map_err(err)?);
         Ok(())
     }
 
