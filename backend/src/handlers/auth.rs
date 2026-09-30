@@ -13,6 +13,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::PgConnection;
 use oauth2::TokenResponse;
@@ -43,12 +44,25 @@ const AFTER_LOGIN: &str = "/";
 /// Login page; receives `?error=<code>` when a login is refused.
 const LOGIN_PAGE: &str = "/login";
 
-/// Contents of the OAuth flow cookie.
+/// Allowed clock skew for a flow cookie dated slightly in the future.
+const OAUTH_FLOW_MAX_SKEW_SECONDS: i64 = 60;
+
+/// Contents of the OAuth flow cookie. `issued_at` is checked server-side so a
+/// replayed cookie expires even if the browser ignores Max-Age.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OAuthFlow {
     pub provider: String,
     pub state: String,
     pub pkce_verifier: String,
+    pub issued_at: DateTime<Utc>,
+}
+
+impl OAuthFlow {
+    fn is_fresh(&self, now: DateTime<Utc>) -> bool {
+        let age = now - self.issued_at;
+        age <= chrono::Duration::minutes(OAUTH_FLOW_TTL_MINUTES)
+            && age >= -chrono::Duration::seconds(OAUTH_FLOW_MAX_SKEW_SECONDS)
+    }
 }
 
 pub async fn providers(State(state): State<Arc<AppState>>) -> Json<AuthProvidersResponse> {
@@ -91,6 +105,7 @@ pub async fn login(
         provider: provider.key().to_string(),
         state: csrf.secret().clone(),
         pkce_verifier: verifier.secret().clone(),
+        issued_at: Utc::now(),
     };
     let value = serde_json::to_string(&flow)
         .map_err(|e| ApiError::Internal(format!("encode oauth flow: {e}")))?;
@@ -146,6 +161,10 @@ pub async fn callback(
     })?;
     if flow.provider != provider.key() || query.state.as_deref() != Some(flow.state.as_str()) {
         tracing::warn!(provider = provider.key(), "OAuth callback state mismatch");
+        return Err(ApiError::Forbidden);
+    }
+    if !flow.is_fresh(Utc::now()) {
+        tracing::warn!(provider = provider.key(), "OAuth callback with stale flow");
         return Err(ApiError::Forbidden);
     }
     if let Some(error) = query.error {
@@ -351,10 +370,20 @@ mod tests {
     }
 
     fn flow_cookie(state: &AppState, provider: &str, csrf: &str) -> String {
+        flow_cookie_issued_at(state, provider, csrf, Utc::now())
+    }
+
+    fn flow_cookie_issued_at(
+        state: &AppState,
+        provider: &str,
+        csrf: &str,
+        issued_at: DateTime<Utc>,
+    ) -> String {
         let flow = OAuthFlow {
             provider: provider.to_string(),
             state: csrf.to_string(),
             pkce_verifier: "verifier".to_string(),
+            issued_at,
         };
         private_cookie_header(
             &state.config.cookie_key,
@@ -509,6 +538,42 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn callback_rejects_stale_or_future_dated_flow() {
+        let state = oauth_state();
+        let app = build_app(state.clone());
+        let now = Utc::now();
+        for issued_at in [
+            now - chrono::Duration::minutes(OAUTH_FLOW_TTL_MINUTES + 1),
+            now + chrono::Duration::minutes(5),
+        ] {
+            let cookie = flow_cookie_issued_at(&state, "google", "s", issued_at);
+            let resp = get(
+                &app,
+                "/api/auth/callback/google?code=abc&state=s",
+                Some(&cookie),
+            )
+            .await;
+            assert_eq!(resp.status, StatusCode::FORBIDDEN, "{issued_at}");
+        }
+    }
+
+    #[test]
+    fn flow_freshness_window() {
+        let now = Utc::now();
+        let flow = |issued_at| OAuthFlow {
+            provider: "google".to_string(),
+            state: "s".to_string(),
+            pkce_verifier: "v".to_string(),
+            issued_at,
+        };
+        assert!(flow(now).is_fresh(now));
+        assert!(flow(now - chrono::Duration::minutes(9)).is_fresh(now));
+        assert!(flow(now + chrono::Duration::seconds(30)).is_fresh(now));
+        assert!(!flow(now - chrono::Duration::minutes(11)).is_fresh(now));
+        assert!(!flow(now + chrono::Duration::minutes(2)).is_fresh(now));
     }
 
     #[tokio::test]
