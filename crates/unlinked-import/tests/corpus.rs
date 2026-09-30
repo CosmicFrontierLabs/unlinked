@@ -4,7 +4,8 @@
 //! sibling checkout of the workspace. The test is skipped when absent.
 
 use std::path::{Path, PathBuf};
-use unlinked_model::System;
+use unlinked_model::stateflow::split_path;
+use unlinked_model::{ChartKind, DataScope, Model, System};
 
 fn corpus_dir() -> Option<PathBuf> {
     let dir = match std::env::var_os("UNLINKED_TEST_CASES") {
@@ -95,6 +96,101 @@ fn corpus_models_import() {
         "{} problems:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+/// Every Stateflow-backed block must have its chart, and every chart must
+/// name a block.
+fn check_charts(model: &Model, problems: &mut Vec<String>) {
+    fn blocks(sys: &System, path: &mut Vec<String>, model: &Model, problems: &mut Vec<String>) {
+        for b in &sys.blocks {
+            path.push(b.name.clone());
+            let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+            match (b.stateflow_type(), model.chart_at(&refs)) {
+                (Some(_), None) => problems.push(format!("no chart for {}", path.join("/"))),
+                (_, Some(c)) if c.kind == ChartKind::MatlabFunction => {
+                    let count = |scope| c.data.iter().filter(|d| d.scope == scope).count() as u32;
+                    let ports = (count(DataScope::Input), count(DataScope::Output));
+                    if ports != (b.ports.inputs, b.ports.outputs) {
+                        problems.push(format!(
+                            "{}: chart data {ports:?} vs block ports {:?}",
+                            path.join("/"),
+                            (b.ports.inputs, b.ports.outputs)
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            if let Some(sub) = &b.subsystem {
+                blocks(sub, path, model, problems);
+            }
+            path.pop();
+        }
+    }
+    blocks(&model.root, &mut Vec::new(), model, problems);
+    for c in &model.charts {
+        let names = split_path(&c.name);
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (parent, last) = refs.split_at(refs.len() - 1);
+        if model
+            .system_at(parent)
+            .and_then(|s| s.block_by_name(last[0]))
+            .is_none()
+        {
+            problems.push(format!("chart {:?} names no block", c.name));
+        }
+    }
+}
+
+/// Whether the file carries Stateflow data at all; some corpus files keep
+/// MATLAB Function blocks but were saved without it.
+fn has_stateflow(bytes: &[u8]) -> bool {
+    match unlinked_import::slx::SlxPackage::open(bytes) {
+        Ok(pkg) => pkg.has("simulink/stateflow.xml") || pkg.has("simulink/stateflow/machine.xml"),
+        Err(_) => bytes.windows(12).any(|w| w == b"\nStateflow {"),
+    }
+}
+
+#[test]
+fn corpus_charts_import() {
+    let Some(dir) = corpus_dir() else { return };
+    let mut files = Vec::new();
+    models(&dir, &mut files);
+    files.sort();
+    let mut problems = Vec::new();
+    for f in &files {
+        let rel = f.strip_prefix(&dir).unwrap().display().to_string();
+        let bytes = std::fs::read(f).unwrap();
+        let Ok(model) = unlinked_import::import(&rel, &bytes) else {
+            continue;
+        };
+        if !model.charts.is_empty() {
+            let states: usize = model.charts.iter().map(|c| c.states.len()).sum();
+            eprintln!("{rel}: {} charts, {states} states", model.charts.len());
+        }
+        if has_stateflow(&bytes) {
+            let mut p = Vec::new();
+            check_charts(&model, &mut p);
+            problems.extend(p.into_iter().map(|p| format!("{rel}: {p}")));
+        }
+        for (name, min) in [("rovSim_los.slx", 2), ("DISCON_NREL5MW.slx", 5)] {
+            if rel.ends_with(name) {
+                assert!(model.charts.len() >= min, "{rel}: {:?}", model.charts);
+                assert!(model
+                    .charts
+                    .iter()
+                    .all(|c| c.kind == ChartKind::MatlabFunction
+                        && c.script
+                            .as_deref()
+                            .is_some_and(|s| s.starts_with("function"))));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "{} problems:\n{}",
+        problems.len(),
+        problems.join("\n")
     );
 }
 

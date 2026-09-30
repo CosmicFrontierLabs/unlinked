@@ -1,12 +1,15 @@
 //! Interactive diagram viewer: pan/zoom, subsystem drill-down, block
 //! inspector. The diagram itself is SVG produced by `unlinked-render` in
 //! wasm; clicks are resolved through the `data-*` attributes it emits.
+//! Opening a Stateflow block shows its chart (or MATLAB Function code)
+//! instead of the generated plumbing inside it; path entries past the chart
+//! block name subcharted states.
 
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
-use unlinked_model::{Block, Model, System};
-use unlinked_render::{render_svg, RenderOptions, Theme};
+use unlinked_model::{Block, Chart, Model, System};
+use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement, MouseEvent, WheelEvent};
 use yew::prelude::*;
@@ -113,13 +116,43 @@ fn fit(container: &HtmlElement, size: (f64, f64)) -> View {
     }
 }
 
-fn block_group(target: Option<web_sys::EventTarget>) -> Option<Element> {
+fn closest(target: Option<web_sys::EventTarget>, selector: &str) -> Option<Element> {
     target?
         .dyn_into::<Element>()
         .ok()?
-        .closest("g.block")
+        .closest(selector)
         .ok()
         .flatten()
+}
+
+fn block_group(target: Option<web_sys::EventTarget>) -> Option<Element> {
+    closest(target, "g.block")
+}
+
+/// The chart shown at `path`: the chart of the first block along it that has
+/// one, with the remaining names selecting nested subcharts.
+fn chart_at<'a, 'p>(model: &'a Model, path: &'p [&'p str]) -> Option<(&'a Chart, &'p [&'p str])> {
+    (1..=path.len()).find_map(|i| model.chart_at(&path[..i]).map(|c| (c, &path[i..])))
+}
+
+/// Full name of state `sid` in the chart shown at `path`. States are
+/// opened by id because the rendered `data-name` may be truncated.
+fn subchart_name(model: &Model, path: &[&str], sid: &str) -> Option<String> {
+    let (chart, _) = chart_at(model, path)?;
+    chart.state(sid).map(|s| s.name().to_string())
+}
+
+fn render(model: &Model, path: &[&str], opts: &RenderOptions) -> Result<String, String> {
+    match chart_at(model, path) {
+        Some((chart, rest)) => {
+            let view = chart
+                .view_at(rest)
+                .ok_or_else(|| format!("no subchart {:?} in {}", rest.join("/"), chart.name))?;
+            render_chart_view_svg(chart, view, opts)
+        }
+        None => render_svg(model, path, opts),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Escape text for use inside a double-quoted CSS string: quotes and
@@ -161,7 +194,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 theme: *theme,
                 ..Default::default()
             };
-            render_svg(&model, &refs, &opts).map_err(|e| e.to_string())
+            render(&model, &refs, &opts)
         },
     );
 
@@ -264,16 +297,21 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let ondblclick = {
         let path = path.clone();
         let selected = selected.clone();
+        let model = props.model.clone();
         Callback::from(move |e: MouseEvent| {
-            if let Some(g) = block_group(e.target()) {
-                if g.get_attribute("data-subsystem").is_some() {
-                    if let Some(name) = g.get_attribute("data-name") {
-                        let mut p = (*path).clone();
-                        p.push(name);
-                        path.set(p);
-                        selected.set(None);
-                    }
-                }
+            let name = if let Some(g) = closest(e.target(), "g.state[data-subchart]") {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                g.get_attribute("data-sid")
+                    .and_then(|sid| subchart_name(&model, &refs, &sid))
+            } else {
+                closest(e.target(), "g.block[data-subsystem]")
+                    .and_then(|g| g.get_attribute("data-name"))
+            };
+            if let Some(name) = name {
+                let mut p = (*path).clone();
+                p.push(name);
+                path.set(p);
+                selected.set(None);
             }
         })
     };
@@ -284,6 +322,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         selected
             .as_ref()
             .and_then(|sid| s.blocks.iter().find(|b| &b.id.0 == sid))
+    });
+    let selected_chart = selected_block.and_then(|b| {
+        let mut p = refs.clone();
+        p.push(&b.name);
+        props.model.chart_at(&p)
     });
 
     let open_path = {
@@ -385,7 +428,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     <div class="canvas" style={transform}>{ canvas }</div>
                 </div>
                 if let Some(b) = selected_block {
-                    <Inspector block={Rc::new(b.clone())} on_open={Callback::from({
+                    <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))} on_open={Callback::from({
                         let path = path.clone();
                         let selected = selected.clone();
                         move |name: String| {
@@ -455,6 +498,8 @@ fn system_tree(props: &TreeProps) -> Html {
 #[derive(Properties, PartialEq)]
 struct InspectorProps {
     block: Rc<Block>,
+    /// Stateflow chart implementing the block.
+    chart: Option<Rc<Chart>>,
     on_open: Callback<String>,
 }
 
@@ -464,13 +509,24 @@ fn inspector(props: &InspectorProps) -> Html {
     let open = b.subsystem.is_some().then(|| {
         let on_open = props.on_open.clone();
         let name = b.name.clone();
-        html! { <button onclick={Callback::from(move |_: MouseEvent| on_open.emit(name.clone()))}>{ "Open subsystem" }</button> }
+        let label = if props.chart.is_some() {
+            "Open chart"
+        } else {
+            "Open subsystem"
+        };
+        html! { <button onclick={Callback::from(move |_: MouseEvent| on_open.emit(name.clone()))}>{ label }</button> }
     });
+    let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
+    let script = props.chart.as_ref().and_then(|c| c.script.clone());
     html! {
         <aside class="inspector">
             <h3>{ b.name.replace('\n', " ") }</h3>
-            <div class="muted">{ format!("{} · SID {}", b.display_type(), b.id) }</div>
+            <div class="muted">{ format!("{kind} · SID {}", b.id) }</div>
             { for open }
+            if let Some(script) = script {
+                <h4>{ "MATLAB code" }</h4>
+                <pre class="script"><code>{ script }</code></pre>
+            }
             if let Some(src) = &b.library_source {
                 <div class="muted">{ format!("Library: {}", src.replace('\n', " ")) }</div>
             }
@@ -489,5 +545,57 @@ fn inspector(props: &InspectorProps) -> Html {
                 }) }
             </table>
         </aside>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unlinked_model::{ChartKind, Rect, SimConfig, SourceFormat, State, StateKind};
+
+    fn state(id: &str, label: &str, subviewer: &str) -> State {
+        State {
+            id: id.into(),
+            label: label.into(),
+            position: Rect::new(0.0, 0.0, 50.0, 30.0),
+            parent: None,
+            subviewer: Some(subviewer.into()),
+            kind: StateKind::Or,
+            script: None,
+        }
+    }
+
+    #[test]
+    fn long_subchart_names_stay_navigable() {
+        let long = "L".repeat(300);
+        let model = Model {
+            name: "m".into(),
+            source: SourceFormat::Slx,
+            simulink_version: None,
+            config: SimConfig::default(),
+            root: System::default(),
+            workspace: Default::default(),
+            charts: vec![Chart {
+                id: "9".into(),
+                name: "Sub".into(),
+                kind: ChartKind::StateChart,
+                states: vec![state("1", &long, "9"), state("2", "Inner", "1")],
+                transitions: vec![],
+                junctions: vec![],
+                data: vec![],
+                script: None,
+                update_method: None,
+                sample_time: None,
+            }],
+        };
+        let opts = RenderOptions::default();
+        let top = render(&model, &["Sub"], &opts).unwrap();
+        assert!(top.contains("data-sid=\"1\""));
+        assert!(!top.contains(&format!("data-name=\"{long}\"")));
+
+        let name = subchart_name(&model, &["Sub"], "1").unwrap();
+        assert_eq!(name, long);
+        let inner = render(&model, &["Sub", &name], &opts).unwrap();
+        assert!(inner.contains("Inner"));
     }
 }

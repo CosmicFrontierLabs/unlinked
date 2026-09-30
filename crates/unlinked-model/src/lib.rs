@@ -9,6 +9,11 @@
 
 pub mod diff;
 pub mod geometry;
+pub mod stateflow;
+
+pub use stateflow::{
+    Chart, ChartData, ChartKind, DataScope, Junction, JunctionKind, State, StateKind, Transition,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -25,6 +30,9 @@ pub struct Model {
     pub root: System,
     /// Model workspace variables as `name -> MATLAB expression`.
     pub workspace: BTreeMap<String, String>,
+    /// Stateflow charts and MATLAB Function blocks.
+    #[serde(default)]
+    pub charts: Vec<Chart>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +102,13 @@ pub struct Block {
 impl Block {
     pub fn param(&self, name: &str) -> Option<&str> {
         self.parameters.get(name).map(String::as_str)
+    }
+
+    /// Stateflow block kind (`SFBlockType`, e.g. `Chart` or `MATLAB
+    /// Function`) for blocks backed by a Stateflow chart.
+    pub fn stateflow_type(&self) -> Option<&str> {
+        self.param("SFBlockType")
+            .filter(|t| !t.is_empty() && *t != "NONE")
     }
 
     /// Mask type when masked, else the library source's final path element,
@@ -470,6 +485,15 @@ impl Model {
         Some(sys)
     }
 
+    /// The chart implementing the block at `path` (block names below the
+    /// root).
+    pub fn chart_at(&self, path: &[&str]) -> Option<&Chart> {
+        self.charts.iter().find(|c| {
+            let names = stateflow::split_path(&c.name);
+            names.len() == path.len() && names.iter().zip(path).all(|(a, b)| a == b)
+        })
+    }
+
     /// Total number of blocks across all levels.
     pub fn block_count(&self) -> usize {
         self.walk().iter().map(|(_, s)| s.blocks.len()).sum()
@@ -567,12 +591,48 @@ mod tests {
                 ..Default::default()
             },
             workspace: BTreeMap::new(),
+            charts: vec![],
         };
         let paths: Vec<_> = model.walk().into_iter().map(|(p, _)| p).collect();
         assert_eq!(paths, vec!["m", "m/A//B"]);
         assert_eq!(model.system_at(&["A/B"]).unwrap().blocks[0].name, "G");
         assert_eq!(model.block_count(), 3);
         assert_eq!(model.block_type_counts()["Gain"], 1);
+    }
+
+    #[test]
+    fn chart_at_matches_escaped_paths() {
+        let mut b = block("1", "x", "SubSystem");
+        assert_eq!(b.stateflow_type(), None);
+        b.parameters.insert("SFBlockType".into(), "NONE".into());
+        assert_eq!(b.stateflow_type(), None);
+        b.parameters
+            .insert("SFBlockType".into(), "MATLAB Function".into());
+        assert_eq!(b.stateflow_type(), Some("MATLAB Function"));
+
+        let model = Model {
+            name: "m".into(),
+            source: SourceFormat::Slx,
+            simulink_version: None,
+            config: SimConfig::default(),
+            root: System::default(),
+            workspace: BTreeMap::new(),
+            charts: vec![Chart {
+                id: "5".into(),
+                name: "Sub/a//b".into(),
+                kind: ChartKind::MatlabFunction,
+                states: vec![],
+                transitions: vec![],
+                junctions: vec![],
+                data: vec![],
+                script: Some("function y = f(u)".into()),
+                update_method: None,
+                sample_time: None,
+            }],
+        };
+        assert_eq!(model.chart_at(&["Sub", "a/b"]).unwrap().id, "5");
+        assert!(model.chart_at(&["Sub"]).is_none());
+        assert!(model.chart_at(&["Sub", "a", "b"]).is_none());
     }
 
     #[test]
@@ -616,6 +676,7 @@ mod tests {
                 ..Default::default()
             },
             workspace: BTreeMap::new(),
+            charts: vec![],
         };
         let json = serde_json::to_string(&model).unwrap();
         let back: Model = serde_json::from_str(&json).unwrap();
