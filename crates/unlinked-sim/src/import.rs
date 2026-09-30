@@ -263,3 +263,12 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
 pub fn simulate_model(model: &Model, options: &Options) -> Result<Trace, Error> {
     simulate(&compile(model, options)?, options)
 }
+
+/// Compile an imported model, then observe samples as they are produced.
+pub fn simulate_model_with_observer(
+    model: &Model,
+    options: &Options,
+    observer: impl FnMut(Sample<'_>) -> bool,
+) -> Result<Trace, Error> {
+    simulate_with_observer(&compile(model, options)?, options, observer)
+}

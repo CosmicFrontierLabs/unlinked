@@ -288,3 +288,25 @@ fn positive_tiny_duration_keeps_both_endpoints() {
     .unwrap();
     assert_eq!(t.time, vec![0.0, 1e-20]);
 }
+
+#[test]
+fn observer_streams_samples_and_can_cancel() {
+    let g = Graph {
+        nodes: vec![node("c", Kind::Constant { value: 3.0 })],
+        wires: vec![],
+    };
+    let mut observed = vec![];
+    let result = simulate_with_observer(&g, &options(), |sample| {
+        observed.push((sample.time, sample.nodes[0].id.clone(), sample.values[0]));
+        observed.len() < 3
+    });
+    assert!(matches!(result, Err(Error::Cancelled)));
+    assert_eq!(
+        observed,
+        vec![
+            (0.0, "c".into(), 3.0),
+            (0.01, "c".into(), 3.0),
+            (0.02, "c".into(), 3.0)
+        ]
+    );
+}

@@ -5,6 +5,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("simulation cancelled")]
+    Cancelled,
     #[error("invalid simulation options: {0}")]
     Options(String),
     #[error("block {block}: {message}")]
@@ -359,6 +361,25 @@ impl<'a> Compiled<'a> {
 /// Execute a bounded fixed-step scalar graph. Integrators are simultaneous, delays update
 /// only after every continuous solver stage, and algebraic loops are rejected before running.
 pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
+    simulate_with_observer(graph, options, |_| true)
+}
+
+/// One output sample borrowed from the execution engine. Values follow `nodes`
+/// order; observers may copy selected signals into bounded streaming buffers.
+pub struct Sample<'a> {
+    pub time: f64,
+    pub nodes: &'a [Node],
+    pub values: &'a [f64],
+}
+
+/// Run with a synchronous sample observer. Returning false cancels execution.
+/// The observer runs on the caller's thread; async servers should use a bounded
+/// worker queue and apply backpressure rather than running this on an executor.
+pub fn simulate_with_observer(
+    graph: &Graph,
+    options: &Options,
+    mut observer: impl FnMut(Sample<'_>) -> bool,
+) -> Result<Trace, Error> {
     let o = options;
     if !o.start.is_finite()
         || !o.stop.is_finite()
@@ -455,6 +476,13 @@ pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
             (o.start + sample as f64 * o.step).min(o.stop)
         };
         let values = compiled.evaluate(t, &state)?;
+        if !observer(Sample {
+            time: t,
+            nodes: &graph.nodes,
+            values: &values,
+        }) {
+            return Err(Error::Cancelled);
+        }
         trace.time.push(t);
         for (i, node) in graph.nodes.iter().enumerate() {
             trace.signals.get_mut(&node.id).unwrap().push(values[i]);
@@ -519,4 +547,4 @@ pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
 
 mod flatten;
 mod import;
-pub use import::{compile, simulate_model};
+pub use import::{compile, simulate_model, simulate_model_with_observer};
