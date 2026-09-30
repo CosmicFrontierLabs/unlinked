@@ -1,608 +1,98 @@
-# Rust Web App Skeleton
+# Unlinked
 
-Template for full-stack Rust web applications with a Yew WASM frontend embedded into an Axum backend as a single binary.
+Unlinked is a Rust web application for opening Simulink diagrams, sharing versioned models within organizations, and running a growing subset of their simulations. It also includes a MATLAB/Octave-to-Rust compiler with LLVM IR output through `rustc`.
 
-Patterns extracted from [agent-portal](https://github.com/meawoppl/agent-portal) and [inboxnegative.com](https://github.com/meawoppl/inboxnegative.com).
+The application follows [single-binary-rust-website](https://github.com/meawoppl/single-binary-rust-website): Yew compiled to WebAssembly, Axum serving embedded frontend assets, shared Rust protocol types, PostgreSQL with Diesel migrations, and a single deployable backend binary. See [PLAN.md](PLAN.md) for the architecture and remaining milestones, and [the original template conventions](docs/TEMPLATE_CONVENTIONS.md) for background. That archived template describes the starting point; the code and instructions below describe Unlinked.
 
-## Architecture
+## Current capabilities
 
-```
-Cargo.toml                        # Workspace root (backend, frontend, shared)
-├── shared/src/lib.rs             # Serde types used by both sides
-├── frontend/
-│   ├── Trunk.toml                # WASM bundler config
-│   ├── index.html                # Trunk entry point
-│   └── src/main.rs               # Yew App with routing
-├── backend/
-│   ├── src/
-│   │   ├── main.rs               # Axum server: build_app(), shutdown, tests
-│   │   ├── config.rs             # Config::from_env() with logged defaults
-│   │   ├── db.rs                 # Diesel pool + embedded migrations
-│   │   ├── models.rs             # Queryable/Insertable structs
-│   │   ├── schema.rs             # Diesel generated schema
-│   │   └── handlers/
-│   │       ├── health.rs         # GET /api/health
-│   │       └── websocket.rs      # ws-bridge typed WebSocket
-│   ├── diesel.toml
-│   └── migrations/
-├── Dockerfile                    # Single binary deploy
-├── docker-compose.yml            # Postgres + backend
-├── scripts/check-migration-names.sh
-└── .github/workflows/
-    ├── ci.yml                    # lint, audit, fmt, clippy, build, test
-    └── container.yml             # Docker image -> GHCR
-```
+- Import ZIP/XML `.slx` and legacy textual `.mdl` models, retaining unknown blocks and parameters. Render root diagrams and nested subsystems as SVG; inspect blocks in the browser.
+- Organization and project permissions, Google/GitHub OAuth, immutable file versions, and audit events. Viewers can read models and run simulations; editors can change files.
+- Simulation jobs pinned to an immutable file version, with authenticated HTTP results and a typed WebSocket stream. Euler, RK4, and adaptive Dormand–Prince RK45 solvers are available.
+- Simulation of the supported block subset, including basic sources, arithmetic, integrators, unit delays, switching, logic, and bounded transfer functions. Unsupported blocks and settings produce explicit errors.
+- MATLAB/Octave compilation to standalone Rust or LLVM IR. See [compiler documentation](crates/unlinked-matlab/README.md) for the implemented language subset.
 
-## Quick Start
+This is an independent implementation with partial compatibility. Rendering a model does not mean it can be simulated. Stateflow, arbitrary toolbox/library behavior, MATLAB callbacks, and general masked or conditional subsystem execution are not implemented. Imported workspace scripts are not executed. Supply parameter values explicitly. Solver settings must be selected explicitly when running from the CLI.
+
+The separately licensed [test corpus](https://github.com/meawoppl/unlinked-test-cases) records upstream URLs, pinned revisions, licenses, checksums, and expected results where available. Corpus tests cover import and rendering; analytic and Octave differential tests cover numerical behavior. Passing import/render checks is not a numerical equivalence claim.
+
+## Run locally
+
+Install Rust, PostgreSQL development headers (`libpq-dev` on Debian/Ubuntu), and the WASM bundler:
 
 ```sh
-# Prerequisites
 rustup target add wasm32-unknown-unknown
 cargo install trunk --locked
-
-# Start Postgres
-docker compose up db -d
-
-# Copy env
 cp .env.example .env
-
-# Build frontend (must happen before backend; memory-serve embeds frontend/dist)
-cd frontend && trunk build && cd ..
-
-# Run
+docker compose up -d db
+(cd frontend && trunk build)
 cargo run -p backend -- --dev-mode
-# -> http://localhost:3000
 ```
 
----
+Open `http://localhost:3000`. Development mode enables a local login and uses an ephemeral cookie key when `SESSION_SECRET` is unset. Sessions then end on restart. Use development mode only on a trusted local machine. The compose database port binds to localhost; its sample database password is for development.
 
-## Pattern 1: Shared Types + ws-bridge Endpoint (`shared/src/lib.rs`)
+Build the frontend before compiling the backend: `memory-serve` embeds `frontend/dist` at compile time. Rebuild both after changing browser code. Keep Trunk's hashed asset filenames enabled: HTML revalidates while hashed assets receive long-lived caching.
 
-Both the backend and frontend depend on the `shared` crate. All protocol messages and API types live here as proper structs -- no `json!` macro.
-
-The WebSocket protocol is defined using [ws-bridge](https://crates.io/crates/ws-bridge), which provides a `WsEndpoint` trait for strongly-typed WebSocket connections. A single struct defines the path and message types -- both sides reference this as the single source of truth:
-
-```rust
-use ws_bridge::WsEndpoint;
-
-pub struct AppSocket;
-
-impl WsEndpoint for AppSocket {
-    const PATH: &'static str = "/ws";
-    type ServerMsg = ServerMsg;
-    type ClientMsg = ClientMsg;
-}
-```
-
-Server and client messages are **separate enums** using serde-tagged serialization (`{"type": "Variant", ...}`):
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ServerMsg {
-    Heartbeat,
-    Error { message: String },
-    ServerShutdown { reason: String, reconnect_delay_ms: u64 },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ClientMsg {
-    Ping,
-}
-```
-
-API responses are also typed structs:
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthResponse {
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Item {
-    pub id: Uuid,
-    pub name: String,
-    pub created_at: chrono::NaiveDateTime,
-}
-```
-
-Every type gets a **roundtrip serialization test**:
-
-```rust
-#[test]
-fn server_msg_error_roundtrip() {
-    let msg = ServerMsg::Error { message: "something broke".to_string() };
-    let json = serde_json::to_string(&msg).unwrap();
-    let parsed: ServerMsg = serde_json::from_str(&json).unwrap();
-    match parsed {
-        ServerMsg::Error { message } => assert_eq!(message, "something broke"),
-        _ => panic!("Wrong variant"),
-    }
-}
-```
-
-To add a new message type: add a variant to `ServerMsg` or `ClientMsg`, add a roundtrip test, and both sides can immediately use it.
-
----
-
-## Pattern 2: Frontend Embedding with `memory-serve`
-
-Trunk compiles the Yew frontend to `frontend/dist/`. The backend uses
-[`memory-serve`](https://crates.io/crates/memory-serve) to bake those files into
-the binary at compile time and serve them as an axum router. Over a hand-rolled
-embed it adds, for free: **brotli/gzip pre-compression** (a big win for the
-`.wasm` payload), content negotiation on `Accept-Encoding`, `ETag`/`304`
-handling, and per-type cache-control. See `CLAUDE.md` for the crate note.
-
-The frontend router is built inside `build_app()` and merged so `/api/*` and
-`/ws` take priority, with an SPA fallback to `index.html` for client-side
-routes:
-
-```rust
-let frontend = MemoryServe::new(load_assets!("../frontend/dist"))
-    .index_file(Some("/index.html"))
-    .fallback(Some("/index.html"))      // SPA: unknown paths -> index.html
-    .fallback_status(StatusCode::OK)
-    .html_cache_control(CacheControl::NoCache)  // always re-validate index.html
-    .cache_control(CacheControl::Long)          // hashed assets are immutable
-    .into_router();
-
-Router::new()
-    .route("/api/health", get(handlers::health::health))
-    .with_state(state)
-    .route(shared::AppSocket::PATH, handlers::websocket::handler())
-    .merge(frontend)
-    .layer(cors)
-```
-
-The result is a **single binary** with no external file dependencies —
-`frontend/dist/` is only needed at build time. Compression is applied in release
-builds; debug builds serve assets uncompressed for fast iteration.
-
-> **Note:** `memory-serve` 0.6.x is the axum-0.7 compatible line (2.x needs axum
-> 0.8+). Its transitive `brotli` 6 requires pinning `alloc-stdlib = "=0.2.2"` —
-> see the comment in `backend/Cargo.toml`.
-
-### Why `CacheControl::Long` is safe: filehash + SRI move together
-
-The `.cache_control(CacheControl::Long)` above marks every non-HTML asset `immutable, max-age=31536000` — the browser may reuse it for a year without revalidating. That is only safe because of two things a `trunk build --release` does **by default**:
-
-- **Content-hashed filenames** (`filehash`, *on by default*): `style.css` → `style-c6dc982939a540ca.css`. The hash — and therefore the URL — changes whenever the content does.
-- **Subresource Integrity** baked into `index.html`: `<link href="/style-….css" integrity="sha384-…">`. The browser refuses to apply the asset unless its bytes hash to that digest.
-
-`immutable` caching, hashed names, and SRI must move **together**. Break the hashing and you get a silent, miserable-to-diagnose failure:
-
-> Disable filehash (`--filehash false`) so the asset keeps a stable URL like `style.css`, and a returning browser keeps its year-old *immutable* copy. `index.html` is served `NoCache`, so it is always re-fetched and carries a *fresh* SRI digest — which no longer matches the stale cached bytes. The browser blocks the stylesheet and the page renders unstyled. No 404, nothing obvious in the network tab — just:
->
-> ```
-> Failed to find a valid digest in the 'integrity' attribute for resource
-> '…/style.css' with computed SHA-384 integrity '…'. The resource has been blocked.
-> ```
-
-**Rules:**
-
-1. **Never disable `filehash`** while assets are served `immutable` and SRI is on — hashed names are exactly what make immutable caching correct.
-2. Keep `index.html` on `NoCache` (as above) so a redeploy is always picked up; the hashed assets it points at are re-fetched because their URLs changed.
-3. If you ever need stable asset names, drop *both* `CacheControl::Long` and SRI — pick one consistency mechanism, not two that can silently disagree.
-
----
-
-## Pattern 3: Typed WebSockets with ws-bridge (`backend/src/handlers/websocket.rs`)
-
-Uses [ws-bridge](https://crates.io/crates/ws-bridge) for strongly-typed WebSocket connections. The handler references the `AppSocket` endpoint defined in `shared/`, so message types are enforced at compile time -- no manual serde or raw strings:
-
-```rust
-use shared::{AppSocket, ClientMsg, ServerMsg};
-
-pub fn handler() -> MethodRouter {
-    ws_bridge::server::handler::<AppSocket, _, _>(|mut conn| async move {
-        // Send initial heartbeat
-        let _ = conn.send(ServerMsg::Heartbeat).await;
-
-        // Receive loop — all messages are already deserialized
-        while let Some(result) = conn.recv().await {
-            match result {
-                Ok(ClientMsg::Ping) => {
-                    let _ = conn.send(ServerMsg::Heartbeat).await;
-                }
-                Err(e) => {
-                    let _ = conn.send(ServerMsg::Error {
-                        message: format!("Decode error: {e}"),
-                    }).await;
-                }
-            }
-        }
-    })
-}
-```
-
-The route uses the path from the endpoint definition:
-
-```rust
-.route(shared::AppSocket::PATH, handlers::websocket::handler())
-```
-
-ws-bridge handles all the Axum WebSocket upgrade plumbing, JSON serialization, and type enforcement. To add new message types, just add variants to `ServerMsg`/`ClientMsg` in `shared/` -- both backend and frontend immediately see them.
-
----
-
-## Pattern 4: Diesel Database (`backend/src/db.rs` + `models.rs`)
-
-Migrations are **embedded into the binary** and run automatically on startup:
-
-```rust
-// db.rs
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
-
-pub fn create_pool() -> Result<DbPool> {
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let manager = ConnectionManager::<PgConnection>::new(database_url);
-    let pool = r2d2::Pool::builder().build(manager).expect("Failed to create pool");
-    Ok(pool)
-}
-
-pub fn run_migrations(pool: &DbPool) -> Result<Vec<String>> {
-    let mut conn = pool.get()?;
-    let applied: Vec<String> = conn
-        .run_pending_migrations(MIGRATIONS)
-        .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?
-        .iter().map(|m| m.to_string()).collect();
-    Ok(applied)
-}
-```
-
-Models have **separate Diesel structs and shared API structs**, connected by `From` impls:
-
-```rust
-// models.rs -- Diesel types (backend only)
-#[derive(Debug, Queryable, Selectable)]
-#[diesel(table_name = items)]
-pub struct Item {
-    pub id: Uuid,
-    pub name: String,
-    pub created_at: NaiveDateTime,
-}
-
-#[derive(Debug, Insertable)]
-#[diesel(table_name = items)]
-pub struct NewItem {
-    pub name: String,
-}
-
-// Convert Diesel model -> shared API type
-impl From<Item> for shared::Item {
-    fn from(item: Item) -> Self {
-        shared::Item { id: item.id, name: item.name, created_at: item.created_at }
-    }
-}
-```
-
-```sql
--- migrations/00000000000000_initial/up.sql
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
-CREATE TABLE items (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name TEXT NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-```
-
-Generate new migrations with `diesel migration generate add_something`.
-
-Migration naming is enforced by CI via `scripts/check-migration-names.sh`:
-- `00000000000000_description` (initial)
-- `YYYY-MM-DD-HHMMSS_description` (timestamped, snake_case)
-
----
-
-## Pattern 5: Frontend with ws-bridge Client (`frontend/src/main.rs`)
-
-The Yew frontend uses `gloo-net` for HTTP and `ws_bridge::yew_client` for typed WebSocket connections. Both reference types from the `shared` crate directly.
-
-**HTTP fetch** (same shared types as the backend):
-
-```rust
-use gloo_net::http::Request;
-use shared::HealthResponse;
-
-spawn_local(async move {
-    match Request::get("/api/health").send().await {
-        Ok(resp) => {
-            if let Ok(data) = resp.json::<HealthResponse>().await {
-                health.set(Some(data.status));
-            }
-        }
-        Err(e) => health.set(Some(format!("Error: {}", e))),
-    }
-});
-```
-
-**WebSocket via ws-bridge** -- `connect::<AppSocket>()` automatically derives the `ws://`/`wss://` URL from the page's location. Split the connection so send and receive run in independent tasks:
-
-```rust
-use shared::{AppSocket, ClientMsg, ServerMsg};
-
-match ws_bridge::yew_client::connect::<AppSocket>() {
-    Ok(conn) => {
-        let (mut tx, mut rx) = conn.split();
-
-        // Ping loop
-        spawn_local(async move {
-            loop {
-                sleep(Duration::from_secs(5)).await;
-                if tx.send(ClientMsg::Ping).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        // Receive loop — messages are already deserialized
-        spawn_local(async move {
-            while let Some(result) = rx.recv().await {
-                match result {
-                    Ok(ServerMsg::Heartbeat) => { /* update UI */ }
-                    Ok(ServerMsg::Error { message }) => { /* show error */ }
-                    Ok(ServerMsg::ServerShutdown { .. }) => break,
-                    Err(e) => { /* handle decode error */ break; }
-                }
-            }
-        });
-    }
-    Err(e) => { /* connection failed */ }
-}
-```
-
-Routes use `yew-router` with a `BrowserRouter` (works because the backend's SPA fallback serves `index.html` for all unknown paths):
-
-```rust
-#[derive(Clone, Routable, PartialEq)]
-enum Route {
-    #[at("/")]
-    Home,
-    #[not_found]
-    #[at("/404")]
-    NotFound,
-}
-```
-
----
-
-## Pattern 6: Axum Server Setup (`backend/src/main.rs`)
-
-The router is built by a pure `build_app(state) -> Router` function, kept
-separate from `main()` so tests can drive the whole app in-process with
-`tower::ServiceExt::oneshot` — no bound port, no network. Startup is then a
-consistent sequence: parse args, init tracing, load env + `Config::from_env()`,
-create DB pool, run migrations, `build_app`, serve with graceful shutdown.
-
-```rust
-#[derive(Parser, Debug, Clone)]
-struct Args {
-    #[arg(long)]
-    dev_mode: bool,
-}
-
-#[derive(Clone)]
-pub struct AppState {
-    pub dev_mode: bool,
-    pub db_pool: DbPool,
-}
-
-pub fn build_app(state: Arc<AppState>) -> Router {
-    let frontend = MemoryServe::new(load_assets!("../frontend/dist"))
-        .index_file(Some("/index.html"))
-        .fallback(Some("/index.html"))
-        .fallback_status(StatusCode::OK)
-        .html_cache_control(CacheControl::NoCache)
-        .cache_control(CacheControl::Long)
-        .into_router();
-
-    Router::new()
-        .route("/api/health", get(handlers::health::health))
-        .with_state(state)
-        // ws-bridge handler returns MethodRouter<()>, add after .with_state()
-        .route(shared::AppSocket::PATH, handlers::websocket::handler())
-        .merge(frontend)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info,tower_http=info".into()))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    dotenvy::dotenv().ok();
-
-    let config = Config::from_env();
-
-    let pool = db::create_pool()?;
-    db::run_migrations(&pool)?;
-
-    let app_state = Arc::new(AppState { dev_mode: args.dev_mode, db_pool: pool });
-    let app = build_app(app_state);
-
-    let listener = tokio::net::TcpListener::bind(config.bind_addr()).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    Ok(())
-}
-```
-
-The matching in-process tests (see `backend/src/main.rs`) build a non-connecting
-DB pool with `Pool::builder().build_unchecked(...)` so routes that don't touch
-the database — health, asset serving, SPA fallback — can be exercised without a
-running Postgres.
-
-Graceful shutdown handles both SIGTERM (Docker/k8s) and Ctrl+C:
-
-```rust
-async fn shutdown_signal() {
-    let ctrl_c = async { tokio::signal::ctrl_c().await.unwrap(); };
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .unwrap().recv().await;
-    };
-    tokio::select! {
-        _ = ctrl_c => tracing::info!("Received Ctrl+C, shutting down..."),
-        _ = terminate => tracing::info!("Received SIGTERM, shutting down..."),
-    }
-}
-```
-
----
-
-## Pattern 7: Docker + .env Injection
-
-The Dockerfile takes a **pre-built binary** (frontend already embedded). No multi-stage Rust build needed because CI compiles it:
-
-```dockerfile
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates libpq5 libssl3 curl \
-    && rm -rf /var/lib/apt/lists/*
-COPY build-output/backend /app/backend
-RUN useradd -m -u 1001 -s /bin/bash appuser && chown -R appuser:appuser /app
-USER appuser
-EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3000/api/health || exit 1
-CMD ["/app/backend"]
-```
-
-`docker-compose.yml` uses `${VAR:-default}` so a `.env` file is picked up automatically:
-
-```yaml
-services:
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: unlinked
-      POSTGRES_USER: unlinked
-      POSTGRES_PASSWORD: dev_password
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U unlinked"]
-
-  backend:
-    build: .
-    depends_on:
-      db: { condition: service_healthy }
-    environment:
-      DATABASE_URL: "postgresql://unlinked:dev_password@db:5432/unlinked"
-      SESSION_SECRET: "${SESSION_SECRET:-dev-secret-change-in-production}"
-```
-
----
-
-## Pattern 8: CI Pipeline (`.github/workflows/`)
-
-**ci.yml** runs these parallel jobs on every push/PR to main:
-
-| Job | What it does |
-|-----|-------------|
-| **lint** | `./scripts/check-migration-names.sh` |
-| **audit** | `cargo install cargo-audit && cargo audit` |
-| **fmt** | `cargo fmt --all --check` |
-| **clippy** | Build frontend, then `cargo clippy --workspace --all-targets` |
-| **test** | Build frontend, then `cargo test --workspace` |
-
-Clippy and test both **build the frontend first** because `memory-serve`'s `load_assets!` needs `frontend/dist/` to exist at compile time. Cargo commands run with `--locked` so builds respect the committed `Cargo.lock`.
-
-**container.yml** builds a release binary and Docker image on every push/PR to main:
-
-| Job | What it does |
-|-----|-------------|
-| **build-release** | `trunk build --release` + `cargo build --release -p backend`, uploads binary as artifact |
-| **container** | Downloads binary, builds Docker image with buildx layer caching |
-
-- On PR: container builds but does **not** push (validates the image)
-- On merge to main: pushes to GHCR with `latest` and git SHA tags
-- Docker layer caching via `cache-from: type=gha` / `cache-to: type=gha,mode=max` avoids rebuilding unchanged layers
-- Release binary is uploaded as an artifact (`backend-linux-x86_64`) so the container job doesn't recompile
-
----
-
-## Pattern 9: Branch Protection + Automerge Setup
-
-Run these once after creating the repo to enforce required checks and squash-only merges.
-
-**Restrict merge strategies to squash only and enable automerge:**
+## Command line
 
 ```sh
-gh repo edit \
-  --enable-squash-merge \
-  --disable-merge-commit \
-  --disable-rebase-merge \
-  --enable-auto-merge \
-  --delete-branch-on-merge
+cargo build -p unlinked-cli
+cargo run -p unlinked-cli -- info model.slx
+cargo run -p unlinked-cli -- render model.slx -o diagram.svg
+cargo run -p unlinked-cli -- render model.slx --system Controller -o controller.svg
+cargo run -p unlinked-cli -- sim model.mdl --stop 10 --step 0.01 --solver rk45 --var 'K=2*pi' -o trace.csv
+cargo run -p unlinked-cli -- transpile example.m -o example.rs
+cargo run -p unlinked-cli -- transpile example.m --emit llvm-ir -o example.ll
 ```
 
-**Require all CI checks to pass before merging to main:**
+Repeat `--system` for each nested subsystem; each argument is an exact block name, including literal slashes. SVG output uses an opaque dark background. Simulation output supports JSON and CSV; RK45 exposes `--rtol`, `--atol`, and `--max-internal-steps`. Run a subcommand with `--help` for all options.
+
+LLVM emission requires a local `rustc`. It compiles generated Rust without executing it. The web server does not spawn a compiler or execute uploaded scripts. CLI/model browser inputs are bounded at 16 MiB; server file storage has a separately configurable upload limit.
+
+## Authentication and deployment
+
+Set `DATABASE_URL`, `PUBLIC_URL` to the exact externally visible origin, and a persistent `SESSION_SECRET` containing at least 64 bytes. Generate a secret with `openssl rand -base64 64`; keep it outside source control. Production startup fails without a valid secret and at least one configured OAuth provider.
+
+Configure all three variables for Google and/or GitHub as shown in [.env.example](.env.example). Register the corresponding `/api/auth/callback/google` or `/api/auth/callback/github` URL with the provider. `ALLOWED_EMAIL_DOMAINS` optionally restricts sign-in. Serve production traffic over HTTPS, including behind a reverse proxy; production session cookies are secure. OAuth state, flow expiry, session revocation, same-origin mutation checks, and organization isolation have automated tests. A real provider sign-in still needs validation with your registered credentials.
+
+Migrations are embedded and run at startup. Back up PostgreSQL: it stores model bytes, immutable history, memberships, sessions, audit records, and simulation results. Simulation concurrency caps are per backend process (four jobs globally and two per user); multi-instance global scheduling is a remaining deployment milestone.
+
+The Dockerfile packages a prebuilt binary, following the template's CI flow:
 
 ```sh
-gh api repos/{owner}/{repo}/branches/main/protection \
-  --method PUT \
-  --input - <<'EOF'
-{
-  "required_status_checks": {
-    "strict": false,
-    "contexts": [
-      "Lint Checks",
-      "Security Audit",
-      "Rustfmt",
-      "Clippy",
-      "Tests",
-      "Build Release Binary",
-      "Build Container"
-    ]
-  },
-  "enforce_admins": false,
-  "required_pull_request_reviews": null,
-  "restrictions": null,
-  "required_linear_history": true
-}
-EOF
+(cd frontend && trunk build --release)
+cargo build --release -p backend --locked
+mkdir -p build-output
+cp target/release/backend build-output/backend
+docker build -t unlinked .
 ```
 
-`strict: false` means PRs don't need to be up-to-date with main before merging (avoids a rebase treadmill on busy repos). `required_linear_history: true` enforces squash commits at the branch level as a backstop.
+Supply production configuration at runtime. The compose backend intentionally has no usable session-secret fallback. The bundled compose database credentials are a local example, not a production credential configuration. CI builds release artifacts and the container, and publishes main-branch images to GHCR.
 
-**Enable automerge on a specific PR** (once all checks are green it merges automatically):
+## APIs and development
+
+Shared DTOs live in `shared`; database models remain backend-only. Project file uploads create immutable versions. Simulation routes are:
+
+- `POST /api/files/:file_id/simulations`: run a pinned version and return its persisted result.
+- `GET /api/files/:file_id/simulations`: list recent runs.
+- `GET /api/simulations/:run_id`: read an authorized result.
+- `/ws/simulations`: stream `SimulationStarted`, sample-major `SimulationSamples`, and terminal `SimulationStatus` messages. Supports cancellation and checks session validity before each new run.
+
+See [shared/src/simulation.rs](shared/src/simulation.rs) for request and stream types. Run records preserve the chosen settings and workspace overrides. Disconnecting a streaming client cancels its worker. Expired abandoned records are marked failed when read. Jobs, queues, output volume, input size, and solver work have explicit bounds.
+
+Core crates separate model IR, import, rendering, MATLAB semantics, simulation, and CLI. Keep the computational crates WASM-compatible; native process invocation belongs in the CLI. Add migrations as `YYYY-MM-DD-HHMMSS_description` directories and run the naming check.
 
 ```sh
-gh pr merge --auto --squash <PR-number>
+./scripts/check-migration-names.sh
+cargo fmt --all --check
+(cd frontend && trunk build)
+cargo clippy --workspace --all-targets --locked -- -D warnings
+UNLINKED_TEST_CASES=/path/to/unlinked-test-cases cargo test --workspace --locked
+cargo clippy -p frontend --target wasm32-unknown-unknown --all-targets -- -D warnings
 ```
 
----
-
-## Stack Reference
-
-| Layer | Crate | Version |
-|-------|-------|---------|
-| Web framework | `axum` | 0.7 |
-| Async runtime | `tokio` | 1 (full) |
-| Frontend | `yew` | 0.21 (CSR) |
-| WASM bundler | `trunk` | CLI tool |
-| Asset embedding | `memory-serve` | 0.6 (brotli/gzip, ETag) |
-| Database | `diesel` | 2.2 (postgres, r2d2) |
-| Typed WebSockets | `ws-bridge` | 0.1 (server + yew-client) |
-| Serialization | `serde` + `serde_json` | 1 |
-| CLI args | `clap` | 4 (derive) |
-| Env loading | `dotenvy` | 0.15 |
-| Logging | `tracing` | 0.1 |
-| HTTP middleware | `tower-http` | 0.6 (cors) |
-| Cookies | `tower-cookies` | 0.10 |
-| Error handling | `anyhow` | 1 |
-
----
+Set `DATABASE_URL` to a disposable PostgreSQL test database to run database-backed tests; without it those tests are skipped. Install Octave for differential compiler tests. Set `UNLINKED_TEST_CASES` to enable the external corpus checks. CI supplies PostgreSQL and checks out the corpus; native and WASM builds are both relevant.
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+[Apache-2.0](LICENSE). Imported models retain their individual licenses in the test corpus. Simulink and MATLAB are MathWorks trademarks; this project is not affiliated with MathWorks.
