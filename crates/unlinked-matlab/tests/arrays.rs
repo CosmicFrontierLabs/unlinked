@@ -444,6 +444,19 @@ fn octave_differential_array_expressions() {
         "ones(3,0)*ones(0,2)",
         "all([])",
         "any([])",
+        "[zeros(0,3);zeros(0,3)]",
+        "[zeros(3,0),zeros(3,0)]",
+        "[zeros(0,3),zeros(0,4)]",
+        "[zeros(2,0),ones(2,2)]",
+        "[zeros(0,3);ones(2,3)]",
+        "[[],zeros(0,3)]",
+        "[zeros(0,3);[]]",
+        "find([])",
+        "find(0)",
+        "find(false)",
+        "find(zeros(0,3))",
+        "find(zeros(3,0))",
+        "sort([NaN -NaN -1 0 Inf -Inf])",
     ];
     let workspace = BTreeMap::from([
         ("A".into(), matrix(2, 3, &[1., 4., 2., 5., 3., 6.])),
@@ -547,4 +560,19 @@ fn aggregate_parameter_budgets_and_generated_recursion_are_enforced() {
     let run = compile_run(&transpile(source).unwrap(), "recursion");
     assert!(!run.status.success());
     assert!(String::from_utf8_lossy(&run.stderr).contains("recursion exceeds 64"));
+}
+
+#[test]
+fn shaped_empty_concatenation_rejects_dimension_mismatches() {
+    for expression in [
+        "[zeros(0,3);zeros(0,4)]",
+        "[zeros(3,0),zeros(4,0)]",
+        "[zeros(0,4);ones(2,3)]",
+        "[zeros(3,0),ones(2,2)]",
+    ] {
+        assert!(
+            unlinked_matlab::eval_array_expr(expression, &BTreeMap::new()).is_err(),
+            "{expression}"
+        );
+    }
 }

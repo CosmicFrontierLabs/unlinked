@@ -174,7 +174,7 @@ loading, file/process/network functions, automatic command-window echo,
 of a non-vector matrix, non-square least-squares solves, fractional matrix powers,
 and indexing a temporary expression directly. Assign it to a variable first.
 
-When Octave is available, tests compare 42 fixed array expressions against both
+When Octave is available, tests compare 55 fixed array expressions against both
 pure evaluation and generated Rust, including array shapes and column-major
 values. With `UNLINKED_TEST_CASES` set, nine licensed corpus function files compile
 and match Octave across eleven cases: rotation, skew matrices, binary/linear
@@ -182,3 +182,10 @@ search, palindrome detection, bubble sort, Euclidean distance, factorial and
 Fibonacci. Tests also exercise generated loops/multiple outputs, index/runtime
 errors, parser fuzz cases and execution budgets. Missing optional prerequisites
 produce explicit skips; a configured missing corpus is an error.
+
+Logical indexing of a matrix produces a column vector, following the
+[MathWorks matrix-indexing description](https://www.mathworks.com/company/technical-articles/matrix-indexing-in-matlab.html).
+Octave differs for a logical row-vector mask applied to a matrix: it can return
+a row vector. That shape corner is not included in the shared-conformance claim.
+The special `find([])` and `find(0)` results are 0-by-0, matching the
+[MathWorks documented convention](https://www.mathworks.com/help/matlab/ref/find.html).

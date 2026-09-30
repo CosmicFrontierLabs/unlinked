@@ -350,7 +350,12 @@ pub fn concatenate(rows: Vec<Vec<Value>>) -> ArrayResult<Value> {
     };
     let mut assembled = Vec::new();
     for row in rows {
-        let parts: Vec<_> = row.into_iter().filter(|v| !v.data.is_empty()).collect();
+        // Only the dimensionless [] literal is neutral. A 0-by-N or
+        // N-by-0 array still constrains the concatenated dimensions.
+        let parts: Vec<_> = row
+            .into_iter()
+            .filter(|v| v.rows != 0 || v.cols != 0)
+            .collect();
         if parts.is_empty() {
             continue;
         }
@@ -1136,12 +1141,24 @@ pub fn builtin(name: &str, args: Vec<Value>, outputs: usize) -> ArrayResult<Vec<
             if !v.is_vector() {
                 return Err("sort currently supports vectors only".into());
             }
-            v.data.sort_by(f64::total_cmp);
+            // MATLAB/Octave place every NaN after real values, regardless
+            // of its IEEE sign. Equal values retain their original order.
+            v.data.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => a.partial_cmp(b).unwrap(),
+            });
             v
         }
         "find" => {
             arity(1)?;
             let a = &args[0];
+            // Both MATLAB and Octave preserve the conventional [] result
+            // for dimensionless empty input and scalar zero.
+            if (a.rows == 0 && a.cols == 0) || (a.data.len() == 1 && a.data[0] == 0.0) {
+                return Ok(vec![Value::empty()]);
+            }
             let data: Vec<_> = a
                 .data
                 .iter()
