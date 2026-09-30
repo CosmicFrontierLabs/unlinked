@@ -622,3 +622,8 @@ button:disabled {
 .diagram g.lines {
     pointer-events: none;
 }
+
+/* The plot figure is light; frame it on the dark page. */
+.plot-host canvas {
+    border-radius: 6px;
+}
