@@ -70,8 +70,10 @@ considered definitely assigned after the loop, even for constant positive ranges
 The numeric model is Rust `f64`, not MATLAB array arithmetic: NaN behavior in
 `min`/`max`, overflow, underflow, rounding near colon endpoints, transcendental
 functions and `mod` can differ from MATLAB. Complex-valued operations yield NaN.
-Ranges must be finite, have a nonzero step and contain at most one million
-iterations. Inputs are limited to 64 KiB, 1024 tokens and 64 nested parser levels
+Ranges must be finite, have a nonzero step and contain between one and one million
+iterations. Empty ranges are rejected at runtime: MATLAB/Octave assign an empty
+array to the loop variable even when it previously contained a scalar; preserving
+that scalar would silently produce the wrong result. Inputs are limited to 64 KiB, 1024 tokens and 64 nested parser levels
 for this initial subset. Diagnostic line numbers are exact for lexer/parser
 errors; semantic diagnostics currently point to line 1.
 
