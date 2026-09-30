@@ -577,6 +577,9 @@ impl Parser {
         Ok(result)
     }
     fn function(&mut self) -> Result<Function, Error> {
+        self.function_with_implicit_end(false)
+    }
+    fn function_with_implicit_end(&mut self, implicit: bool) -> Result<Function, Error> {
         self.pos += 1;
         let mut outputs = Vec::new();
         let name;
@@ -617,7 +620,9 @@ impl Parser {
         }
         self.finish()?;
         let body = self.body()?;
-        self.end()?;
+        if !(implicit && matches!(self.token(), Token::Eof)) {
+            self.end()?;
+        }
         Ok(Function {
             name,
             args,

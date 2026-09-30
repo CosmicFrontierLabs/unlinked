@@ -37,10 +37,16 @@ impl FunctionProgram {
             depth: 0,
         };
         parser.separators();
+        let single_function = parser
+            .tokens
+            .iter()
+            .filter(|token| matches!(&token.token,Token::Name(name) if name=="function"))
+            .count()
+            == 1;
         let mut functions = BTreeMap::new();
         let mut signature = None;
         while parser.named("function") {
-            let function = parser.function()?;
+            let function = parser.function_with_implicit_end(single_function)?;
             if functions.len() >= 64 {
                 return Err(error(1, "function file exceeds 64 definitions"));
             }

@@ -141,3 +141,13 @@ fn combined_call_and_expression_depth_and_interruptions_are_bounded() {
     );
     assert!(eval_function("function y=f()\ny=zeros(0,1000000);\nend", vec![]).is_err());
 }
+
+#[test]
+fn single_function_chart_script_may_omit_terminal_end() {
+    assert_eq!(
+        eval_function("function y=f(u)\ny=2*u;", vec![Value::scalar(3.)]).unwrap()[0].data,
+        [6.]
+    );
+    assert!(FunctionProgram::parse("function y=f(u)\nif u>0\ny=u;").is_err());
+    assert!(FunctionProgram::parse("function y=f(u)\ny=g(u);\nfunction y=g(u)\ny=u;").is_err());
+}
