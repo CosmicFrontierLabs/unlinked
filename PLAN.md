@@ -50,11 +50,13 @@ holds openly licensed third-party models, so licensing stays clean and the main
 repo stays small.
 
 ```
-models/<source>/<name>.{slx,mdl}
-matlab/<source>/<name>.m
-manifest.toml   # per file: source URL, license, commit, Simulink version,
-                # block types used, expectations (parse/render/sim/transpile)
-expected/       # reference outputs (sim traces as CSV, Octave outputs)
+fixtures/<source>/...        # .slx / .mdl / .m copied byte-for-byte from upstream
+fixtures/synthetic/...       # hand-written models with analytic expected outputs
+licenses/                    # upstream license texts
+manifest.json                # per fixture: source repo + pinned revision, license,
+                             # sha256, Simulink release, block types, coverage
+                             # (import/render/sim/transpile), expected outputs
+scripts/corpus.py            # verify hashes/licenses; refresh pinned upstreams
 ```
 
 The main repo reads the corpus from `UNLINKED_TEST_CASES` (default
