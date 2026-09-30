@@ -22,6 +22,13 @@ rustc --edition=2024 --emit=link,llvm-ir example.rs
 ./example
 ```
 
+Function-only files can become a callable library using `transpile_library(source)`
+or the CLI's `--library` option. A MATLAB function `polynomial(x)` becomes
+`pub fn f_polynomial(v_x: f64) -> f64`; generated code has no `main`. Compile it
+with `rustc --crate-type=lib --emit=link,llvm-ir generated.rs`, or include it as a
+Rust module and call `generated::f_polynomial(3.0)`. Library mode rejects script
+statements and empty files.
+
 The CLI reads stdin and writes Rust to stdout. `rustc` produces native code and
 LLVM IR; this is an explicit local compilation workflow, not a compiler service
 for uploaded programs. Production execution needs process isolation, resource
@@ -41,6 +48,10 @@ range does not bound total runtime or output.
   the step defaults to one. Range bounds are evaluated once.
 - Local, single-output `function y = f(x, ...)` definitions after the script,
   with explicit `end`. Parameters and function variables have local scope.
+- NaN-to-logical conversions report errors (runtime assertions in generated
+  programs); short-circuit operators skip their unevaluated operand.
+- `mod` snaps quotients within two floating-point epsilon units of an integer,
+  including the decimal-boundary case `mod(0.3, 0.1) == 0`.
 - `eval_expr(source, workspace)` evaluates the same scalar expression subset
   directly against a `BTreeMap<String, f64>` for model block parameters.
 
@@ -66,4 +77,13 @@ errors; semantic diagnostics currently point to line 1.
 
 Tests cover rejection of unsupported input, scalar evaluation, control flow,
 local functions, actual compilation/execution of a fixed repository fixture and
-LLVM IR emission. They never compile user-provided uploaded input.
+LLVM IR emission, exported function-library calls, and 2560 deterministic malformed
+inputs. If Octave is installed, differential tests compare 24 fixed expressions
+against both the direct evaluator and compiled Rust output. If unavailable, the
+test reports that the differential check was skipped. Tests never compile
+user-provided uploaded input.
+
+Logical-conversion behavior follows [MathWorks logical documentation](https://www.mathworks.com/help/matlab/ref/logical.html).
+Floating-point modulo handling is informed by [GNU Octave arithmetic documentation](https://docs.octave.org/latest/Utility-Functions.html).
+The differential test is a compatibility check for the listed subset, not a claim
+of full MATLAB or Octave conformance.

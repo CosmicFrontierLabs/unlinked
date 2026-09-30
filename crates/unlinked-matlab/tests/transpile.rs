@@ -103,3 +103,176 @@ fn bounded_parser_rejects_deep_or_large_input() {
     assert!(transpile(&"\n".repeat(2000)).is_err());
     assert!(transpile(&" ".repeat(70_000)).is_err());
 }
+
+#[test]
+fn function_file_exports_callable_library() {
+    let source = "function y = polynomial(x)\ny = x^2 + 2*x + 1;\nend";
+    let generated = unlinked_matlab::transpile_library(source).unwrap();
+    assert!(!generated.contains("fn main"));
+    assert!(unlinked_matlab::transpile_library("x = 2;").is_err());
+    let dir = std::env::temp_dir().join(format!("unlinked-matlab-library-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("generated.rs"), generated).unwrap();
+    std::fs::write(
+        dir.join("caller.rs"),
+        "mod generated; fn main() { assert_eq!(generated::f_polynomial(3.0), 16.0); }",
+    )
+    .unwrap();
+    let executable = dir.join("caller");
+    let result = Command::new("rustc")
+        .arg(dir.join("caller.rs"))
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(Command::new(&executable).status().unwrap().success());
+    let result = Command::new("rustc")
+        .args(["--crate-type=lib", "--emit=llvm-ir,link"])
+        .arg(dir.join("generated.rs"))
+        .arg("--out-dir")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(dir.join("generated.ll").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn nan_logical_conversion_rejected_but_comparisons_allowed() {
+    let vars = BTreeMap::new();
+    for source in ["~NaN", "NaN && 1", "NaN || 0", "1 && NaN", "0 || NaN"] {
+        assert!(eval_expr(source, &vars).is_err(), "{source}");
+    }
+    assert_eq!(eval_expr("NaN == NaN", &vars).unwrap(), 0.0);
+    assert_eq!(eval_expr("NaN ~= NaN", &vars).unwrap(), 1.0);
+    assert_eq!(eval_expr("1 || NaN", &vars).unwrap(), 1.0);
+    assert_eq!(eval_expr("0 && NaN", &vars).unwrap(), 0.0);
+}
+
+#[test]
+fn octave_differential_scalar_and_generated_rust() {
+    if Command::new("octave").arg("--version").output().is_err() {
+        eprintln!("Octave unavailable; differential conformance test skipped");
+        return;
+    }
+    // Every expression is a fixed repository fixture, never uploaded input.
+    let expressions = [
+        "2^3^2",
+        "2^-2^2",
+        "-2^-2",
+        "1+2*3",
+        "(1+2)*3",
+        "mod(0.3,0.1)",
+        "mod(-5,3)",
+        "mod(5,-3)",
+        "mod(2,0)",
+        "mod(Inf,2)",
+        "mod(2,Inf)",
+        "sign(-0.0)",
+        "round(-1.5)",
+        "min(NaN,2)",
+        "max(NaN,2)",
+        "sqrt(4)",
+        "sin(pi/2)",
+        "exp(log(2))",
+        "atan2(1,-1)",
+        "1 < 2 < 3",
+        "~2^0",
+        "0 && NaN",
+        "1 || NaN",
+        "NaN ~= NaN",
+    ];
+    let octave_script: String = expressions
+        .iter()
+        .map(|e| format!("fprintf('%.17g\\n', {e});\n"))
+        .collect();
+    let reference = Command::new("octave")
+        .args(["--no-gui", "--quiet", "--eval", &octave_script])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    let expected: Vec<f64> = String::from_utf8(reference.stdout)
+        .unwrap()
+        .lines()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(expected.len(), expressions.len());
+    let source: String = expressions
+        .iter()
+        .map(|e| format!("disp({e});\n"))
+        .collect();
+    let dir = std::env::temp_dir().join(format!("unlinked-matlab-octave-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("fixture.rs"), transpile(&source).unwrap()).unwrap();
+    let executable = dir.join("fixture");
+    let result = Command::new("rustc")
+        .arg(dir.join("fixture.rs"))
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let run = Command::new(&executable).output().unwrap();
+    assert!(run.status.success());
+    let actual: Vec<f64> = String::from_utf8(run.stdout)
+        .unwrap()
+        .lines()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    assert_eq!(actual.len(), expressions.len());
+    for ((expression, expected), compiled) in expressions.iter().zip(expected).zip(actual) {
+        let evaluated = eval_expr(expression, &BTreeMap::new()).unwrap();
+        for value in [evaluated, compiled] {
+            assert!(
+                (value.is_nan() && expected.is_nan())
+                    || value == expected
+                    || (value - expected).abs() <= 1e-13 * expected.abs().max(1.0),
+                "{expression}: {value} != {expected}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn arbitrary_malformed_input_does_not_panic() {
+    let alphabet = b"xyz0123+-*/^()=:;,\n%[]'~&|\\";
+    let mut seed = 0x12345678_u64;
+    for length in 0..128 {
+        for _ in 0..20 {
+            let source: String = (0..length)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    alphabet[(seed >> 32) as usize % alphabet.len()] as char
+                })
+                .collect();
+            let result = std::panic::catch_unwind(|| {
+                let _ = transpile(&source);
+                let _ = eval_expr(&source, &BTreeMap::new());
+            });
+            assert!(result.is_ok(), "parser panic for {source:?}");
+        }
+    }
+    // A flat chain constructs a deep left-associated AST without nested parentheses.
+    let long_chain = vec!["1"; 500].join("+");
+    assert_eq!(eval_expr(&long_chain, &BTreeMap::new()).unwrap(), 500.0);
+    assert!(transpile(&format!("x={long_chain};")).is_ok());
+}
