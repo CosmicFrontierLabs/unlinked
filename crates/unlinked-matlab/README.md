@@ -121,7 +121,9 @@ member. Cargo resolves dependencies and writes a lockfile on the first build. Th
 manifest declares Rust 1.89 or newer, matching nalgebra’s minimum version.
 
 Generated functions expose Rust primitives and borrowed ndarray arrays, with typed
-`rt::Error` results. They use named operation helpers rather than runtime
+`rt::Error` results. Functions consistently return `rt::Result`, including pure
+scalar functions, so callers keep one error-handling convention as functions
+evolve. They use named operation helpers rather than runtime
 operator-name strings. Source is formatted in-process for extraction and review. The helper's canonical array storage is ndarray; dense linear algebra uses
 nalgebra. MATLAB-specific conversion and indexing use small helper calls. Standard Rust error results report unsupported
 shapes and invalid operations. Current code requires `std` (including formatting

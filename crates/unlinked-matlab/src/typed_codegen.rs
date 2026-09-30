@@ -916,10 +916,14 @@ impl TypedGenerator<'_> {
             Expr::Apply(n, args) if self.vars.contains(n) => {
                 let base = self.borrow_variable(n);
                 let indices = self.indices(args, "_indexed")?;
-                format!(
-                    "{{ let _indexed = {base}; rt::index::<{}>(_indexed, &[{indices}])? }}",
-                    ty.rust()
-                )
+                if args.iter().all(|arg| matches!(arg, Expr::All)) {
+                    format!("rt::index::<{}>({base}, &[{indices}])?", ty.rust())
+                } else {
+                    format!(
+                        "{{ let _indexed = {base}; rt::index::<{}>(_indexed, &[{indices}])? }}",
+                        ty.rust()
+                    )
+                }
             }
             Expr::Apply(n, args) => self.call(n, args, 1, end)?.0,
         })
@@ -1101,9 +1105,9 @@ impl TypedGenerator<'_> {
                         for (i, name) in names.iter().enumerate() {
                             let c = if self.functions.contains_key(n) {
                                 if types.len() == 1 {
-                                    format!("result_{id}.clone()")
+                                    format!("result_{id}")
                                 } else {
-                                    format!("result_{id}.{i}.clone()")
+                                    format!("result_{id}.{i}")
                                 }
                             } else {
                                 format!("result_{id}[{i}].clone()")
@@ -1138,7 +1142,10 @@ impl TypedGenerator<'_> {
                                 self.body(b, depth)?
                             ));
                         }
-                        out.push_str(&format!(" else {{\n{} }}\n", self.body(other, depth)?));
+                        if !other.is_empty() {
+                            out.push_str(&format!(" else {{\n{} }}", self.body(other, depth)?));
+                        }
+                        out.push('\n');
                     }
                     StmtKind::While(c, b) => {
                         let cond = self.borrow(c, None)?;
@@ -1363,6 +1370,92 @@ fn declarations(generator: &TypedGenerator<'_>, args: &BTreeSet<String>) -> Stri
 }
 /// Generate compact typed Rust using the separately packaged ndarray-based runtime.
 /// Undeclared function parameters use `ArrayD<f64>`; unsupported type joins are diagnostics.
+// Preserve MATLAB spelling and overwrite semantics without suppressing unrelated lints.
+fn source_allowances(
+    generator: &TypedGenerator<'_>,
+    counts: &BTreeMap<String, usize>,
+    function: Option<&str>,
+    arguments: &[String],
+) -> String {
+    let mut lints = Vec::new();
+    if generator
+        .types
+        .keys()
+        .map(String::as_str)
+        .chain(function)
+        .any(|n| n.chars().any(char::is_uppercase))
+    {
+        lints.push("non_snake_case");
+    }
+    if counts
+        .iter()
+        .any(|(n, count)| *count > 1 || arguments.contains(n))
+    {
+        lints.push("unused_assignments");
+    }
+    if lints.is_empty() {
+        String::new()
+    } else {
+        format!("#[allow({})]\n", lints.join(", "))
+    }
+}
+
+// An unused MATLAB local is valid; give it an idiomatic underscore-prefixed Rust
+// binding instead of suppressing unused-variable diagnostics for the entire file.
+fn mark_unread_bindings(source: &str) -> Result<String, Error> {
+    use syn::visit_mut::{self, VisitMut};
+    #[derive(Default)]
+    struct Uses {
+        bindings: BTreeSet<String>,
+        reads: BTreeSet<String>,
+    }
+    impl VisitMut for Uses {
+        fn visit_pat_ident_mut(&mut self, node: &mut syn::PatIdent) {
+            let name = node.ident.to_string();
+            if name.starts_with("v_") {
+                self.bindings.insert(name);
+            }
+            visit_mut::visit_pat_ident_mut(self, node);
+        }
+        fn visit_expr_path_mut(&mut self, node: &mut syn::ExprPath) {
+            if let Some(name) = node.path.get_ident() {
+                self.reads.insert(name.to_string());
+            }
+            visit_mut::visit_expr_path_mut(self, node);
+        }
+        fn visit_expr_assign_mut(&mut self, node: &mut syn::ExprAssign) {
+            if !matches!(&*node.left, syn::Expr::Path(_)) {
+                self.visit_expr_mut(&mut node.left);
+            }
+            self.visit_expr_mut(&mut node.right);
+        }
+    }
+    struct Rename(BTreeSet<String>);
+    impl VisitMut for Rename {
+        fn visit_ident_mut(&mut self, node: &mut syn::Ident) {
+            if self.0.contains(&node.to_string()) {
+                *node = syn::Ident::new(&format!("_{node}"), node.span());
+            }
+        }
+        fn visit_field_value_mut(&mut self, node: &mut syn::FieldValue) {
+            self.visit_expr_mut(&mut node.expr);
+        }
+        fn visit_expr_field_mut(&mut self, node: &mut syn::ExprField) {
+            self.visit_expr_mut(&mut node.base);
+        }
+    }
+    let mut file = syn::parse_file(source).map_err(|e| error(1, format!("generated Rust: {e}")))?;
+    for item in &mut file.items {
+        if let syn::Item::Fn(function) = item {
+            let mut uses = Uses::default();
+            uses.visit_item_fn_mut(function);
+            Rename(uses.bindings.difference(&uses.reads).cloned().collect())
+                .visit_item_fn_mut(function);
+        }
+    }
+    Ok(prettyplease::unparse(&file))
+}
+
 pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
     let mut parser = Parser {
         tokens: lex(source)?,
@@ -1615,8 +1708,14 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
             .iter()
             .map(|n| generator.types[n].rust().to_string())
             .collect::<Vec<_>>();
+        out.push_str(&source_allowances(
+            &generator,
+            &counts,
+            Some(&f.name),
+            &f.args,
+        ));
         out.push_str(&format!(
-            "#[allow(non_snake_case, unused_variables, unused_assignments)]\npub fn f_{}({params}) -> rt::Result<{}> {{\n",
+            "pub fn f_{}({params}) -> rt::Result<{}> {{\n",
             f.name,
             tuple(&output_types)
         ));
@@ -1700,7 +1799,15 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
             serial: 0,
             in_function: false,
         };
-        out.push_str("#[derive(Debug)]\n#[allow(non_snake_case)]\npub struct ScriptOutput {\n");
+        out.push_str("#[derive(Debug)]\n");
+        if generator
+            .types
+            .keys()
+            .any(|n| n.chars().any(char::is_uppercase))
+        {
+            out.push_str("#[allow(non_snake_case)]\n");
+        }
+        out.push_str("pub struct ScriptOutput {\n");
         for (n, t) in &generator.types {
             if generator.hidden_loops.contains(n) {
                 continue;
@@ -1715,7 +1822,9 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
                 }
             ));
         }
-        out.push_str("}\n#[allow(non_snake_case, unused_assignments)]\npub fn run_script() -> rt::Result<ScriptOutput> {\n");
+        out.push_str("}\n");
+        out.push_str(&source_allowances(&generator, &counts, None, &[]));
+        out.push_str("pub fn run_script() -> rt::Result<ScriptOutput> {\n");
         out.push_str(&declarations(&generator, &BTreeSet::new()));
         out.push_str(&generator.body(&script, 0)?);
         out.push_str("Ok(ScriptOutput {\n");
@@ -1738,12 +1847,28 @@ pub fn transpile_typed(source: &str, library: bool) -> Result<String, Error> {
     if out.contains("ArrayD<") {
         out.insert_str(0, "use ndarray::ArrayD;\n");
     }
-    crate::format_generated(&out)
+    crate::format_generated(&mark_unread_bindings(&out)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::transpile_typed;
+    #[test]
+    fn simple_functions_need_no_lint_suppression_and_unused_locals_are_named() {
+        let code = transpile_typed(
+            "function y=poly(x); arguments; x(1,1)double; end; y=x^2+1; end",
+            true,
+        )
+        .unwrap();
+        assert!(!code.contains("#[allow"));
+        let code =
+            transpile_typed("function y=f(x); y=1; for i=1:3; y=y+1; end; end", true).unwrap();
+        assert!(code.contains("_v_x:"));
+        assert!(code.contains("let _v_i:"));
+        assert!(!code.contains("unused_variables"));
+        let code = transpile_typed("x=1; if x>0; x=2; end", false).unwrap();
+        assert!(!code.contains("else"));
+    }
     #[test]
     fn scalar_locals_are_typed_and_only_uncertain_variables_are_optional() {
         let code = transpile_typed("x=2; y=x*x+3; if y>5; z=4; end; disp(z);", false).unwrap();
