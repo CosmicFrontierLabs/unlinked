@@ -276,3 +276,53 @@ fn arbitrary_malformed_input_does_not_panic() {
     assert_eq!(eval_expr(&long_chain, &BTreeMap::new()).unwrap(), 500.0);
     assert!(transpile(&format!("x={long_chain};")).is_ok());
 }
+
+#[test]
+fn empty_for_range_rejects_array_semantics_instead_of_preserving_scalar() {
+    // Octave assigns [] to i here. The scalar subset cannot represent that value.
+    let source = "i=7;\nfor i=1:0\nend\ndisp(i);\n";
+    if Command::new("octave").arg("--version").output().is_ok() {
+        let reference = Command::new("octave")
+            .args([
+                "--no-gui",
+                "--quiet",
+                "--eval",
+                "i=7; for i=1:0; end; assert(isempty(i));",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            reference.status.success(),
+            "{}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
+    } else {
+        eprintln!("Octave unavailable; empty-loop reference check skipped");
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "unlinked-matlab-empty-range-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("fixture.rs"), transpile(source).unwrap()).unwrap();
+    let executable = dir.join("fixture");
+    let result = Command::new("rustc")
+        .arg(dir.join("fixture.rs"))
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = Command::new(&executable).output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("empty for range requires an array-valued loop variable")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -1,0 +1,19 @@
+[package]
+name = "unlinked-cli"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[[bin]]
+name = "unlinked"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+serde_json = "1"
+unlinked-import = { path = "../unlinked-import" }
+unlinked-model = { path = "../unlinked-model" }
+unlinked-matlab = { path = "../unlinked-matlab" }
+unlinked-sim = { path = "../unlinked-sim" }

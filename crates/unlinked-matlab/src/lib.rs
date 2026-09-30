@@ -677,6 +677,7 @@ fn matlab_range(start: f64, step: f64, stop: f64) -> impl Iterator<Item = f64> {
         assert!(count <= 1_000_000.0, "range exceeds subset limit of 1000000 iterations");
         count as usize
     };
+    assert!(count != 0, "empty for range requires an array-valued loop variable; unsupported scalar subset");
     (0..count).map(move |i| start + i as f64 * step)
 }
 "#;

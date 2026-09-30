@@ -1,0 +1,41 @@
+Model {
+ Name "scalar"
+ Version 7.4
+ System {
+  Block {
+   BlockType Constant
+   Name "input"
+   SID "1"
+   Position [20, 20, 50, 50]
+   Ports [0, 1]
+   Value "2"
+  }
+  Block {
+   BlockType Gain
+   Name "gain"
+   SID "2"
+   Position [90, 20, 120, 50]
+   Ports [1, 1]
+   Gain "3"
+  }
+  Block {
+   BlockType Scope
+   Name "output"
+   SID "3"
+   Position [160, 20, 190, 50]
+   Ports [1, 0]
+  }
+  Line {
+   SrcBlock "input"
+   SrcPort 1
+   DstBlock "gain"
+   DstPort 1
+  }
+  Line {
+   SrcBlock "gain"
+   SrcPort 1
+   DstBlock "output"
+   DstPort 1
+  }
+ }
+}
