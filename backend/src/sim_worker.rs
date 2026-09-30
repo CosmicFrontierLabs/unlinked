@@ -103,6 +103,7 @@ pub fn start(
     bytes: Vec<u8>,
     mut options: Options,
     workspace: std::collections::BTreeMap<String, String>,
+    init_script: Option<String>,
     complete: impl FnOnce(&Result<Trace, Failure>, &Options) -> Result<(), String> + Send + 'static,
 ) -> Result<Worker, String> {
     if bytes.len() > 16 * 1024 * 1024 {
@@ -127,6 +128,13 @@ pub fn start(
             || -> Result<Trace, Failure> {
                 let mut model =
                     unlinked_import::import(&filename, &bytes).map_err(|e| e.to_string())?;
+                if let Some(source) = init_script {
+                    let values = unlinked_matlab::eval_script(&source, &Default::default())
+                        .map_err(|e| e.to_string())?;
+                    for (name, value) in values {
+                        model.workspace.insert(name, parameter_literal(&value)?);
+                    }
+                }
                 model.workspace.extend(workspace);
                 let graph = unlinked_sim::compile(&model, &options).map_err(|e| e.to_string())?;
                 options.max_internal_steps = options
@@ -207,6 +215,29 @@ pub fn start(
     Ok(Worker { events: rx, cancel })
 }
 
+fn parameter_literal(value: &unlinked_matlab::array_runtime::Value) -> Result<String, String> {
+    value.validate()?;
+    if value.kind == unlinked_matlab::array_runtime::ValueKind::Character
+        || value.data.is_empty()
+        || value.data.iter().any(|x| !x.is_finite())
+    {
+        return Err("init workspace requires nonempty finite numeric values".into());
+    }
+    let rows = (0..value.rows)
+        .map(|r| {
+            (0..value.cols)
+                .map(|c| value.data[r + c * value.rows].to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect::<Vec<_>>();
+    Ok(if value.data.len() == 1 {
+        value.data[0].to_string()
+    } else {
+        format!("[{}]", rows.join(";"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +255,7 @@ mod tests {
                 ..Default::default()
             },
             Default::default(),
+            None,
             move |result, _options| {
                 assert!(result.is_ok());
                 flag.store(true, Ordering::SeqCst);
@@ -270,6 +302,7 @@ mod cancellation_tests {
                 ..Default::default()
             },
             Default::default(),
+            None,
             move |result, _options| {
                 assert!(result.is_err());
                 flag.store(true, Ordering::SeqCst);

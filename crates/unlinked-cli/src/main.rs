@@ -71,6 +71,9 @@ enum Action {
         /// Add a workspace expression (repeatable); never execute a MATLAB script.
         #[arg(long = "var", value_name = "NAME=EXPR")]
         variables: Vec<String>,
+        /// Bind a root Inport by stable block ID to a constant scalar/array expression.
+        #[arg(long = "input-value", value_name = "BLOCK_ID=EXPR")]
+        inputs: Vec<String>,
         /// JSON or CSV; defaults to CSV for .csv output paths, otherwise JSON.
         #[arg(long, value_enum)]
         format: Option<TraceFormat>,
@@ -306,6 +309,7 @@ fn run(args: Args) -> Result<()> {
             atol,
             max_internal_steps,
             variables,
+            inputs,
             format,
             output,
         } => {
@@ -325,8 +329,26 @@ fn run(args: Args) -> Result<()> {
                 "Simulating {}: {:?}, start={start}, stop={stop}, step={step}; these explicit settings override imported solver settings",
                 model.name, options.solver
             );
-            let trace =
-                unlinked_sim::simulate_model(&model, &options).context("simulation failed")?;
+            let mut input_expressions = std::collections::BTreeMap::new();
+            for binding in inputs {
+                let (id, expression) = binding
+                    .split_once('=')
+                    .context("input value must have form BLOCK_ID=EXPR")?;
+                let id = id.trim();
+                if id.is_empty() || id.len() > 1024 || expression.trim().is_empty() {
+                    bail!("input value requires a nonempty block ID and expression");
+                }
+                if input_expressions
+                    .insert(unlinked_model::BlockId(id.into()), expression.trim().into())
+                    .is_some()
+                {
+                    bail!("duplicate input binding for {id}");
+                }
+            }
+            let input_values = unlinked_sim::evaluate_inputs(&model, &input_expressions)
+                .context("input binding failed")?;
+            let trace = unlinked_sim::simulate_model_with_inputs(&model, &options, &input_values)
+                .context("simulation failed")?;
             let format = format.unwrap_or_else(|| {
                 if output
                     .as_ref()
@@ -342,7 +364,7 @@ fn run(args: Args) -> Result<()> {
                 TraceFormat::Csv => trace_csv(&trace)?,
                 TraceFormat::Json => {
                     let mut json = serde_json::to_vec_pretty(
-                        &serde_json::json!({"model":model.name,"options":options,"imported_config":model.config,"workspace":model.workspace,"trace":trace}),
+                        &serde_json::json!({"model":model.name,"options":options,"imported_config":model.config,"workspace":model.workspace,"inputs":input_expressions,"trace":trace}),
                     )?;
                     json.push(b'\n');
                     json

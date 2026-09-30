@@ -12,7 +12,7 @@ The application follows [single-binary-rust-website](https://github.com/meawoppl
 - Simulation of the supported block subset, including basic sources, arithmetic, integrators, unit delays, switching, logic, and bounded transfer functions. Unsupported blocks and settings produce explicit errors.
 - MATLAB/Octave compilation to standalone Rust or LLVM IR. See [compiler documentation](crates/unlinked-matlab/README.md) for the implemented language subset.
 
-This is an independent implementation with partial compatibility. Rendering a model does not mean it can be simulated. Stateflow, arbitrary toolbox/library behavior, MATLAB callbacks, and general masked or conditional subsystem execution are not implemented. Imported workspace scripts are not executed. Supply parameter values explicitly. Solver settings must be selected explicitly when running from the CLI.
+This is an independent implementation with partial compatibility. Rendering a model does not mean it can be simulated. Stateflow, arbitrary toolbox/library behavior, MATLAB callbacks, and general masked or conditional subsystem execution are not implemented. Model callbacks are not executed. Supply parameter values explicitly or select an authorized, versioned project initialization script; that path uses a bounded interpreter with no file or process access. Solver settings must be selected explicitly when running from the CLI.
 
 The separately licensed [test corpus](https://github.com/meawoppl/unlinked-test-cases) records upstream URLs, pinned revisions, licenses, checksums, and expected results where available. Corpus tests cover import and rendering; analytic and Octave differential tests cover numerical behavior. Passing import/render checks is not a numerical equivalence claim.
 
@@ -48,7 +48,7 @@ cargo run -p unlinked-cli -- transpile example.m --emit llvm-ir -o example.ll
 
 Repeat `--system` for each nested subsystem; each argument is an exact block name, including literal slashes. SVG output uses an opaque dark background. Simulation output supports JSON and CSV; RK45 exposes `--rtol`, `--atol`, and `--max-internal-steps`. Run a subcommand with `--help` for all options.
 
-LLVM emission requires a local `rustc`. It compiles generated Rust without executing it. The web server does not spawn a compiler or execute uploaded scripts. CLI/model browser inputs are bounded at 16 MiB; server file storage has a separately configurable upload limit.
+The `/transpile` browser page generates downloadable Rust locally, without uploading source or running the result. LLVM emission requires a local `rustc`. It compiles generated Rust without executing it. The web server does not spawn a compiler. Selected initialization scripts run only through the bounded MATLAB interpreter; uploaded files and model callbacks never execute automatically. CLI/model browser inputs are bounded at 16 MiB; server file storage has a separately configurable upload limit.
 
 ## Authentication and deployment
 
@@ -79,7 +79,7 @@ Shared DTOs live in `shared`; database models remain backend-only. Project file 
 - `GET /api/simulations/:run_id`: read an authorized result.
 - `/ws/simulations`: stream `SimulationStarted`, sample-major `SimulationSamples`, and terminal `SimulationStatus` messages. Supports cancellation and checks session validity before each new run.
 
-See [shared/src/simulation.rs](shared/src/simulation.rs) for request and stream types. Run records preserve the chosen settings and workspace overrides. Disconnecting a streaming client cancels its worker. A background task marks expired abandoned records failed. Each user is limited to 50 accepted runs per day; older results are pruned to retain approximately the latest 20 runs (plus any active jobs). Jobs, queues, output volume, input size, and solver work have explicit bounds.
+See [shared/src/simulation.rs](shared/src/simulation.rs) for request and stream types. Run records preserve the chosen settings and workspace overrides. The optional `init_script: {file_id, version}` selects a `.m` file in the same project; submission pins its immutable version. Explicit workspace overrides take precedence over the script. Script syntax, memory, statement count and expression work are bounded; IO, external functions, and arbitrary callbacks are rejected. Disconnecting a streaming client cancels its worker. A background task marks expired abandoned records failed. Each user is limited to 50 accepted runs per day; older results are pruned to retain approximately the latest 20 runs (plus any active jobs). Jobs, queues, output volume, input size, and solver work have explicit bounds.
 
 Core crates separate model IR, import, rendering, MATLAB semantics, simulation, and CLI. Keep the computational crates WASM-compatible; native process invocation belongs in the CLI. Add migrations as `YYYY-MM-DD-HHMMSS_description` directories and run the naming check.
 

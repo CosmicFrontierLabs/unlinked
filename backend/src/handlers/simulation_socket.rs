@@ -239,6 +239,7 @@ mod tests {
                 },
                 workspace: Default::default(),
                 version: None,
+                init_script: None,
             },
         };
         socket

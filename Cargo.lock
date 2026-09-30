@@ -250,6 +250,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unlinked-import",
+ "unlinked-matlab",
  "unlinked-sim",
  "url",
  "uuid",

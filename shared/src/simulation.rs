@@ -6,6 +6,13 @@ use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SimulationInitScript {
+    pub file_id: Uuid,
+    #[serde(default)]
+    pub version: Option<i32>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimulationRequest {
     pub options: SimulationOptions,
     #[serde(default)]
@@ -13,6 +20,8 @@ pub struct SimulationRequest {
     /// Omit to select the latest immutable version at submission time.
     #[serde(default)]
     pub version: Option<i32>,
+    #[serde(default)]
+    pub init_script: Option<SimulationInitScript>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +81,7 @@ mod tests {
                 options: Default::default(),
                 workspace: Default::default(),
                 version: None,
+                init_script: None,
             },
         };
         let decoded: SimulationClientMsg =
@@ -84,6 +94,7 @@ mod tests {
             options: SimulationOptions::default(),
             workspace: BTreeMap::from([("gain".into(), "2*pi".into())]),
             version: Some(3),
+            init_script: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         let back: SimulationRequest = serde_json::from_str(&json).unwrap();

@@ -183,9 +183,9 @@ pub async fn begin(
     let opts = request.options.clone();
     let workspace = request.workspace.clone();
     let actor = user.id;
-    let (record,path,bytes)=state.db(move |conn| {
+    let (record,path,bytes,init_script)=state.db(move |conn| {
   conn.transaction::<_,ApiError,_>(|conn| {
-   let file=authorize_file(conn,user,file_id)?;
+   let file=authorize_file(conn,user.clone(),file_id)?;
    // Serialize quota and retention per user, including across backend processes.
    diesel::sql_query("SELECT id FROM users WHERE id=$1 FOR UPDATE").bind::<SqlUuid,_>(actor).get_result::<IdRow>(conn)?;
    #[derive(QueryableByName)]
@@ -199,11 +199,24 @@ pub async fn begin(
    let (version_id,version,bytes)=query.order(file_versions::version.desc()).select((file_versions::id,file_versions::version,file_versions::content)).first::<(Uuid,i32,Vec<u8>)>(conn)?;
    if bytes.len() > 16 * 1024 * 1024 {return Err(ApiError::BadRequest("model exceeds 16 MiB simulation limit".into()));}
    request.version=Some(version);
+   let init_script=if let Some(script)=request.init_script.as_mut() {
+       let init=authorize_file(conn,user,script.file_id)?;
+       if init.project_id != file.project_id {return Err(ApiError::NotFound);}
+       if !init.path.to_ascii_lowercase().ends_with(".m") {return Err(ApiError::BadRequest("init script must be a .m file".into()));}
+       if script.version.is_some_and(|v|v<1) {return Err(ApiError::BadRequest("init script version must be positive".into()));}
+       let mut query=file_versions::table.filter(file_versions::file_id.eq(init.id)).into_boxed();
+       if let Some(v)=script.version {query=query.filter(file_versions::version.eq(v));}
+       let (version,content)=query.order(file_versions::version.desc()).select((file_versions::version,file_versions::content)).first::<(i32,Vec<u8>)>(conn)?;
+       if content.len()>65_536 {return Err(ApiError::BadRequest("init script exceeds 64 KiB".into()));}
+       script.version=Some(version);
+       Some(String::from_utf8(content).map_err(|_|ApiError::BadRequest("init script must be UTF-8".into()))?)
+   } else {None};
+
    let json=serde_json::to_string(&request).map_err(|e|ApiError::BadRequest(e.to_string()))?;
    let id=Uuid::new_v4();
    diesel::sql_query("INSERT INTO simulation_runs (id,file_version_id,requested_by,status,request) VALUES ($1,$2,$3,'running',$4::jsonb)").bind::<SqlUuid,_>(id).bind::<SqlUuid,_>(version_id).bind::<SqlUuid,_>(actor).bind::<Text,_>(json).execute(conn)?;
    crate::audit::record(conn,actor,None,Some(file.project_id),"simulation.started",serde_json::json!({"run_id":id,"file_version_id":version_id}))?;
-   Ok((load(conn,id,false)?.run,file.path,bytes))
+   Ok((load(conn,id,false)?.run,file.path,bytes,init_script))
   })
  }).await?;
     let run_id = record.id;
@@ -214,6 +227,7 @@ pub async fn begin(
         bytes,
         opts,
         workspace,
+        init_script,
         move |result, effective_options| {
             let mut conn = pool.get().map_err(|e| e.to_string())?;
             let options = serde_json::to_string(effective_options).map_err(|e| e.to_string())?;
@@ -306,8 +320,8 @@ async fn list(
 ) -> ApiResult<Json<Vec<SimulationRun>>> {
     let runs=state.db(move |conn| {
   authorize_file(conn,user,id)?;
-  let ids=diesel::sql_query("SELECT r.id FROM simulation_runs r JOIN file_versions v ON v.id=r.file_version_id WHERE v.file_id=$1 ORDER BY r.created_at DESC LIMIT 100").bind::<SqlUuid,_>(id).load::<IdRow>(conn)?;
-  ids.into_iter().map(|row|load(conn,row.id,false).map(|r|r.run)).collect::<ApiResult<Vec<_>>>()
+  let query=format!("{SELECT_RUN}, NULL::text AS trace_json FROM simulation_runs r JOIN file_versions v ON v.id=r.file_version_id WHERE v.file_id=$1 ORDER BY r.created_at DESC LIMIT 100");
+  diesel::sql_query(query).bind::<SqlUuid,_>(id).load::<RunRow>(conn)?.into_iter().map(|row|row.result().map(|r|r.run)).collect::<ApiResult<Vec<_>>>()
  }).await?;
     Ok(Json(runs))
 }
@@ -368,6 +382,7 @@ mod tests {
             },
             workspace: Default::default(),
             version: None,
+            init_script: None,
         };
         let denied = outside.json(Method::POST, &route, &request).await;
         assert_eq!(denied.status, StatusCode::NOT_FOUND);
@@ -416,6 +431,59 @@ mod tests {
         assert_eq!(failed.run.status, SimulationStatus::Failed);
         assert!(failed.trace.is_none());
         assert!(failed.run.error.unwrap().contains("unsupported block type"));
+        let parameter_model = String::from_utf8(
+            include_bytes!("../../../crates/unlinked-cli/tests/fixtures/scalar.mdl").to_vec(),
+        )
+        .unwrap()
+        .replace("Gain \"3\"", "Gain \"K\"");
+        let parameter_file: shared::FileInfo = own
+            .upload(project.id, "parameter.mdl", parameter_model.into_bytes())
+            .await
+            .json();
+        let script: shared::FileInfo = own
+            .upload(
+                project.id,
+                "init.m",
+                b"K = 1; for i=1:4; K = K+1; end".to_vec(),
+            )
+            .await
+            .json();
+        let mut initialized = request.clone();
+        initialized.init_script = Some(shared::SimulationInitScript {
+            file_id: script.id,
+            version: None,
+        });
+        let parameter_route = format!("/api/files/{}/simulations", parameter_file.id);
+        let initial: SimulationResult = view
+            .json(Method::POST, &parameter_route, &initialized)
+            .await
+            .json();
+        assert_eq!(initial.run.status, SimulationStatus::Completed);
+        assert_eq!(
+            initial.run.request.init_script.as_ref().unwrap().version,
+            Some(1)
+        );
+        assert_eq!(initial.trace.unwrap().signals["2"], vec![10.0; 3]);
+        own.upload(project.id, "init.m", b"K = 8;".to_vec()).await;
+        initialized.init_script.as_mut().unwrap().version = Some(1);
+        let pinned: SimulationResult = view
+            .json(Method::POST, &parameter_route, &initialized)
+            .await
+            .json();
+        assert_eq!(pinned.trace.unwrap().signals["2"], vec![10.0; 3]);
+        initialized.workspace.insert("K".into(), "6".into());
+        let overridden: SimulationResult = view
+            .json(Method::POST, &parameter_route, &initialized)
+            .await
+            .json();
+        assert_eq!(overridden.trace.unwrap().signals["2"], vec![12.0; 3]);
+        initialized.init_script.as_mut().unwrap().file_id = Uuid::new_v4();
+        assert_eq!(
+            view.json(Method::POST, &parameter_route, &initialized)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
         let removed = own
             .delete(&format!(
                 "/api/projects/{}/members/{}",
@@ -462,6 +530,7 @@ mod tests {
             options: Default::default(),
             workspace: Default::default(),
             version: None,
+            init_script: None,
         };
         request.options.step = 0.0;
         assert!(validate(&request).is_err());
