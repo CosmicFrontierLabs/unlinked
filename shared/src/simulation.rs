@@ -17,6 +17,9 @@ pub struct SimulationRequest {
     pub options: SimulationOptions,
     #[serde(default)]
     pub workspace: BTreeMap<String, String>,
+    /// Constant root Inport expressions, keyed by original block ID.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
     /// Omit to select the latest immutable version at submission time.
     #[serde(default)]
     pub version: Option<i32>,
@@ -80,6 +83,7 @@ mod tests {
             request: SimulationRequest {
                 options: Default::default(),
                 workspace: Default::default(),
+                inputs: Default::default(),
                 version: None,
                 init_script: None,
             },
@@ -102,18 +106,21 @@ mod tests {
         let legacy: SimulationRequest =
             serde_json::from_str(r#"{"options":{},"workspace":{},"version":1}"#).unwrap();
         assert!(legacy.init_script.is_none());
+        assert!(legacy.inputs.is_empty());
     }
     #[test]
     fn request_and_trace_roundtrip() {
         let request = SimulationRequest {
             options: SimulationOptions::default(),
             workspace: BTreeMap::from([("gain".into(), "2*pi".into())]),
+            inputs: BTreeMap::from([("9".into(), "gain/2".into())]),
             version: Some(3),
             init_script: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         let back: SimulationRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.workspace["gain"], "2*pi");
+        assert_eq!(back.inputs["9"], "gain/2");
         assert_eq!(back.version, Some(3));
         assert_eq!(back.options.solver, Solver::Rk4);
         let trace = SimulationTrace {

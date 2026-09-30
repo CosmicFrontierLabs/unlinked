@@ -238,6 +238,7 @@ mod tests {
                     ..Default::default()
                 },
                 workspace: Default::default(),
+                inputs: Default::default(),
                 version: None,
                 init_script: None,
             },
