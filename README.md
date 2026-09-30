@@ -485,18 +485,18 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: skeleton
-      POSTGRES_USER: skeleton
+      POSTGRES_DB: unlinked
+      POSTGRES_USER: unlinked
       POSTGRES_PASSWORD: dev_password
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U skeleton"]
+      test: ["CMD-SHELL", "pg_isready -U unlinked"]
 
   backend:
     build: .
     depends_on:
       db: { condition: service_healthy }
     environment:
-      DATABASE_URL: "postgresql://skeleton:dev_password@db:5432/skeleton"
+      DATABASE_URL: "postgresql://unlinked:dev_password@db:5432/unlinked"
       SESSION_SECRET: "${SESSION_SECRET:-dev-secret-change-in-production}"
 ```
 

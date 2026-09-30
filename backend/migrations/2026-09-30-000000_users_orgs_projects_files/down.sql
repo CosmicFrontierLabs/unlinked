@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS audit_log;
+DROP TABLE IF EXISTS file_versions;
+DROP TABLE IF EXISTS files;
+DROP TABLE IF EXISTS project_members;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS org_members;
+DROP TABLE IF EXISTS organizations;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS user_identities;
+DROP TABLE IF EXISTS users;
