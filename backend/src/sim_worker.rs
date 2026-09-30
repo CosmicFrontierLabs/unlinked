@@ -129,8 +129,29 @@ pub fn start(
                 let mut model =
                     unlinked_import::import(&filename, &bytes).map_err(|e| e.to_string())?;
                 if let Some(source) = init_script {
-                    let values = unlinked_matlab::eval_script(&source, &Default::default())
-                        .map_err(|e| e.to_string())?;
+                    let script_cancel = cancelled.clone();
+                    let mut budget =
+                        unlinked_matlab::ArrayBudget::default().with_cancellation(move || {
+                            script_cancel.load(Ordering::Relaxed)
+                                || began.elapsed() > std::time::Duration::from_secs(30)
+                        });
+                    let values = unlinked_matlab::eval_script_with_budget(
+                        &source,
+                        &Default::default(),
+                        &mut budget,
+                    )
+                    .map_err(|error| {
+                        if cancelled.load(Ordering::Relaxed) {
+                            Failure {
+                                message: "simulation cancelled".into(),
+                                cancelled: true,
+                            }
+                        } else if began.elapsed() > std::time::Duration::from_secs(30) {
+                            Failure::from("simulation deadline exceeded")
+                        } else {
+                            Failure::from(error.to_string())
+                        }
+                    })?;
                     for (name, value) in values {
                         model.workspace.insert(name, parameter_literal(&value)?);
                     }
@@ -302,9 +323,9 @@ mod cancellation_tests {
                 ..Default::default()
             },
             Default::default(),
-            None,
+            Some("while true; x=1; end".into()),
             move |result, _options| {
-                assert!(result.is_err());
+                assert!(result.as_ref().unwrap_err().cancelled);
                 flag.store(true, Ordering::SeqCst);
                 Ok(())
             },
