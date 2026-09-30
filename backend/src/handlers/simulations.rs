@@ -39,6 +39,8 @@ struct RunRow {
     #[diesel(sql_type=Nullable<Text>)]
     trace_json: Option<String>,
     #[diesel(sql_type=Nullable<Text>)]
+    signals_json: Option<String>,
+    #[diesel(sql_type=Nullable<Text>)]
     error: Option<String>,
     #[diesel(sql_type=Timestamptz)]
     created_at: chrono::DateTime<chrono::Utc>,
@@ -65,6 +67,12 @@ impl RunRow {
             .map(|s| serde_json::from_str(&s))
             .transpose()
             .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let signals = self
+            .signals_json
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .unwrap_or_default();
         Ok(SimulationResult {
             run: SimulationRun {
                 id: self.id,
@@ -79,13 +87,19 @@ impl RunRow {
                 finished_at: self.finished_at,
             },
             trace,
+            signals,
         })
     }
 }
 const SELECT_RUN:&str="SELECT r.id, v.file_id, r.file_version_id, v.version AS file_version, r.requested_by, r.status, r.request::text AS request_json, r.error, r.created_at, r.finished_at";
 fn load(conn: &mut PgConnection, id: Uuid, trace: bool) -> ApiResult<SimulationResult> {
     let trace_column = if trace { "r.trace::text" } else { "NULL::text" };
-    let query=format!("{SELECT_RUN}, {trace_column} AS trace_json FROM simulation_runs r JOIN file_versions v ON v.id=r.file_version_id WHERE r.id=$1");
+    let signals_column = if trace {
+        "r.signals::text"
+    } else {
+        "NULL::text"
+    };
+    let query=format!("{SELECT_RUN}, {signals_column} AS signals_json, {trace_column} AS trace_json FROM simulation_runs r JOIN file_versions v ON v.id=r.file_version_id WHERE r.id=$1");
     diesel::sql_query(query)
         .bind::<SqlUuid, _>(id)
         .get_result::<RunRow>(conn)?
@@ -259,12 +273,17 @@ pub async fn begin(
 fn finish(
     conn: &mut PgConnection,
     id: Uuid,
-    result: &Result<unlinked_sim::Trace, sim_worker::Failure>,
+    result: &Result<sim_worker::CompletedSimulation, sim_worker::Failure>,
 ) -> ApiResult<()> {
-    let (status, trace, error) = match result {
-        Ok(trace) => (
+    let (status, trace, signals, error) = match result {
+        Ok(result) => (
             "completed",
-            Some(serde_json::to_string(trace).map_err(|e| ApiError::Internal(e.to_string()))?),
+            Some(
+                serde_json::to_string(&result.trace)
+                    .map_err(|e| ApiError::Internal(e.to_string()))?,
+            ),
+            serde_json::to_string(&result.signals)
+                .map_err(|e| ApiError::Internal(e.to_string()))?,
             None,
         ),
         Err(error) => (
@@ -274,10 +293,11 @@ fn finish(
                 "failed"
             },
             None,
+            "[]".to_string(),
             Some(error.message.clone()),
         ),
     };
-    diesel::sql_query("UPDATE simulation_runs SET status=$2, trace=$3::jsonb,error=$4,finished_at=NOW() WHERE id=$1 AND status='running'").bind::<SqlUuid,_>(id).bind::<Text,_>(status).bind::<Nullable<Text>,_>(trace).bind::<Nullable<Text>,_>(error).execute(conn)?;
+    diesel::sql_query("UPDATE simulation_runs SET status=$2, trace=$3::jsonb,error=$4,signals=$5::jsonb,finished_at=NOW() WHERE id=$1 AND status='running'").bind::<SqlUuid,_>(id).bind::<Text,_>(status).bind::<Nullable<Text>,_>(trace).bind::<Nullable<Text>,_>(error).bind::<Text,_>(signals).execute(conn)?;
     Ok(())
 }
 
@@ -327,7 +347,7 @@ async fn list(
 ) -> ApiResult<Json<Vec<SimulationRun>>> {
     let runs=state.db(move |conn| {
   authorize_file(conn,user,id)?;
-  let query=format!("{SELECT_RUN}, NULL::text AS trace_json FROM simulation_runs r JOIN file_versions v ON v.id=r.file_version_id WHERE v.file_id=$1 ORDER BY r.created_at DESC LIMIT 100");
+  let query=format!("{SELECT_RUN}, NULL::text AS signals_json, NULL::text AS trace_json FROM simulation_runs r JOIN file_versions v ON v.id=r.file_version_id WHERE v.file_id=$1 ORDER BY r.created_at DESC LIMIT 100");
   diesel::sql_query(query).bind::<SqlUuid,_>(id).load::<RunRow>(conn)?.into_iter().map(|row|row.result().map(|r|r.run)).collect::<ApiResult<Vec<_>>>()
  }).await?;
     Ok(Json(runs))
@@ -410,6 +430,11 @@ mod tests {
         assert_eq!(finished.run.file_version, 1);
         assert_eq!(finished.run.file_version_id, uploaded.latest.id);
         assert_eq!(finished.trace.as_ref().unwrap().signals["2"], vec![6.0; 3]);
+        assert_eq!(finished.signals.len(), 3);
+        assert!(finished
+            .signals
+            .iter()
+            .any(|s| s.id == "2" && s.name.ends_with("gain:1")));
         let result_route = format!("/api/simulations/{}", finished.run.id);
         assert_eq!(
             outside.get(&result_route).await.status,
@@ -443,18 +468,25 @@ mod tests {
             view.json(Method::POST, &input_route, &request).await.json();
         assert_eq!(unbound.run.status, SimulationStatus::Failed);
         assert!(unbound.trace.is_none());
+        assert!(unbound.signals.is_empty());
         let changed = String::from_utf8(source)
             .unwrap()
             .replace("Gain \"3\"", "Gain \"4\"")
+            .replace("\"gain\"", "\"renamed gain\"")
             .into_bytes();
         let updated: shared::FileInfo = own.upload(project.id, "scalar.mdl", changed).await.json();
         assert_eq!(updated.latest.version, 2);
         let stored: SimulationResult = view.get(&result_route).await.json();
         assert_eq!(stored.run.file_version, 1);
+        assert_eq!(stored.signals, finished.signals);
         assert_eq!(stored.trace.unwrap().signals["2"], vec![6.0; 3]);
         let latest: SimulationResult = view.json(Method::POST, &route, &request).await.json();
         assert_eq!(latest.run.file_version, 2);
         assert_eq!(latest.trace.unwrap().signals["2"], vec![8.0; 3]);
+        assert!(latest
+            .signals
+            .iter()
+            .any(|s| s.id == "2" && s.name.ends_with("renamed gain:1")));
         let broken =
             include_bytes!("../../../crates/unlinked-cli/tests/fixtures/scalar.mdl").to_vec();
         let broken = String::from_utf8(broken)

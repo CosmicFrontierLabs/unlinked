@@ -87,6 +87,21 @@ diesel::table! {
 }
 
 diesel::table! {
+    simulation_runs (id) {
+        id -> Uuid,
+        file_version_id -> Uuid,
+        requested_by -> Nullable<Uuid>,
+        status -> Text,
+        request -> Jsonb,
+        trace -> Nullable<Jsonb>,
+        error -> Nullable<Text>,
+        created_at -> Timestamptz,
+        finished_at -> Nullable<Timestamptz>,
+        signals -> Jsonb,
+    }
+}
+
+diesel::table! {
     user_identities (id) {
         id -> Uuid,
         user_id -> Uuid,
@@ -122,6 +137,8 @@ diesel::joinable!(project_members -> users (user_id));
 diesel::joinable!(projects -> organizations (org_id));
 diesel::joinable!(projects -> users (created_by));
 diesel::joinable!(sessions -> users (user_id));
+diesel::joinable!(simulation_runs -> file_versions (file_version_id));
+diesel::joinable!(simulation_runs -> users (requested_by));
 diesel::joinable!(user_identities -> users (user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
@@ -133,6 +150,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     project_members,
     projects,
     sessions,
+    simulation_runs,
     user_identities,
     users,
 );

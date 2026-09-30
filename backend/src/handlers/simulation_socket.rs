@@ -9,10 +9,7 @@ use axum::{
     extract::{ws::WebSocketUpgrade, State},
     response::Response,
 };
-use shared::{
-    SimulationClientMsg as Client, SimulationServerMsg as Server, SimulationSignal,
-    SimulationSocket,
-};
+use shared::{SimulationClientMsg as Client, SimulationServerMsg as Server, SimulationSocket};
 use std::sync::Arc;
 use tower_cookies::Cookies;
 
@@ -53,7 +50,6 @@ pub async fn handler(
                      event=running.worker.events.recv()=>{
                       match event {
                        Some(Event::Started{signals})=>{
-                        let signals=signals.into_iter().map(|(id,name)|SimulationSignal{id,name}).collect();
                         if !send(&mut conn,Server::SimulationStarted{run_id,signals}).await{return;}
                        },
                        Some(Event::Samples{time,values})=>{if !send(&mut conn,Server::SimulationSamples{run_id,time,values}).await{return;}},

@@ -47,7 +47,7 @@ pub struct SimulationRun {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulationSignal {
     pub id: String,
     pub name: String,
@@ -57,6 +57,8 @@ pub struct SimulationSignal {
 pub struct SimulationResult {
     pub run: SimulationRun,
     pub trace: Option<SimulationTrace>,
+    /// Ordered signal metadata captured from the compiled graph used for this run.
+    pub signals: Vec<SimulationSignal>,
 }
 
 #[cfg(test)]
