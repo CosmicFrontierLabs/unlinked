@@ -63,7 +63,12 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         }
     }
     let mut graph = Graph::default();
+    let mut reserved = model.root.blocks.iter().map(|b| b.id.0.clone()).collect();
+    let mut input_alias = BTreeMap::new();
     for block in &model.root.blocks {
+        if graph.nodes.len() >= 100_000 {
+            return Err(Error::Options("lowered graph budget exceeded".into()));
+        }
         let id = &block.id.0;
         if block.subsystem.is_some() || block.mask.is_some() || block.library_source.is_some() {
             return Err(block_error(
@@ -120,6 +125,17 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             }
         }
         let kind = match block.block_type.as_str() {
+            "TransferFcn" => {
+                let input = super::transfer::lower(
+                    block,
+                    &ws,
+                    &mut graph,
+                    &mut reserved,
+                    &format!("{}/{}", model.name, block.name),
+                )?;
+                input_alias.insert(id.clone(), input);
+                continue;
+            }
             "Constant" => Kind::Constant {
                 value: p("Value", "1")?,
             },
@@ -282,7 +298,10 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         }
         graph.wires.push(Wire {
             source: connection.src.block.0,
-            target: connection.dst.block.0,
+            target: input_alias
+                .get(&connection.dst.block.0)
+                .cloned()
+                .unwrap_or(connection.dst.block.0),
             input: (connection.dst.port.index - 1) as usize,
         });
     }

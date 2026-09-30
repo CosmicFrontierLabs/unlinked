@@ -31,6 +31,15 @@ requested stop time. Step discontinuities must align with the sampling grid.
 The solver uses the left limit at a transition when integrating the preceding
 interval. Time is in seconds, sine frequency is radians/second.
 
+Proper scalar TransferFcn blocks of order zero, one, or two lower to
+zero-initial-condition controllable state equations, with direct feedthrough
+only when the normalized leading numerator is nonzero. Both numerator and
+denominator accept literal coefficient rows and scalar workspace expressions;
+use commas when an expression contains whitespace. Matrix numerators, array
+workspace variables, higher orders, nonzero initial conditions, and per-block
+absolute tolerances reject. Generated internal states appear in the graph and
+trace with named paths; the original block ID remains its output signal.
+
 Options explicitly override imported solver configuration. This is a supported
 subset, not a claim of general Simulink numerical equivalence. It rejects
 algebraic loops, missing/multiple drivers, non-finite signals, unknown block

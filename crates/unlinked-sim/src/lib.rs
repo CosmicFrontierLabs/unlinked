@@ -637,4 +637,5 @@ pub fn simulate_with_observer(
 mod adaptive;
 mod flatten;
 mod import;
+mod transfer;
 pub use import::{compile, simulate_model, simulate_model_with_observer};

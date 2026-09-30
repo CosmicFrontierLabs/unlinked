@@ -71,7 +71,7 @@ fn evaluates_workspace_dependencies_and_imported_parameters() {
 #[test]
 fn rejects_unsupported_semantics_and_unknown_parameters() {
     let mut m = model();
-    m.root.blocks[1].block_type = "TransferFcn".into();
+    m.root.blocks[1].block_type = "UnsupportedTransfer".into();
     assert!(compile(&m, &Options::default())
         .unwrap_err()
         .to_string()
