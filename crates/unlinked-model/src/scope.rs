@@ -68,12 +68,20 @@ impl SpecValue {
 
     /// Value of `key` in a call's trailing `'Key', value` pairs.
     fn arg(&self, key: &str) -> Option<&SpecValue> {
-        let SpecValue::Call { args, .. } = self else {
+        let SpecValue::Call { name, args } = self else {
             return None;
         };
-        args.windows(2)
-            .find(|w| w[0].as_str() == Some(key))
-            .map(|w| &w[1])
+        let prefix = match name.as_str() {
+            "extmgr.Configuration" => 3,
+            "struct" | "Simulink.scopes.TimeScopeBlockCfg" => 0,
+            _ => return None,
+        };
+        args.get(prefix..)?
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .find(|pair| pair[0].as_str() == Some(key))
+            .map(|pair| &pair[1])
     }
 
     /// Every call named `name` at any depth, in order.
@@ -331,7 +339,9 @@ pub struct ScopeConfig {
     /// Configuration class, e.g. `Simulink.scopes.TimeScopeBlockCfg`, or
     /// `None` for the legacy parameter format.
     pub kind: Option<String>,
-    /// Workspace variable the scope logs to, when logging is on.
+    /// Whether logging is explicitly enabled; absent flags remain unknown.
+    pub logging_enabled: Option<bool>,
+    /// Configured workspace variable, even when logging is disabled or unknown.
     pub logging_variable: Option<String>,
     /// Visible time span in seconds (`auto` is `None`).
     pub time_span: Option<f64>,
@@ -399,6 +409,9 @@ impl ScopeConfig {
         };
         ScopeConfig {
             kind: Some(name.clone()),
+            logging_enabled: section("Sources", "WiredSimulink")
+                .and_then(|s| s.arg("DataLogging"))
+                .and_then(SpecValue::as_bool),
             logging_variable: section("Sources", "WiredSimulink")
                 .and_then(|s| s.arg("DataLoggingVariableName"))
                 .and_then(SpecValue::as_str)
@@ -421,7 +434,14 @@ impl ScopeConfig {
             return None;
         }
         if let Some(spec) = block.param("ScopeSpecificationString") {
-            return Some(parse_spec(spec).map(|s| ScopeConfig::from_spec(&s)));
+            return Some(parse_spec(spec).and_then(|s| {
+                match &s {
+                    SpecValue::Call { name, .. } if name == "Simulink.scopes.TimeScopeBlockCfg" => {
+                        Ok(ScopeConfig::from_spec(&s))
+                    }
+                    _ => Err("unsupported scope specification root; expected Simulink.scopes.TimeScopeBlockCfg".into()),
+                }
+            }));
         }
         // Legacy parameters.
         let num = |k: &str| block.param(k).and_then(|v| v.trim().parse().ok());
@@ -434,9 +454,12 @@ impl ScopeConfig {
             }],
         };
         Some(Ok(ScopeConfig {
-            logging_variable: (block.param("SaveToWorkspace") == Some("on"))
-                .then(|| block.param("SaveName").map(str::to_string))
-                .flatten(),
+            logging_enabled: block.param("SaveToWorkspace").and_then(|v| match v {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            }),
+            logging_variable: block.param("SaveName").map(str::to_string),
             time_span: num("TimeRange"),
             displays,
             ..Default::default()
@@ -475,6 +498,94 @@ mod tests {
         assert_eq!((d.x_grid, d.y_grid), (Some(true), Some(true)));
         assert_eq!(d.title.as_deref(), Some("%<SignalLabel>"));
         assert_eq!(d.line_names, vec!["Integrator1".to_string()]);
+    }
+
+    fn scope_block(spec: &str) -> Block {
+        Block {
+            id: "scope".into(),
+            block_type: "Scope".into(),
+            name: "Scope".into(),
+            position: Default::default(),
+            orientation: crate::Orientation::Right,
+            mirrored: false,
+            ports: Default::default(),
+            parameters: [("ScopeSpecificationString".into(), spec.into())]
+                .into_iter()
+                .collect(),
+            mask: None,
+            library_source: None,
+            subsystem: None,
+            style: Default::default(),
+        }
+    }
+
+    #[test]
+    fn property_values_are_not_keys() {
+        let d = display(
+            &parse_spec("struct('Title','MinYLimReal','YLabelReal','3','MinYLimReal','-2')")
+                .unwrap(),
+        );
+        assert_eq!(d.title.as_deref(), Some("MinYLimReal"));
+        assert_eq!(d.y_min, Some(-2.0));
+        let spec = parse_spec("extmgr.Configuration('Sources','DataLogging',true,'Title','DataLogging','DataLogging',false)").unwrap();
+        assert_eq!(
+            spec.arg("DataLogging").and_then(SpecValue::as_bool),
+            Some(false)
+        );
+        let spec =
+            parse_spec("Simulink.scopes.TimeScopeBlockCfg('Title','Version','Version','2020b')")
+                .unwrap();
+        assert_eq!(
+            spec.arg("Version").and_then(SpecValue::as_str),
+            Some("2020b")
+        );
+    }
+
+    #[test]
+    fn unsupported_root_is_reported_but_generic_parser_stays_generic() {
+        for text in ["true", "42", "'hello'", "struct()", "arbitrary()"] {
+            assert!(parse_spec(text).is_ok());
+            assert!(ScopeConfig::from_block(&scope_block(text))
+                .unwrap()
+                .is_err());
+        }
+        assert!(ScopeConfig::from_block(&scope_block(SPEC)).unwrap().is_ok());
+    }
+
+    #[test]
+    fn logging_is_not_implied_by_variable_name() {
+        let cfg = ScopeConfig::from_block(&scope_block(SPEC))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.logging_enabled, None);
+        assert_eq!(cfg.logging_variable.as_deref(), Some("ScopeData1"));
+        for (flag, expected) in [
+            ("false", false),
+            ("true", true),
+            ("'off'", false),
+            ("'on'", true),
+        ] {
+            let text = SPEC.replace(
+                "'DataLoggingVariableName'",
+                &format!("'DataLogging',{flag},'DataLoggingVariableName'"),
+            );
+            let cfg = ScopeConfig::from_block(&scope_block(&text))
+                .unwrap()
+                .unwrap();
+            assert_eq!(cfg.logging_enabled, Some(expected));
+            assert_eq!(cfg.logging_variable.as_deref(), Some("ScopeData1"));
+        }
+        let mut block = scope_block(SPEC);
+        block.parameters.clear();
+        block
+            .parameters
+            .insert("SaveToWorkspace".into(), "off".into());
+        block
+            .parameters
+            .insert("SaveName".into(), "ScopeData".into());
+        let cfg = ScopeConfig::from_block(&block).unwrap().unwrap();
+        assert_eq!(cfg.logging_enabled, Some(false));
+        assert_eq!(cfg.logging_variable.as_deref(), Some("ScopeData"));
     }
 
     #[test]

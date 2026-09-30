@@ -793,14 +793,15 @@ fn scope_section(config: Result<ScopeConfig, String>) -> Html {
         <>
             <h4>{ "Scope" }</h4>
             <table class="scope">
-                { row("Logs to", c.logging_variable.clone()) }
+                { row("Configured logging variable", c.logging_variable.clone()) }
+                { row("Saved logging status", Some(on_off(c.logging_enabled).unwrap_or("not specified").to_string())) }
                 { row("Time span", c.time_span.map(|t| format!("{} s", fmt_num(t)))) }
                 { row("Window", window) }
                 { row("Opens with model", on_off(c.open_at_start).map(str::to_string)) }
                 { row("Saved by", c.version.clone().map(|v| format!("Simulink {v}"))) }
             </table>
             if c.displays.is_empty() {
-                <p class="muted">{ "Default display settings." }</p>
+                <p class="muted">{ "No saved display settings found." }</p>
             }
             { for c.displays.iter().enumerate().map(|(i, d)| {
                 let limits = match (d.y_min, d.y_max) {
