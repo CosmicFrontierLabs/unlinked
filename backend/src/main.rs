@@ -247,7 +247,9 @@ async fn main() -> anyhow::Result<()> {
         config,
     });
 
-    let app = build_app(app_state);
+    let app = build_app(app_state.clone());
+
+    handlers::simulations::start_maintenance(app_state.clone());
 
     // Bind and serve
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;

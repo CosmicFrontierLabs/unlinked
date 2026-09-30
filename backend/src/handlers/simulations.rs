@@ -84,12 +84,6 @@ impl RunRow {
 }
 const SELECT_RUN:&str="SELECT r.id, v.file_id, r.file_version_id, v.version AS file_version, r.requested_by, r.status, r.request::text AS request_json, r.error, r.created_at, r.finished_at";
 fn load(conn: &mut PgConnection, id: Uuid, trace: bool) -> ApiResult<SimulationResult> {
-    // Workers have a 30-second compute deadline plus bounded stream/DB waits.
-    // Reconcile abandoned records after a crash without cancelling other live
-    // instances' recently started runs.
-    diesel::sql_query("UPDATE simulation_runs SET status='failed',error='simulation worker expired or server restarted',finished_at=NOW() WHERE id=$1 AND status='running' AND created_at < NOW()-INTERVAL '5 minutes'")
-        .bind::<SqlUuid,_>(id).execute(conn)?;
-
     let trace_column = if trace { "r.trace::text" } else { "NULL::text" };
     let query=format!("{SELECT_RUN}, {trace_column} AS trace_json FROM simulation_runs r JOIN file_versions v ON v.id=r.file_version_id WHERE r.id=$1");
     diesel::sql_query(query)
@@ -117,6 +111,21 @@ fn authorize_run(conn: &mut PgConnection, user: User, id: Uuid) -> ApiResult<()>
     Ok(())
 }
 
+pub fn maintenance(conn: &mut PgConnection) -> ApiResult<()> {
+    diesel::sql_query("UPDATE simulation_runs SET status='failed',error='simulation worker expired or server restarted',finished_at=NOW() WHERE status='running' AND created_at < NOW()-INTERVAL '5 minutes'").execute(conn)?;
+    Ok(())
+}
+pub fn start_maintenance(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(error) = state.db(maintenance).await {
+                tracing::error!(%error, "simulation maintenance failed");
+            }
+        }
+    });
+}
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/files/:file_id/simulations", post(run).get(list))
@@ -168,6 +177,8 @@ pub async fn begin(
     mut request: SimulationRequest,
 ) -> ApiResult<ActiveRun> {
     validate(&request)?;
+    let reservation = sim_worker::reserve(user.id).map_err(ApiError::Conflict)?;
+    request.options.max_internal_steps = request.options.max_internal_steps.min(10_000);
     request.options.max_samples = request.options.max_samples.min(25_001);
     let opts = request.options.clone();
     let workspace = request.workspace.clone();
@@ -175,9 +186,18 @@ pub async fn begin(
     let (record,path,bytes)=state.db(move |conn| {
   conn.transaction::<_,ApiError,_>(|conn| {
    let file=authorize_file(conn,user,file_id)?;
+   // Serialize quota and retention per user, including across backend processes.
+   diesel::sql_query("SELECT id FROM users WHERE id=$1 FOR UPDATE").bind::<SqlUuid,_>(actor).get_result::<IdRow>(conn)?;
+   #[derive(QueryableByName)]
+   struct Count { #[diesel(sql_type=diesel::sql_types::BigInt)] count: i64 }
+   let recent=diesel::sql_query("SELECT COUNT(*) AS count FROM audit_log WHERE actor_id=$1 AND action='simulation.started' AND created_at > NOW()-INTERVAL '24 hours'").bind::<SqlUuid,_>(actor).get_result::<Count>(conn)?.count;
+   if recent >= 50 {return Err(ApiError::Conflict("daily simulation quota reached (50 runs)".into()));}
+   diesel::sql_query("DELETE FROM simulation_runs WHERE requested_by=$1 AND status <> 'running' AND id NOT IN (SELECT id FROM simulation_runs WHERE requested_by=$1 ORDER BY created_at DESC LIMIT 19)").bind::<SqlUuid,_>(actor).execute(conn)?;
+
    let mut query=file_versions::table.filter(file_versions::file_id.eq(file_id)).into_boxed();
    if let Some(version)=request.version {query=query.filter(file_versions::version.eq(version));}
    let (version_id,version,bytes)=query.order(file_versions::version.desc()).select((file_versions::id,file_versions::version,file_versions::content)).first::<(Uuid,i32,Vec<u8>)>(conn)?;
+   if bytes.len() > 16 * 1024 * 1024 {return Err(ApiError::BadRequest("model exceeds 16 MiB simulation limit".into()));}
    request.version=Some(version);
    let json=serde_json::to_string(&request).map_err(|e|ApiError::BadRequest(e.to_string()))?;
    let id=Uuid::new_v4();
@@ -188,10 +208,19 @@ pub async fn begin(
  }).await?;
     let run_id = record.id;
     let pool = state.db_pool.clone();
-    let worker = sim_worker::start(actor, path, bytes, opts, workspace, move |result| {
-        let mut conn = pool.get().map_err(|e| e.to_string())?;
-        finish(&mut conn, run_id, result).map_err(|e| e.to_string())
-    });
+    let worker = sim_worker::start(
+        reservation,
+        path,
+        bytes,
+        opts,
+        workspace,
+        move |result, effective_options| {
+            let mut conn = pool.get().map_err(|e| e.to_string())?;
+            let options = serde_json::to_string(effective_options).map_err(|e| e.to_string())?;
+            diesel::sql_query("UPDATE simulation_runs SET request=jsonb_set(request,'{options}',$2::jsonb) WHERE id=$1").bind::<SqlUuid,_>(run_id).bind::<Text,_>(options).execute(&mut conn).map_err(|e| e.to_string())?;
+            finish(&mut conn, run_id, result).map_err(|e| e.to_string())
+        },
+    );
     match worker {
         Ok(worker) => Ok(ActiveRun {
             run: record,
@@ -200,7 +229,7 @@ pub async fn begin(
         Err(message) => {
             let error = message.clone();
             state
-                .db(move |conn| finish(conn, run_id, &Err(error)))
+                .db(move |conn| finish(conn, run_id, &Err(error.into())))
                 .await?;
             Err(ApiError::Conflict(message))
         }
@@ -209,7 +238,7 @@ pub async fn begin(
 fn finish(
     conn: &mut PgConnection,
     id: Uuid,
-    result: &Result<unlinked_sim::Trace, String>,
+    result: &Result<unlinked_sim::Trace, sim_worker::Failure>,
 ) -> ApiResult<()> {
     let (status, trace, error) = match result {
         Ok(trace) => (
@@ -218,13 +247,13 @@ fn finish(
             None,
         ),
         Err(error) => (
-            if error.contains("cancelled") || error.contains("disconnected") {
+            if error.cancelled {
                 "cancelled"
             } else {
                 "failed"
             },
             None,
-            Some(error.clone()),
+            Some(error.message.clone()),
         ),
     };
     diesel::sql_query("UPDATE simulation_runs SET status=$2, trace=$3::jsonb,error=$4,finished_at=NOW() WHERE id=$1 AND status='running'").bind::<SqlUuid,_>(id).bind::<Text,_>(status).bind::<Nullable<Text>,_>(trace).bind::<Nullable<Text>,_>(error).execute(conn)?;
@@ -342,6 +371,15 @@ mod tests {
         };
         let denied = outside.json(Method::POST, &route, &request).await;
         assert_eq!(denied.status, StatusCode::NOT_FOUND);
+        let first_permit = sim_worker::reserve(viewer.user.id).unwrap();
+        let second_permit = sim_worker::reserve(viewer.user.id).unwrap();
+        assert_eq!(
+            view.json(Method::POST, &route, &request).await.status,
+            StatusCode::CONFLICT
+        );
+        let empty: Vec<SimulationRun> = view.get(&route).await.json();
+        assert!(empty.is_empty());
+        drop((first_permit, second_permit));
         let response = view.json(Method::POST, &route, &request).await;
         assert_eq!(response.status, StatusCode::OK);
         let finished: SimulationResult = response.json();
@@ -390,12 +428,25 @@ mod tests {
         diesel::sql_query("INSERT INTO simulation_runs (id,file_version_id,requested_by,status,request,created_at) VALUES ($1,$2,$3,'running',$4::jsonb,NOW()-INTERVAL '10 minutes')")
             .bind::<SqlUuid,_>(abandoned).bind::<SqlUuid,_>(uploaded.latest.id).bind::<SqlUuid,_>(owner.user.id)
             .bind::<Text,_>(serde_json::to_string(&request).unwrap()).execute(&mut state.db_pool.get().unwrap()).unwrap();
+        maintenance(&mut state.db_pool.get().unwrap()).unwrap();
         let expired: SimulationResult = own
             .get(&format!("/api/simulations/{abandoned}"))
             .await
             .json();
         assert_eq!(expired.run.status, SimulationStatus::Failed);
         assert!(expired.run.error.unwrap().contains("expired"));
+        diesel::sql_query("INSERT INTO audit_log (actor_id, action) SELECT $1, 'simulation.started' FROM generate_series(1,50)").bind::<SqlUuid,_>(owner.user.id).execute(&mut state.db_pool.get().unwrap()).unwrap();
+        assert_eq!(
+            own.json(Method::POST, &route, &request).await.status,
+            StatusCode::CONFLICT
+        );
+        // Invalid version still resolves to 404 after removing the artificial quota entries.
+        diesel::sql_query(
+            "DELETE FROM audit_log WHERE actor_id=$1 AND action='simulation.started'",
+        )
+        .bind::<SqlUuid, _>(owner.user.id)
+        .execute(&mut state.db_pool.get().unwrap())
+        .unwrap();
         let invalid = SimulationRequest {
             version: Some(999),
             ..request

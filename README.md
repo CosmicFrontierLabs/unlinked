@@ -37,6 +37,7 @@ Build the frontend before compiling the backend: `memory-serve` embeds `frontend
 
 ```sh
 cargo build -p unlinked-cli
+cargo run -p unlinked-cli -- coverage /path/to/unlinked-test-cases -o coverage.json
 cargo run -p unlinked-cli -- info model.slx
 cargo run -p unlinked-cli -- render model.slx -o diagram.svg
 cargo run -p unlinked-cli -- render model.slx --system Controller -o controller.svg
@@ -78,7 +79,7 @@ Shared DTOs live in `shared`; database models remain backend-only. Project file 
 - `GET /api/simulations/:run_id`: read an authorized result.
 - `/ws/simulations`: stream `SimulationStarted`, sample-major `SimulationSamples`, and terminal `SimulationStatus` messages. Supports cancellation and checks session validity before each new run.
 
-See [shared/src/simulation.rs](shared/src/simulation.rs) for request and stream types. Run records preserve the chosen settings and workspace overrides. Disconnecting a streaming client cancels its worker. Expired abandoned records are marked failed when read. Jobs, queues, output volume, input size, and solver work have explicit bounds.
+See [shared/src/simulation.rs](shared/src/simulation.rs) for request and stream types. Run records preserve the chosen settings and workspace overrides. Disconnecting a streaming client cancels its worker. A background task marks expired abandoned records failed. Each user is limited to 50 accepted runs per day; older results are pruned to retain approximately the latest 20 runs (plus any active jobs). Jobs, queues, output volume, input size, and solver work have explicit bounds.
 
 Core crates separate model IR, import, rendering, MATLAB semantics, simulation, and CLI. Keep the computational crates WASM-compatible; native process invocation belongs in the CLI. Add migrations as `YYYY-MM-DD-HHMMSS_description` directories and run the naming check.
 

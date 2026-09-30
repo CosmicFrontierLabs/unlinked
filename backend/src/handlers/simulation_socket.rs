@@ -59,7 +59,7 @@ pub async fn handler(
                        Some(Event::Samples{time,values})=>{if !send(&mut conn,Server::SimulationSamples{run_id,time,values}).await{return;}},
                        Some(Event::Completed)|Some(Event::Failed(_))=>{
                         let response=simulations::result(state.clone(),user.clone(),run_id,false).await;
-                        let message=match response {Ok(r)=>Server::SimulationStatus{run:r.run},Err(e)=>Server::Error{message:e.to_string()}};
+                        let message=match response {Ok(r)=>Server::SimulationStatus{run:r.run},Err(e)=>Server::Error{message:e.public_message()}};
                         if !send(&mut conn,message).await{return;}
                         active=None;
                        },
@@ -107,7 +107,7 @@ pub async fn handler(
                                     if !send(
                                         &mut conn,
                                         Server::Error {
-                                            message: e.to_string(),
+                                            message: e.public_message(),
                                         },
                                     )
                                     .await

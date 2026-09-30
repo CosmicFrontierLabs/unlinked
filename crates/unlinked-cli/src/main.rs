@@ -1,3 +1,5 @@
+mod coverage;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
@@ -23,6 +25,12 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Inventory import, rendering and simulation compilation for a model directory.
+    Coverage {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Import an SLX or MDL model and print structured JSON statistics.
     Info {
         /// Model filename, or - for stdin (format is detected from content).
@@ -261,6 +269,11 @@ fn compile_llvm(source: &str, library: bool, output: &Path) -> Result<()> {
 }
 fn run(args: Args) -> Result<()> {
     match args.command {
+        Action::Coverage { input, output } => {
+            let mut json = serde_json::to_vec_pretty(&coverage::report(&input)?)?;
+            json.push(b'\n');
+            write_output(output.as_deref(), &json)
+        }
         Action::Info { input, output } => {
             let model = load_model(&input)?;
             let mut json = serde_json::to_vec_pretty(&model_info(&model))?;

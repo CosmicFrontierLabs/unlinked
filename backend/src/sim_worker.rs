@@ -47,18 +47,29 @@ fn capacity() -> Arc<Semaphore> {
         .clone()
 }
 
-pub fn start(
-    user_id: uuid::Uuid,
-    filename: String,
-    bytes: Vec<u8>,
-    mut options: Options,
-    workspace: std::collections::BTreeMap<String, String>,
-    complete: impl FnOnce(&Result<Trace, String>) -> Result<(), String> + Send + 'static,
-) -> Result<Worker, String> {
-    if bytes.len() > 16 * 1024 * 1024 {
-        return Err("model exceeds 16 MiB upload limit".into());
+#[derive(Debug, Clone)]
+pub struct Failure {
+    pub message: String,
+    pub cancelled: bool,
+}
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            cancelled: false,
+        }
     }
-    options.max_samples = options.max_samples.min(MAX_SAMPLES);
+}
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+pub struct Reservation {
+    _global: OwnedSemaphorePermit,
+    _user: OwnedSemaphorePermit,
+}
+pub fn reserve(user_id: uuid::Uuid) -> Result<Reservation, String> {
     let permit = capacity()
         .try_acquire_owned()
         .map_err(|_| "simulation capacity is full; retry later".to_string())?;
@@ -81,12 +92,28 @@ pub fn start(
     let user_permit = user_capacity
         .try_acquire_owned()
         .map_err(|_| "you already have two active simulations".to_string())?;
+    Ok(Reservation {
+        _global: permit,
+        _user: user_permit,
+    })
+}
+pub fn start(
+    reservation: Reservation,
+    filename: String,
+    bytes: Vec<u8>,
+    mut options: Options,
+    workspace: std::collections::BTreeMap<String, String>,
+    complete: impl FnOnce(&Result<Trace, Failure>, &Options) -> Result<(), String> + Send + 'static,
+) -> Result<Worker, String> {
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("model exceeds 16 MiB upload limit".into());
+    }
+    options.max_samples = options.max_samples.min(MAX_SAMPLES);
     let cancel = Arc::new(AtomicBool::new(false));
     let cancelled = cancel.clone();
     let (tx, rx) = mpsc::channel(4);
     tokio::task::spawn_blocking(move || {
-        let _permit: OwnedSemaphorePermit = permit;
-        let _user_permit: OwnedSemaphorePermit = user_permit;
+        let _reservation = reservation;
         let began = std::time::Instant::now();
         let send = |event| {
             tokio::runtime::Handle::current().block_on(async {
@@ -96,70 +123,84 @@ pub fn start(
                     .map_err(|_| "client disconnected".to_string())
             })
         };
-        let mut result = (|| {
-            let mut model =
-                unlinked_import::import(&filename, &bytes).map_err(|e| e.to_string())?;
-            model.workspace.extend(workspace);
-            let graph = unlinked_sim::compile(&model, &options).map_err(|e| e.to_string())?;
-            options.max_internal_steps = options
-                .max_internal_steps
-                .min(10_000)
-                .min(10_000_000 / graph.nodes.len().max(1))
-                .max(1);
-            let samples = ((options.stop - options.start) / options.step).ceil() + 1.0;
-            if !samples.is_finite()
-                || samples < 1.0
-                || samples * graph.nodes.len() as f64 > MAX_VALUES as f64
-            {
-                return Err("simulation exceeds server output budget".into());
-            }
-            if cancelled.load(Ordering::Relaxed) {
-                return Err("simulation cancelled".into());
-            }
-            send(Event::Started {
-                signals: graph
-                    .nodes
-                    .iter()
-                    .map(|n| (n.id.clone(), format!("{}:1", n.name)))
-                    .collect(),
-            })
-            .map_err(|_| "client disconnected".to_string())?;
-            let mut times = Vec::with_capacity(CHUNK_SAMPLES);
-            let mut values = Vec::with_capacity(CHUNK_SAMPLES);
-            let trace = unlinked_sim::simulate_with_observer(&graph, &options, |sample| {
-                if cancelled.load(Ordering::Relaxed)
-                    || began.elapsed() > std::time::Duration::from_secs(30)
+        let mut result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<Trace, Failure> {
+                let mut model =
+                    unlinked_import::import(&filename, &bytes).map_err(|e| e.to_string())?;
+                model.workspace.extend(workspace);
+                let graph = unlinked_sim::compile(&model, &options).map_err(|e| e.to_string())?;
+                options.max_internal_steps = options
+                    .max_internal_steps
+                    .min(10_000)
+                    .min(10_000_000 / graph.nodes.len().max(1))
+                    .max(1);
+                let samples = ((options.stop - options.start) / options.step).ceil() + 1.0;
+                if !samples.is_finite()
+                    || samples < 1.0
+                    || samples * graph.nodes.len() as f64 > MAX_VALUES as f64
                 {
-                    return false;
+                    return Err("simulation exceeds server output budget".into());
                 }
-                times.push(sample.time);
-                values.push(sample.values.to_vec());
-                if times.len() == CHUNK_SAMPLES {
-                    send(Event::Samples {
-                        time: std::mem::take(&mut times),
-                        values: std::mem::take(&mut values),
-                    })
-                    .is_ok()
-                } else {
-                    true
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err(Failure {
+                        message: "simulation cancelled".into(),
+                        cancelled: true,
+                    });
                 }
-            })
-            .map_err(|e| e.to_string())?;
-            if !times.is_empty() {
-                send(Event::Samples {
-                    time: times,
-                    values,
+                send(Event::Started {
+                    signals: graph
+                        .nodes
+                        .iter()
+                        .map(|n| (n.id.clone(), format!("{}:1", n.name)))
+                        .collect(),
                 })
                 .map_err(|_| "client disconnected".to_string())?;
-            }
-            Ok(trace)
-        })();
-        if let Err(error) = complete(&result) {
-            result = Err(error);
+                let mut times = Vec::with_capacity(CHUNK_SAMPLES);
+                let mut values = Vec::with_capacity(CHUNK_SAMPLES);
+                let mut interrupted = None;
+                let trace = unlinked_sim::simulate_with_observer(&graph, &options, |sample| {
+                    if cancelled.load(Ordering::Relaxed) {
+                        interrupted = Some(Failure {
+                            message: "simulation cancelled".into(),
+                            cancelled: true,
+                        });
+                        return false;
+                    }
+                    if began.elapsed() > std::time::Duration::from_secs(30) {
+                        interrupted = Some(Failure::from("simulation deadline exceeded"));
+                        return false;
+                    }
+                    times.push(sample.time);
+                    values.push(sample.values.to_vec());
+                    if times.len() == CHUNK_SAMPLES {
+                        send(Event::Samples {
+                            time: std::mem::take(&mut times),
+                            values: std::mem::take(&mut values),
+                        })
+                        .is_ok()
+                    } else {
+                        true
+                    }
+                })
+                .map_err(|e| interrupted.unwrap_or_else(|| Failure::from(e.to_string())))?;
+                if !times.is_empty() {
+                    send(Event::Samples {
+                        time: times,
+                        values,
+                    })
+                    .map_err(|_| "client disconnected".to_string())?;
+                }
+                Ok(trace)
+            },
+        ))
+        .unwrap_or_else(|_| Err(Failure::from("simulation worker panicked")));
+        if let Err(error) = complete(&result, &options) {
+            tracing::error!(%error, "cannot persist simulation result");
+            result = Err(Failure::from("cannot persist simulation result"));
         }
         let event = match result {
             Ok(_) => Event::Completed,
-            Err(message) => Event::Failed(message),
+            Err(failure) => Event::Failed(failure.message),
         };
         let _ = send(event);
     });
@@ -174,7 +215,7 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         let flag = completed.clone();
         let mut worker = start(
-            uuid::Uuid::new_v4(),
+            reserve(uuid::Uuid::new_v4()).unwrap(),
             "scalar.mdl".into(),
             include_bytes!("../../crates/unlinked-cli/tests/fixtures/scalar.mdl").to_vec(),
             Options {
@@ -183,7 +224,7 @@ mod tests {
                 ..Default::default()
             },
             Default::default(),
-            move |result| {
+            move |result, _options| {
                 assert!(result.is_ok());
                 flag.store(true, Ordering::SeqCst);
                 Ok(())
@@ -220,7 +261,7 @@ mod cancellation_tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
         let mut worker = start(
-            uuid::Uuid::new_v4(),
+            reserve(uuid::Uuid::new_v4()).unwrap(),
             "scalar.mdl".into(),
             include_bytes!("../../crates/unlinked-cli/tests/fixtures/scalar.mdl").to_vec(),
             Options {
@@ -229,7 +270,7 @@ mod cancellation_tests {
                 ..Default::default()
             },
             Default::default(),
-            move |result| {
+            move |result, _options| {
                 assert!(result.is_err());
                 flag.store(true, Ordering::SeqCst);
                 Ok(())
