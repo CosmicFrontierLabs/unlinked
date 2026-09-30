@@ -34,15 +34,17 @@ crates/
 Model, import, render, matlab and sim all build for `wasm32-unknown-unknown`;
 the browser parses, renders, diffs, edits and transpiles locally. Test models
 live in the separate [unlinked-test-cases](https://github.com/meawoppl/unlinked-test-cases)
-repo (31 openly licensed models plus synthetic fixtures), read from
-`UNLINKED_TEST_CASES`; corpus tests skip when it is absent and run in CI.
+repo (30 third-party models, 1 synthetic model and 9 `.m` scripts), read
+from `UNLINKED_TEST_CASES`; corpus tests skip when it is absent and run in
+CI. Per-model import, render and simulation coverage is tracked in
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) (added by #18).
 
 ## Delivered
 
 ### Import and IR
 - SLX (OPC zip, split `systems/*.xml` parts, `System Ref` resolution) and
   legacy MDL (including windows-1252 files and embedded OPC tails), with byte,
-  node and nesting budgets. All 31 corpus models import.
+  node and nesting budgets. All 31 corpus models import and render.
 - Blocks, lines with branches, masks (both mask formats), library links,
   annotations, solver configuration and model workspace.
 - Stateflow charts and MATLAB Function blocks (`stateflow.xml` and the split
@@ -65,10 +67,12 @@ repo (31 openly licensed models plus synthetic fixtures), read from
   soft delete, upload limits.
 - Version comparison: structural diff of blocks (added, removed, parameters,
   layout, appearance, ports, library links), wiring, configuration,
-  workspace and charts, highlighted on the diagram.
+  workspace and charts. Block changes are highlighted on the diagram; the
+  other changes, including charts, are listed in the change summary.
 - Diagram editing: move, rename, re-parameterize and delete blocks, saved as a
-  new version by patching the original file so unmodeled content (config sets,
-  Stateflow, styling, unknown elements) survives byte for byte.
+  new version by patching the original file rather than regenerating it.
+  Untouched SLX parts and a no-op save are byte-identical; an edited XML part
+  keeps its unmodeled content but may reserialize attribute quoting.
 
 ### Simulation
 - Bounded, version-pinned simulation jobs over HTTP and a WebSocket stream,
@@ -93,8 +97,12 @@ repo (31 openly licensed models plus synthetic fixtures), read from
 - Details: [`crates/unlinked-matlab/README.md`](crates/unlinked-matlab/README.md).
 
 ## In review
+Move these into Delivered when they merge.
 - #18: multirate discrete scheduling, local Goto/From, a pure MATLAB function
-  interpreter and execution of scalar MATLAB Function charts.
+  interpreter, execution of scalar MATLAB Function charts, and
+  `docs/COMPATIBILITY.md`. By default 1 of the 31 corpus models compiles for
+  simulation; more run as isolated blocks or with explicit root inputs, as
+  listed there.
 - #19: init-script picker, `.m` transpile tab, labeled plot axes.
 
 ## Roadmap (not supported yet)
