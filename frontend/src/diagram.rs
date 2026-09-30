@@ -9,6 +9,7 @@ use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
 use unlinked_model::edit::Edit;
+use unlinked_model::scope::ScopeConfig;
 use unlinked_model::{Block, BlockId, Chart, Model, Rect, System};
 use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
@@ -733,13 +734,103 @@ fn inspector(props: &InspectorProps) -> Html {
                     }) }
                 </table>
             }
+            { for ScopeConfig::from_block(b).map(scope_section) }
             <h4>{ "Parameters" }</h4>
             <table>
-                { for b.parameters.iter().filter(|(k, _)| k.as_str() != "ZOrder").map(|(k, v)| html! {
+                { for b.parameters.iter().filter(|(k, _)| !HIDDEN_PARAMETERS.contains(&k.as_str())).map(|(k, v)| html! {
                     <tr><td>{ k }</td><td>{ value_cell(k, v) }</td></tr>
                 }) }
             </table>
+            if let Some(spec) = b.param("ScopeSpecificationString") {
+                <details class="raw">
+                    <summary>{ "Raw scope specification" }</summary>
+                    <pre class="script"><code>{ spec }</code></pre>
+                </details>
+            }
         </aside>
+    }
+}
+
+/// Parameters not listed in the inspector table: editor bookkeeping, and
+/// the scope specification, which is shown structured instead.
+const HIDDEN_PARAMETERS: &[&str] = &["ZOrder", "ScopeSpecificationString"];
+
+fn fmt_num(v: f64) -> String {
+    if v != 0.0 && (v.abs() < 1e-3 || v.abs() >= 1e6) {
+        format!("{v:e}")
+    } else {
+        format!("{v}")
+    }
+}
+
+fn on_off(v: Option<bool>) -> Option<&'static str> {
+    v.map(|b| if b { "on" } else { "off" })
+}
+
+/// The Scope settings of a block in readable form.
+fn scope_section(config: Result<ScopeConfig, String>) -> Html {
+    let c = match config {
+        Ok(c) => c,
+        Err(e) => {
+            return html! {
+                <>
+                    <h4>{ "Scope" }</h4>
+                    <p class="error">{ format!("Unreadable scope specification: {e}") }</p>
+                </>
+            }
+        }
+    };
+    let row = |k: &str, v: Option<String>| -> Html {
+        match v {
+            Some(v) => html! { <tr><td>{ k }</td><td>{ v }</td></tr> },
+            None => html! {},
+        }
+    };
+    let window = c
+        .window
+        .map(|[_, _, w, h]| format!("{}×{} px", fmt_num(w), fmt_num(h)));
+    html! {
+        <>
+            <h4>{ "Scope" }</h4>
+            <table class="scope">
+                { row("Configured logging variable", c.logging_variable.clone()) }
+                { row("Saved logging status", Some(on_off(c.logging_enabled).unwrap_or("not specified").to_string())) }
+                { row("Time span", c.time_span.map(|t| format!("{} s", fmt_num(t)))) }
+                { row("Window", window) }
+                { row("Opens with model", on_off(c.open_at_start).map(str::to_string)) }
+                { row("Saved by", c.version.clone().map(|v| format!("Simulink {v}"))) }
+            </table>
+            if c.displays.is_empty() {
+                <p class="muted">{ "No saved display settings found." }</p>
+            }
+            { for c.displays.iter().enumerate().map(|(i, d)| {
+                let limits = match (d.y_min, d.y_max) {
+                    (None, None) => None,
+                    (lo, hi) => Some(format!(
+                        "{} … {}",
+                        lo.map_or("auto".into(), fmt_num),
+                        hi.map_or("auto".into(), fmt_num)
+                    )),
+                };
+                let grid = match (d.x_grid, d.y_grid) {
+                    (None, None) => None,
+                    (x, y) => Some(format!("x {}, y {}", on_off(x).unwrap_or("?"), on_off(y).unwrap_or("?"))),
+                };
+                html! {
+                    <table class="scope">
+                        if c.displays.len() > 1 {
+                            <tr><th colspan="2">{ format!("Display {}", i + 1) }</th></tr>
+                        }
+                        { row("Title", d.title.clone()) }
+                        { row("Signals", (!d.line_names.is_empty()).then(|| d.line_names.join(", "))) }
+                        { row("Y limits", limits) }
+                        { row("Y label", d.y_label.clone()) }
+                        { row("Legend", on_off(d.legend).map(str::to_string)) }
+                        { row("Grid", grid) }
+                    </table>
+                }
+            }) }
+        </>
     }
 }
 

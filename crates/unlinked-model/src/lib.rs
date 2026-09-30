@@ -10,6 +10,7 @@
 pub mod diff;
 pub mod edit;
 pub mod geometry;
+pub mod scope;
 pub mod stateflow;
 
 pub use stateflow::{
