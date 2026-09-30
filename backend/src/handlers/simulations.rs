@@ -386,6 +386,16 @@ mod tests {
             .await;
         assert!(removed.status.is_success());
         assert_eq!(view.get(&result_route).await.status, StatusCode::NOT_FOUND);
+        let abandoned = Uuid::new_v4();
+        diesel::sql_query("INSERT INTO simulation_runs (id,file_version_id,requested_by,status,request,created_at) VALUES ($1,$2,$3,'running',$4::jsonb,NOW()-INTERVAL '10 minutes')")
+            .bind::<SqlUuid,_>(abandoned).bind::<SqlUuid,_>(uploaded.latest.id).bind::<SqlUuid,_>(owner.user.id)
+            .bind::<Text,_>(serde_json::to_string(&request).unwrap()).execute(&mut state.db_pool.get().unwrap()).unwrap();
+        let expired: SimulationResult = own
+            .get(&format!("/api/simulations/{abandoned}"))
+            .await
+            .json();
+        assert_eq!(expired.run.status, SimulationStatus::Failed);
+        assert!(expired.run.error.unwrap().contains("expired"));
         let invalid = SimulationRequest {
             version: Some(999),
             ..request
