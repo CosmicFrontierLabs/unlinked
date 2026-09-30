@@ -11,6 +11,7 @@ use shared::{
     Project, ProjectRole, UserInfo,
 };
 use std::rc::Rc;
+use unlinked_model::diff::{BlockChange, ModelDiff};
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{Event, HtmlInputElement, HtmlSelectElement, InputEvent};
@@ -708,6 +709,7 @@ pub fn file_page(props: &FileProps) -> Html {
         })
     };
 
+    let model_file = matches!(&*file, Fetch::Ready(f) if is_model(&f.path));
     let version_list = move |vs: &Vec<FileVersionInfo>| -> Html {
         let current = version_id.or_else(|| vs.first().map(|v| v.id));
         html! {
@@ -719,10 +721,24 @@ pub fn file_page(props: &FileProps) -> Html {
                     } else {
                         Route::FileVersion { project_id, file_id, version_id: v.id }
                     };
+                    let compare = current
+                        .filter(|c| model_file && *c != v.id)
+                        .map(|c| {
+                            // Compare older -> newer regardless of which is selected.
+                            let (old, new) = if v.version < vs.iter().find(|x| x.id == c).map_or(0, |x| x.version) {
+                                (v.id, c)
+                            } else {
+                                (c, v.id)
+                            };
+                            Route::Compare { project_id, file_id, old, new }
+                        });
                     html! {
                         <li class={classes!(active.then_some("active"))}>
                             <Link<Route> {to}>{ format!("v{}", v.version) }</Link<Route>>
                             <span class="muted">{ format!(" {} · {}", when(&v.created_at), who(&v.author)) }</span>
+                            if let Some(to) = compare {
+                                { " " }<Link<Route> {to} classes="compare">{ "compare" }</Link<Route>>
+                            }
                             if !v.message.is_empty() { <div>{ &v.message }</div> }
                         </li>
                     }
@@ -795,4 +811,146 @@ pub fn file_page(props: &FileProps) -> Html {
             </div>
         </div>
     }
+}
+
+// ---------------------------------------------------------------------------
+// Version comparison
+// ---------------------------------------------------------------------------
+
+#[derive(Properties, PartialEq)]
+pub struct CompareProps {
+    pub project_id: Uuid,
+    pub file_id: Uuid,
+    pub old: Uuid,
+    pub new: Uuid,
+}
+
+struct Comparison {
+    path: String,
+    old_version: i32,
+    new_version: i32,
+    model: Rc<unlinked_model::Model>,
+    diff: Rc<ModelDiff>,
+}
+
+fn change_label(change: &BlockChange) -> (&'static str, String) {
+    match change {
+        BlockChange::Added => ("added", "added".into()),
+        BlockChange::Removed => ("removed", "removed".into()),
+        BlockChange::Modified(m) => {
+            let mut parts = Vec::new();
+            if let Some(old) = &m.renamed_from {
+                parts.push(format!("renamed from {}", old.replace('\n', " ")));
+            }
+            if let Some(old) = &m.type_changed_from {
+                parts.push(format!("type was {old}"));
+            }
+            for (name, old, new) in &m.parameters {
+                parts.push(format!(
+                    "{name}: {} → {}",
+                    old.as_deref().unwrap_or("∅"),
+                    new.as_deref().unwrap_or("∅")
+                ));
+            }
+            if m.mask_changed {
+                parts.push("mask changed".into());
+            }
+            if m.moved {
+                parts.push("moved".into());
+            }
+            if m.resized {
+                parts.push("resized".into());
+            }
+            let class = if m.layout_only() { "moved" } else { "modified" };
+            (class, parts.join("; "))
+        }
+    }
+}
+
+#[function_component(ComparePage)]
+pub fn compare_page(props: &CompareProps) -> Html {
+    let (project_id, file_id, old, new) = (props.project_id, props.file_id, props.old, props.new);
+    let comparison = use_fetch(
+        (project_id, file_id, old, new),
+        move |(p, f, old, new)| async move {
+            let info = api::file(p, f).await?;
+            let versions = api::versions(p, f).await?;
+            let number = |id: Uuid| {
+                versions
+                    .iter()
+                    .find(|v| v.id == id)
+                    .map_or(0, |v| v.version)
+            };
+            let import = |bytes: Vec<u8>| {
+                unlinked_import::import(&info.path, &bytes).map_err(|e| ApiError {
+                    status: 0,
+                    message: format!("cannot import model: {e}"),
+                })
+            };
+            let old_model = import(api::content(p, f, Some(old)).await?)?;
+            let new_model = import(api::content(p, f, Some(new)).await?)?;
+            let diff = unlinked_model::diff::diff(&old_model, &new_model);
+            Ok(Comparison {
+                path: info.path,
+                old_version: number(old),
+                new_version: number(new),
+                model: Rc::new(new_model),
+                diff: Rc::new(diff),
+            })
+        },
+    );
+
+    view(&comparison, |c: &Comparison| {
+        let d = &c.diff;
+        html! {
+            <div class="page-fill">
+                <div class="subbar file-bar">
+                    <Link<Route> to={Route::File { project_id, file_id }}>{ "← File" }</Link<Route>>
+                    <strong>{ &c.path }</strong>
+                    <span class="muted">{ format!("v{} → v{}", c.old_version, c.new_version) }</span>
+                    <span class="spacer" />
+                    <span class="legend added">{ "added" }</span>
+                    <span class="legend modified">{ "modified" }</span>
+                    <span class="legend moved">{ "moved" }</span>
+                    <span class="legend nested">{ "contains changes" }</span>
+                </div>
+                <div class="file-body">
+                    <div class="file-main">
+                        <DiagramView model={c.model.clone()} diff={Some(c.diff.clone())} />
+                    </div>
+                    <aside class="history changes">
+                        <h4>{ "Changes" }</h4>
+                        if d.is_empty() {
+                            <p class="muted">{ "No structural changes." }</p>
+                        }
+                        <ul class="plain">
+                            { for d.blocks.iter().map(|b| {
+                                let (class, text) = change_label(&b.change);
+                                let place = if b.system.is_empty() { String::new() } else { format!("{}/", b.system.join("/")) };
+                                html! {
+                                    <li class={classes!("change", class)}>
+                                        <strong>{ format!("{place}{}", b.name.replace('\n', " ")) }</strong>
+                                        <span class="muted">{ format!(" {}", b.block_type) }</span>
+                                        <div>{ text }</div>
+                                    </li>
+                                }
+                            }) }
+                            { for d.systems.iter().map(|s| html! {
+                                <li class="change modified">
+                                    <strong>{ if s.system.is_empty() { "root".to_string() } else { s.system.join("/") } }</strong>
+                                    <div>{ format!("wiring: +{} −{} connections", s.connections_added.len(), s.connections_removed.len()) }</div>
+                                </li>
+                            }) }
+                            { for d.config.iter().map(|(k, a, b)| html! {
+                                <li class="change modified">
+                                    <strong>{ "Configuration" }</strong>
+                                    <div>{ format!("{k}: {} → {}", a.as_deref().unwrap_or("∅"), b.as_deref().unwrap_or("∅")) }</div>
+                                </li>
+                            }) }
+                        </ul>
+                    </aside>
+                </div>
+            </div>
+        }
+    })
 }
