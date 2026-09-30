@@ -1,21 +1,29 @@
 //! Run simulations of a stored model version and plot the streamed traces
 //! with rizzma (oscilloscope-styled, zoom/pan in the canvas).
+//!
+//! Streaming state lives in one [`Controller`] shared by the render function
+//! and the async tasks. Every data set (a live run or a loaded historical
+//! run) gets a new generation number; tasks drop results for any other
+//! generation, so a stale stream or response can never overwrite newer data.
 
 use crate::api;
-use crate::fetch::{use_fetch, use_reload, view};
+use crate::fetch::{use_fetch, use_reload, view, Reload};
 use rizzma::wasm::{WasmFigure, WasmSession};
 use shared::{
     SimulationClientMsg, SimulationOptions, SimulationRequest, SimulationRun, SimulationServerMsg,
     SimulationSignal, SimulationSocket, SimulationStatus, Solver,
 };
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use unlinked_model::SimConfig;
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{Event, HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement, InputEvent};
+use ws_bridge::yew_client::Sender;
 use yew::prelude::*;
 
-/// Signals plotted by default when a run starts.
+/// Signals plotted by default when a data set loads.
 const DEFAULT_PLOTTED: usize = 6;
 /// Minimum time between plot refreshes while samples stream in.
 const REFRESH_MS: f64 = 120.0;
@@ -35,7 +43,7 @@ fn label(name: &str) -> &str {
     name.split_once('/').map_or(name, |(_, rest)| rest)
 }
 
-/// Signals to plot when a run starts: the root Outports when any are
+/// Signals to plot for a new data set: the root Outports when any are
 /// present, otherwise the first few signals.
 fn default_plotted(signals: &[SimulationSignal], outports: &[String]) -> Vec<usize> {
     let outs: Vec<usize> = signals
@@ -58,13 +66,6 @@ fn default_plotted(signals: &[SimulationSignal], outports: &[String]) -> Vec<usi
     }
 }
 
-/// Streamed samples, one column per signal.
-#[derive(Default)]
-struct Buffers {
-    time: Vec<f64>,
-    columns: Vec<Vec<f64>>,
-}
-
 #[derive(Clone, PartialEq)]
 enum RunState {
     Idle,
@@ -72,6 +73,112 @@ enum RunState {
     Running(Option<Uuid>),
     Finished(SimulationStatus, Option<String>),
     Error(String),
+}
+
+impl RunState {
+    fn active(&self) -> bool {
+        matches!(self, RunState::Connecting | RunState::Running(_))
+    }
+}
+
+/// Mutable state shared between the component and its async tasks.
+#[derive(Default)]
+struct Controller {
+    /// Identifies the current data set; bumped on every run/load and on unmount.
+    generation: u64,
+    signals: Vec<SimulationSignal>,
+    plotted: Vec<usize>,
+    time: Vec<f64>,
+    columns: Vec<Vec<f64>>,
+    session: Option<WasmSession>,
+    sender: Option<Sender<SimulationSocket>>,
+    /// Server id of the live run, once known.
+    run_id: Option<Uuid>,
+    last_refresh: f64,
+}
+
+impl Controller {
+    /// Start a new data set, invalidating every task of the previous one.
+    fn reset(&mut self) -> u64 {
+        self.generation += 1;
+        self.signals.clear();
+        self.plotted.clear();
+        self.time.clear();
+        self.columns.clear();
+        self.session = None;
+        self.sender = None;
+        self.run_id = None;
+        self.generation
+    }
+
+    fn refresh_plot(&self) {
+        if let Some(session) = &self.session {
+            for (line, &i) in self.plotted.iter().enumerate() {
+                if let Some(y) = self.columns.get(i) {
+                    let n = y.len().min(self.time.len());
+                    let _ = session.set_line_data(0, line, &self.time[..n], &y[..n]);
+                }
+            }
+        }
+    }
+
+    /// Build a figure with one line per plotted signal and bind it to the canvas.
+    fn bind_plot(&mut self, canvas_id: &str, width_px: f64) -> Result<(), String> {
+        self.session = None;
+        if self.signals.is_empty() {
+            return Ok(());
+        }
+        let err = |e: wasm_bindgen::JsValue| e.as_string().unwrap_or_else(|| "plot error".into());
+        let mut fig = WasmFigure::new((width_px / 100.0).max(4.0), 3.6);
+        fig.set_facecolor("#1a1b26").map_err(err)?;
+        let ax = fig.add_subplot(1, 1, 1).map_err(err)?;
+        fig.oscilloscope(ax).map_err(err)?;
+        fig.set_xlabel(ax, "time (s)").map_err(err)?;
+        for &i in &self.plotted {
+            let y = self.columns.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            let n = y.len().min(self.time.len());
+            fig.plot(ax, &self.time[..n], &y[..n]).map_err(err)?;
+        }
+        if !self.plotted.is_empty() {
+            let labels = self
+                .plotted
+                .iter()
+                .map(|&i| label(&self.signals[i].name).to_string())
+                .collect();
+            fig.legend(ax, labels).map_err(err)?;
+        }
+        self.session = Some(fig.bind(canvas_id).map_err(err)?);
+        Ok(())
+    }
+
+    fn csv(&self) -> String {
+        let mut out = String::from("time");
+        for s in &self.signals {
+            out.push(',');
+            out.push_str(&csv_field(&s.name));
+        }
+        out.push('\n');
+        for (row, t) in self.time.iter().enumerate() {
+            out.push_str(&t.to_string());
+            for col in &self.columns {
+                out.push(',');
+                if let Some(v) = col.get(row) {
+                    out.push_str(&v.to_string());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// RFC 4180 field: quoted when it contains a delimiter, quote or newline.
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
 }
 
 fn parse_time(s: &Option<String>, default: f64) -> f64 {
@@ -85,17 +192,13 @@ fn parse_time(s: &Option<String>, default: f64) -> f64 {
 fn defaults(config: &SimConfig) -> SimulationOptions {
     let start = parse_time(&config.start_time, 0.0);
     let stop = parse_time(&config.stop_time, 10.0).max(start + 1e-9);
-    let solver_name = config
-        .solver
-        .clone()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let solver = if solver_name.contains("ode1") || solver_name.contains("euler") {
-        Solver::Euler
-    } else if solver_name.contains("ode4") {
-        Solver::Rk4
-    } else {
-        Solver::Rk45
+    let solver = match config.solver.as_deref().map(str::trim) {
+        Some("ode1") => Solver::Euler,
+        Some(
+            "ode2" | "ode3" | "ode4" | "ode5" | "ode8" | "ode14x" | "FixedStepAuto"
+            | "FixedStepDiscrete",
+        ) => Solver::Rk4,
+        _ => Solver::Rk45,
     };
     let step = parse_time(&config.fixed_step, (stop - start) / 1000.0);
     SimulationOptions {
@@ -138,65 +241,81 @@ fn parse_workspace(text: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
-/// Build a figure with one line per plotted signal and bind it to the canvas.
-fn bind_plot(
-    canvas_id: &str,
-    width_px: f64,
-    signals: &[SimulationSignal],
-    plotted: &[usize],
-    buffers: &Buffers,
-) -> Result<WasmSession, String> {
-    let err = |e: wasm_bindgen::JsValue| e.as_string().unwrap_or_else(|| "plot error".into());
-    let mut fig = WasmFigure::new((width_px / 100.0).max(4.0), 3.6);
-    fig.set_facecolor("#1a1b26").map_err(err)?;
-    let ax = fig.add_subplot(1, 1, 1).map_err(err)?;
-    fig.oscilloscope(ax).map_err(err)?;
-    fig.set_xlabel(ax, "time (s)").map_err(err)?;
-    for &i in plotted {
-        let y = buffers.columns.get(i).map(Vec::as_slice).unwrap_or(&[]);
-        let n = y.len().min(buffers.time.len());
-        fig.plot(ax, &buffers.time[..n], &y[..n]).map_err(err)?;
-    }
-    if !plotted.is_empty() {
-        fig.legend(
-            ax,
-            plotted
-                .iter()
-                .map(|&i| label(&signals[i].name).to_string())
-                .collect(),
-        )
-        .map_err(err)?;
-    }
-    fig.bind(canvas_id).map_err(err)
-}
-
-fn refresh_plot(session: &WasmSession, plotted: &[usize], buffers: &Buffers) {
-    for (line, &i) in plotted.iter().enumerate() {
-        if let Some(y) = buffers.columns.get(i) {
-            let n = y.len().min(buffers.time.len());
-            let _ = session.set_line_data(0, line, &buffers.time[..n], &y[..n]);
+/// Stream one run's messages into the controller until it finishes, fails,
+/// or the data set is superseded.
+async fn stream(
+    ctl: Rc<RefCell<Controller>>,
+    generation: u64,
+    mut rx: ws_bridge::yew_client::Receiver<SimulationSocket>,
+    state: UseStateHandle<RunState>,
+    rebind: UseReducerHandle<Reload>,
+    outports: Vec<String>,
+) {
+    let current = |ctl: &Rc<RefCell<Controller>>| ctl.borrow().generation == generation;
+    let mut terminal = false;
+    while let Some(msg) = rx.recv().await {
+        if !current(&ctl) {
+            return;
         }
-    }
-}
-
-fn csv(signals: &[SimulationSignal], buffers: &Buffers) -> String {
-    let mut out = String::from("time");
-    for s in signals {
-        out.push(',');
-        out.push_str(&s.name.replace([',', '\n', '"'], " "));
-    }
-    out.push('\n');
-    for (row, t) in buffers.time.iter().enumerate() {
-        out.push_str(&t.to_string());
-        for col in &buffers.columns {
-            out.push(',');
-            if let Some(v) = col.get(row) {
-                out.push_str(&v.to_string());
+        match msg {
+            Ok(SimulationServerMsg::SimulationStatus { run }) => match run.status {
+                SimulationStatus::Running => {
+                    ctl.borrow_mut().run_id = Some(run.id);
+                    state.set(RunState::Running(Some(run.id)));
+                }
+                done => {
+                    ctl.borrow().refresh_plot();
+                    state.set(RunState::Finished(done, run.error));
+                    terminal = true;
+                    break;
+                }
+            },
+            Ok(SimulationServerMsg::SimulationStarted { run_id, signals }) => {
+                {
+                    let mut c = ctl.borrow_mut();
+                    c.columns = vec![Vec::new(); signals.len()];
+                    c.plotted = default_plotted(&signals, &outports);
+                    c.signals = signals;
+                    c.run_id = Some(run_id);
+                }
+                rebind.dispatch(());
+                state.set(RunState::Running(Some(run_id)));
+            }
+            Ok(SimulationServerMsg::SimulationSamples { time, values, .. }) => {
+                let mut c = ctl.borrow_mut();
+                c.time.extend_from_slice(&time);
+                for row in &values {
+                    for (col, v) in c.columns.iter_mut().zip(row) {
+                        col.push(*v);
+                    }
+                }
+                let now = js_sys::Date::now();
+                if now - c.last_refresh > REFRESH_MS {
+                    c.last_refresh = now;
+                    c.refresh_plot();
+                }
+            }
+            Ok(SimulationServerMsg::Error { message }) => {
+                state.set(RunState::Error(message));
+                terminal = true;
+                break;
+            }
+            Ok(SimulationServerMsg::Heartbeat) => {}
+            Err(e) => {
+                state.set(RunState::Error(format!("connection error: {e}")));
+                terminal = true;
+                break;
             }
         }
-        out.push('\n');
     }
-    out
+    if current(&ctl) {
+        ctl.borrow_mut().sender = None;
+        if !terminal {
+            state.set(RunState::Error(
+                "connection closed before the run finished".into(),
+            ));
+        }
+    }
 }
 
 #[function_component(SimulationPanel)]
@@ -204,69 +323,63 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let options = use_state(|| defaults(&props.config));
     let workspace = use_state(String::new);
     let state = use_state(|| RunState::Idle);
-    let signals = use_state(Vec::<SimulationSignal>::new);
-    let plotted = use_state(Vec::<usize>::new);
-    let buffers = use_mut_ref(Buffers::default);
-    let session = use_mut_ref(|| None::<WasmSession>);
-    let sender = use_mut_ref(|| None::<ws_bridge::yew_client::Sender<SimulationSocket>>);
-    let last_refresh = use_mut_ref(|| 0.0f64);
+    let ctl = use_mut_ref(Controller::default);
+    // Bumped whenever the plot must be rebuilt (new data set or selection).
+    let rebind = use_reload();
     let plot_host = use_node_ref();
     let reload = use_reload();
     let runs = use_fetch((props.file_id, reload.0), |(f, _)| api::simulation_runs(f));
     let canvas_id = format!("sim-plot-{}", props.file_id);
 
-    // Rebind the figure whenever the plotted set changes.
     {
-        let (session, buffers, signals, plot_host, canvas_id) = (
-            session.clone(),
-            buffers.clone(),
-            signals.clone(),
-            plot_host.clone(),
-            canvas_id.clone(),
-        );
-        use_effect_with((*plotted).clone(), move |plotted| {
+        let (ctl, plot_host, canvas_id) = (ctl.clone(), plot_host.clone(), canvas_id.clone());
+        use_effect_with(rebind.0, move |_| {
             let width = plot_host
                 .cast::<web_sys::HtmlElement>()
                 .map(|e| e.client_width() as f64)
                 .unwrap_or(800.0);
-            *session.borrow_mut() = None;
-            if !signals.is_empty() {
-                match bind_plot(&canvas_id, width, &signals, plotted, &buffers.borrow()) {
-                    Ok(s) => *session.borrow_mut() = Some(s),
-                    Err(e) => gloo_console_log(&e),
+            if let Err(e) = ctl.borrow_mut().bind_plot(&canvas_id, width) {
+                web_sys::console::error_1(&e.into());
+            }
+        });
+    }
+
+    // On unmount: supersede any running stream and ask the server to cancel.
+    {
+        let ctl = ctl.clone();
+        use_effect_with((), move |_| {
+            move || {
+                let live = {
+                    let mut c = ctl.borrow_mut();
+                    c.generation += 1;
+                    c.session = None;
+                    c.sender.take().zip(c.run_id.take())
+                };
+                // The superseded stream task drops the receiver on its next
+                // message, closing the socket; cancel explicitly first.
+                if let Some((mut tx, run_id)) = live {
+                    spawn_local(async move {
+                        let _ = tx
+                            .send(SimulationClientMsg::CancelSimulation { run_id })
+                            .await;
+                    });
                 }
             }
         });
     }
 
     let run = {
-        let (
-            options,
-            workspace,
-            state,
-            signals,
-            plotted,
-            buffers,
-            session,
-            sender,
-            last_refresh,
-            reload,
-        ) = (
+        let (options, workspace, state, ctl, rebind, reload) = (
             options.clone(),
             workspace.clone(),
             state.clone(),
-            signals.clone(),
-            plotted.clone(),
-            buffers.clone(),
-            session.clone(),
-            sender.clone(),
-            last_refresh.clone(),
+            ctl.clone(),
+            rebind.clone(),
             reload.clone(),
         );
         let (file_id, version) = (props.file_id, props.version);
         let outports = props.outports.clone();
         Callback::from(move |_: MouseEvent| {
-            let outports = outports.clone();
             let ws_vars = match parse_workspace(&workspace) {
                 Ok(v) => v,
                 Err(e) => {
@@ -286,21 +399,16 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     return;
                 }
             };
-            *buffers.borrow_mut() = Buffers::default();
-            *session.borrow_mut() = None;
-            signals.set(Vec::new());
-            plotted.set(Vec::new());
+            let generation = ctl.borrow_mut().reset();
+            rebind.dispatch(());
             state.set(RunState::Connecting);
-            let (mut tx, mut rx) = conn.split();
-            let (state, signals, plotted, buffers, session, sender, last_refresh, reload) = (
+            let (mut tx, rx) = conn.split();
+            let (state, ctl, rebind, reload, outports) = (
                 state.clone(),
-                signals.clone(),
-                plotted.clone(),
-                buffers.clone(),
-                session.clone(),
-                sender.clone(),
-                last_refresh.clone(),
+                ctl.clone(),
+                rebind.clone(),
                 reload.clone(),
+                outports.clone(),
             );
             spawn_local(async move {
                 if let Err(e) = tx
@@ -310,136 +418,73 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     state.set(RunState::Error(format!("send failed: {e}")));
                     return;
                 }
-                *sender.borrow_mut() = Some(tx);
-                // Plotted indices as known to this task (state handles are snapshots).
-                let mut shown: Vec<usize> = Vec::new();
-                while let Some(msg) = rx.recv().await {
-                    match msg {
-                        Ok(SimulationServerMsg::SimulationStatus { run }) => match run.status {
-                            SimulationStatus::Running => state.set(RunState::Running(Some(run.id))),
-                            done => {
-                                if let Some(s) = session.borrow().as_ref() {
-                                    refresh_plot(s, &shown, &buffers.borrow());
-                                }
-                                state.set(RunState::Finished(done, run.error));
-                                break;
-                            }
-                        },
-                        Ok(SimulationServerMsg::SimulationStarted {
-                            run_id,
-                            signals: sigs,
-                        }) => {
-                            buffers.borrow_mut().columns = vec![Vec::new(); sigs.len()];
-                            shown = default_plotted(&sigs, &outports);
-                            signals.set(sigs);
-                            plotted.set(shown.clone());
-                            state.set(RunState::Running(Some(run_id)));
-                        }
-                        Ok(SimulationServerMsg::SimulationSamples { time, values, .. }) => {
-                            {
-                                let mut b = buffers.borrow_mut();
-                                b.time.extend_from_slice(&time);
-                                for row in &values {
-                                    for (col, v) in b.columns.iter_mut().zip(row) {
-                                        col.push(*v);
-                                    }
-                                }
-                            }
-                            let now = js_sys::Date::now();
-                            if now - *last_refresh.borrow() > REFRESH_MS {
-                                *last_refresh.borrow_mut() = now;
-                                if let Some(s) = session.borrow().as_ref() {
-                                    refresh_plot(s, &shown, &buffers.borrow());
-                                }
-                            }
-                        }
-                        Ok(SimulationServerMsg::Error { message }) => {
-                            state.set(RunState::Error(message));
-                            break;
-                        }
-                        Ok(SimulationServerMsg::Heartbeat) => {}
-                        Err(e) => {
-                            state.set(RunState::Error(format!("connection error: {e}")));
-                            break;
-                        }
-                    }
+                if ctl.borrow().generation != generation {
+                    return;
                 }
-                *sender.borrow_mut() = None;
+                ctl.borrow_mut().sender = Some(tx);
+                stream(ctl, generation, rx, state, rebind, outports).await;
                 reload.dispatch(());
             });
         })
     };
 
     let cancel = {
-        let (sender, state) = (sender.clone(), state.clone());
+        let (ctl, state) = (ctl.clone(), state.clone());
         Callback::from(move |_: MouseEvent| {
             let RunState::Running(Some(run_id)) = &*state else {
                 return;
             };
             let run_id = *run_id;
-            let sender = sender.clone();
+            let ctl = ctl.clone();
             spawn_local(async move {
-                let tx = sender.borrow_mut().take();
+                let tx = ctl.borrow_mut().sender.take();
                 if let Some(mut tx) = tx {
                     let _ = tx
                         .send(SimulationClientMsg::CancelSimulation { run_id })
                         .await;
-                    *sender.borrow_mut() = Some(tx);
+                    ctl.borrow_mut().sender.get_or_insert(tx);
                 }
             });
         })
     };
 
     let load_run = {
-        let (state, signals, plotted, buffers, session) = (
-            state.clone(),
-            signals.clone(),
-            plotted.clone(),
-            buffers.clone(),
-            session.clone(),
-        );
+        let (state, ctl, rebind) = (state.clone(), ctl.clone(), rebind.clone());
         let outports = props.outports.clone();
         move |run: SimulationRun| {
-            let (state, signals, plotted, buffers, session) = (
-                state.clone(),
-                signals.clone(),
-                plotted.clone(),
-                buffers.clone(),
-                session.clone(),
-            );
-            let outports = outports.clone();
+            let (state, ctl, rebind, outports) =
+                (state.clone(), ctl.clone(), rebind.clone(), outports.clone());
             Callback::from(move |_: MouseEvent| {
-                let (state, signals, plotted, buffers, session) = (
-                    state.clone(),
-                    signals.clone(),
-                    plotted.clone(),
-                    buffers.clone(),
-                    session.clone(),
-                );
-                let outports = outports.clone();
+                if state.active() {
+                    return;
+                }
+                let generation = ctl.borrow_mut().reset();
+                rebind.dispatch(());
+                let (state, ctl, rebind, outports) =
+                    (state.clone(), ctl.clone(), rebind.clone(), outports.clone());
                 let id = run.id;
                 spawn_local(async move {
-                    match api::simulation_result(id).await {
+                    let result = api::simulation_result(id).await;
+                    if ctl.borrow().generation != generation {
+                        return;
+                    }
+                    match result {
                         Ok(result) => {
-                            let Some(trace) = result.trace else {
-                                state.set(RunState::Finished(result.run.status, result.run.error));
-                                return;
-                            };
-                            let sigs: Vec<SimulationSignal> = trace
-                                .signals
-                                .keys()
-                                .map(|k| SimulationSignal {
-                                    id: k.clone(),
-                                    name: k.clone(),
-                                })
-                                .collect();
-                            *session.borrow_mut() = None;
-                            *buffers.borrow_mut() = Buffers {
-                                time: trace.time,
-                                columns: trace.signals.into_values().collect(),
-                            };
-                            plotted.set(default_plotted(&sigs, &outports));
-                            signals.set(sigs);
+                            if let Some(trace) = result.trace {
+                                let mut c = ctl.borrow_mut();
+                                c.signals = trace
+                                    .signals
+                                    .keys()
+                                    .map(|k| SimulationSignal {
+                                        id: k.clone(),
+                                        name: k.clone(),
+                                    })
+                                    .collect();
+                                c.plotted = default_plotted(&c.signals, &outports);
+                                c.time = trace.time;
+                                c.columns = trace.signals.into_values().collect();
+                            }
+                            rebind.dispatch(());
                             state.set(RunState::Finished(result.run.status, result.run.error));
                         }
                         Err(e) => state.set(RunState::Error(e.to_string())),
@@ -486,41 +531,42 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         })
     };
     let toggle_signal = |i: usize| {
-        let plotted = plotted.clone();
+        let (ctl, rebind) = (ctl.clone(), rebind.clone());
         Callback::from(move |_: Event| {
-            let mut p = (*plotted).clone();
-            if let Some(pos) = p.iter().position(|&x| x == i) {
-                p.remove(pos);
-            } else {
-                p.push(i);
-                p.sort_unstable();
+            {
+                let mut c = ctl.borrow_mut();
+                if let Some(pos) = c.plotted.iter().position(|&x| x == i) {
+                    c.plotted.remove(pos);
+                } else {
+                    c.plotted.push(i);
+                    c.plotted.sort_unstable();
+                }
             }
-            plotted.set(p);
+            rebind.dispatch(());
         })
     };
 
-    let running = matches!(*state, RunState::Connecting | RunState::Running(_));
+    let running = state.active();
+    let c = ctl.borrow();
+    let samples = c.time.len();
     let status = match &*state {
         RunState::Idle => html! {},
         RunState::Connecting => html! { <span class="muted">{ "Connecting…" }</span> },
         RunState::Running(_) => {
-            html! { <span class="running">{ format!("Running… {} samples", buffers.borrow().time.len()) }</span> }
+            html! { <span class="running">{ format!("Running… {samples} samples") }</span> }
         }
         RunState::Finished(SimulationStatus::Completed, _) => {
-            html! { <span class="ok">{ format!("Completed · {} samples", buffers.borrow().time.len()) }</span> }
+            html! { <span class="ok">{ format!("Completed · {samples} samples") }</span> }
         }
         RunState::Finished(s, err) => html! {
             <span class="error">{ format!("{s:?}{}", err.as_ref().map(|e| format!(": {e}")).unwrap_or_default()) }</span>
         },
         RunState::Error(e) => html! { <span class="error">{ e }</span> },
     };
-    let csv_href = (!signals.is_empty() && !running).then(|| {
+    let csv_href = (!c.signals.is_empty() && !running).then(|| {
         format!(
             "data:text/csv;charset=utf-8,{}",
-            String::from(js_sys::encode_uri_component(&csv(
-                &signals,
-                &buffers.borrow()
-            )))
+            String::from(js_sys::encode_uri_component(&c.csv()))
         )
     });
     let o = &*options;
@@ -563,9 +609,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 </div>
                 <aside class="signal-list">
                     <h4>{ "Signals" }</h4>
-                    { for signals.iter().enumerate().map(|(i, s)| html! {
+                    { for c.signals.iter().enumerate().map(|(i, s)| html! {
                         <label class="signal">
-                            <input type="checkbox" checked={plotted.contains(&i)} onchange={toggle_signal(i)} />
+                            <input type="checkbox" checked={c.plotted.contains(&i)} onchange={toggle_signal(i)} />
                             { label(&s.name) }
                         </label>
                     }) }
@@ -574,7 +620,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         <ul class="plain runs">
                             { for rs.iter().map(|r| html! {
                                 <li>
-                                    <a onclick={load_run(r.clone())}>
+                                    <a class={classes!(running.then_some("disabled"))} onclick={load_run(r.clone())}>
                                         { format!("v{} · {:?}", r.file_version, r.status) }
                                     </a>
                                     <div class="muted">{ r.created_at.format("%Y-%m-%d %H:%M:%S").to_string() }</div>
@@ -586,8 +632,4 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             </div>
         </div>
     }
-}
-
-fn gloo_console_log(msg: &str) {
-    web_sys::console::error_1(&msg.into());
 }
