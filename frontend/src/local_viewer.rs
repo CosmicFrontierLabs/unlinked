@@ -26,14 +26,14 @@ fn load_file(
     generation: Rc<std::cell::Cell<u64>>,
 ) {
     let name = file.name();
+    let ticket = generation.get().wrapping_add(1);
+    generation.set(ticket);
     if file.size() > MAX_FILE_BYTES {
         state.set(Load::Failed(format!(
             "{name}: larger than the 16 MiB limit"
         )));
         return;
     }
-    let ticket = generation.get() + 1;
-    generation.set(ticket);
     state.set(Load::Loading(name.clone()));
     spawn_local(async move {
         let blob = gloo_file::File::from(file);
