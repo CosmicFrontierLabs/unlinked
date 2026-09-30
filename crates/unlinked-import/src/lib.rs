@@ -9,6 +9,7 @@
 mod convert;
 pub mod mdl;
 pub mod slx;
+pub mod stateflow;
 pub mod tree;
 
 use convert::{read_type_defaults, sim_config, Converter, TypeDefaults};
@@ -137,6 +138,8 @@ pub fn import_slx(filename: &str, bytes: &[u8]) -> Result<Model, ImportError> {
         .child("System")
         .ok_or_else(|| ImportError::NotAModel("model has no root <System>".into()))?;
     let root = Converter::new(&defaults).system(system_node, &name)?;
+    let mut charts = stateflow::read_slx(&mut pkg)?;
+    stateflow::relativize(&mut charts, &name, &root);
 
     Ok(Model {
         name,
@@ -145,6 +148,7 @@ pub fn import_slx(filename: &str, bytes: &[u8]) -> Result<Model, ImportError> {
         config,
         root,
         workspace: BTreeMap::new(),
+        charts,
     })
 }
 
@@ -170,6 +174,12 @@ pub fn import_mdl(filename: &str, text: &str) -> Result<Model, ImportError> {
         .child("System")
         .ok_or_else(|| ImportError::NotAModel("model has no root System".into()))?;
     let root = Converter::new(&defaults).system(system_node, &name)?;
+    let mut charts = sections
+        .iter()
+        .filter(|s| s.tag == "Stateflow")
+        .flat_map(stateflow::mdl_charts)
+        .collect::<Vec<_>>();
+    stateflow::relativize(&mut charts, &name, &root);
 
     Ok(Model {
         name,
@@ -178,6 +188,7 @@ pub fn import_mdl(filename: &str, text: &str) -> Result<Model, ImportError> {
         config,
         root,
         workspace: BTreeMap::new(),
+        charts,
     })
 }
 

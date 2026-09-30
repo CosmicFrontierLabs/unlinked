@@ -26,6 +26,7 @@ fn model() -> Model {
         source: SourceFormat::Mdl,
         simulink_version: None,
         config: SimConfig::default(),
+        charts: Vec::new(),
         workspace: BTreeMap::from([
             ("gain".into(), "twice/2".into()),
             ("twice".into(), "4".into()),

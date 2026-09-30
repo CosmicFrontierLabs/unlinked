@@ -46,6 +46,7 @@ fn model(numerator: &str, denominator: &str) -> Model {
         simulink_version: None,
         config: SimConfig::default(),
         workspace: BTreeMap::new(),
+        charts: Vec::new(),
         root: System {
             blocks: vec![
                 block("source", "Constant", &[("Value", "1")]),
