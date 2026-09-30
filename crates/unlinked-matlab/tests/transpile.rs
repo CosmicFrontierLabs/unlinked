@@ -25,10 +25,10 @@ fn expression_semantics() {
 #[test]
 fn diagnostics_reject_unsupported_and_unbound() {
     for source in [
-        "a = [1 2]",
+        "a = {1 2}",
         "disp(missing)",
         "system('echo hi')",
-        "while 1\nend",
+        "switch 1\nend",
         "a = unknown(2)",
         "x = sin(1,2)",
         "if 1\na=2\nend\ndisp(a)",
@@ -38,7 +38,7 @@ fn diagnostics_reject_unsupported_and_unbound() {
     ] {
         assert!(transpile(source).is_err(), "accepted {source}");
     }
-    let error = transpile("a = 1;\nb = [2];").unwrap_err();
+    let error = transpile("a = 1;\nb = [2,,3];").unwrap_err();
     assert_eq!(error.line, 2);
 }
 

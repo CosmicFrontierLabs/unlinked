@@ -25,5 +25,6 @@ js-sys = "0.3.106"
 uuid = { version = "1.26.1", features = ["js"] }
 chrono = { version = "0.4.45", default-features = false, features = ["serde", "clock", "wasmbind"] }
 gloo-utils = "0.3.0"
+unlinked-matlab = { path = "../crates/unlinked-matlab" }
 rizzma = { version = "1.13.0", default-features = false, features = ["wasm"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }

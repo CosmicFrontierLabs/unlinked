@@ -301,3 +301,27 @@ fn coverage_reports_failures_without_claiming_execution() {
     assert!(report["models"][0]["import_error"].is_string());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn explicit_root_inputs_use_workspace_and_reject_unbound_or_duplicate_ids() {
+    let model = std::fs::read_to_string(fixture())
+        .unwrap()
+        .replace("BlockType Constant", "BlockType Inport");
+    let args = [
+        "sim", "-", "--stop", "0.2", "--step", "0.1", "--solver", "rk4",
+    ];
+    let missing = stdin(&args, model.as_bytes());
+    assert!(!missing.status.success());
+    let mut bound = args.to_vec();
+    bound.extend(["--var", "u=5", "--input-value", "1=u"]);
+    let output = stdin(&bound, model.as_bytes());
+    success(&output);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["trace"]["signals"]["2"],
+        serde_json::json!([15.0, 15.0, 15.0])
+    );
+    assert_eq!(result["inputs"]["1"], "u");
+    bound.extend(["--input-value", "1=6"]);
+    assert!(!stdin(&bound, model.as_bytes()).status.success());
+}

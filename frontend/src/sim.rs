@@ -398,6 +398,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 options: (*options).clone(),
                 workspace: ws_vars,
                 version: Some(version),
+                init_script: None,
             };
             let conn = match ws_bridge::yew_client::connect::<SimulationSocket>() {
                 Ok(c) => c,
