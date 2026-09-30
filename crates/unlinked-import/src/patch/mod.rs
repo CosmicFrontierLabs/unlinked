@@ -36,18 +36,24 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
     }
     let utf8 = std::str::from_utf8(bytes).is_ok();
     let text = mdl::apply(&decode_text(bytes), &named)?;
-    Ok(if utf8 {
-        text.into_bytes()
+    if utf8 {
+        Ok(text.into_bytes())
     } else {
         encode_cp1252(&text)
-    })
+    }
 }
 
 /// Inverse of the windows-1252 decoding used on import, for files that were
-/// not UTF-8. Characters outside windows-1252 become `?`.
-fn encode_cp1252(text: &str) -> Vec<u8> {
+/// not UTF-8. Characters windows-1252 cannot represent are rejected.
+fn encode_cp1252(text: &str) -> Result<Vec<u8>, ImportError> {
     text.chars()
-        .map(|c| (0u8..=255).find(|&b| crate::cp1252(b) == c).unwrap_or(b'?'))
+        .map(|c| {
+            (0u8..=255).find(|&b| crate::cp1252(b) == c).ok_or_else(|| {
+                ImportError::Edit(format!(
+                    "{c:?} cannot be stored in this windows-1252 encoded file"
+                ))
+            })
+        })
         .collect()
 }
 
@@ -111,6 +117,7 @@ mod tests {
     #[test]
     fn cp1252_roundtrips() {
         let bytes = b"\x80 caf\xe9 \x93q\x94";
-        assert_eq!(encode_cp1252(&decode_text(bytes)), bytes);
+        assert_eq!(encode_cp1252(&decode_text(bytes)).unwrap(), bytes);
+        assert!(matches!(encode_cp1252("漢字"), Err(ImportError::Edit(_))));
     }
 }

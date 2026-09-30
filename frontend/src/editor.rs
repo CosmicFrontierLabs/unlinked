@@ -191,9 +191,9 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 <span class="muted">{ "Drag blocks, edit names and parameters in the inspector, Delete removes the selected block." }</span>
                 <span class="spacer" />
                 <span>{ format!("{count} change{}", if count == 1 { "" } else { "s" }) }</span>
-                <button onclick={undo} disabled={count == 0}>{ "Undo" }</button>
-                <button onclick={discard}>{ "Discard" }</button>
-                <input placeholder="Change message" value={(*message).clone()} oninput={set_message} />
+                <button onclick={undo} disabled={count == 0 || *saving}>{ "Undo" }</button>
+                <button onclick={discard} disabled={*saving}>{ "Discard" }</button>
+                <input placeholder="Change message" value={(*message).clone()} oninput={set_message} disabled={*saving} />
                 <button class="primary" onclick={save} disabled={count == 0 || *saving}>
                     { if *saving { "Saving…" } else { "Save as new version" } }
                 </button>
@@ -213,7 +213,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 <div class="edit-bar error">{ e }</div>
             }
             <DiagramView {model} fit_key={props.fit_key.clone()}
-                on_edit={(*editing).then(|| on_edit.clone())} />
+                on_edit={(*editing && !*saving).then(|| on_edit.clone())} />
         </>
     }
 }

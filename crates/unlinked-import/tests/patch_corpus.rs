@@ -14,7 +14,9 @@ fn corpus_dir() -> Option<PathBuf> {
 }
 
 fn models(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -65,6 +67,38 @@ fn edits_for(model: &Model) -> Vec<Edit> {
     edits
 }
 
+/// What differs between two versions of a model file: zip entry names for
+/// SLX (entries added, removed or with different content), or `"file"` for
+/// MDL text.
+fn changed_content(old: &[u8], new: &[u8]) -> Vec<String> {
+    if !old.starts_with(b"PK\x03\x04") {
+        return if old == new {
+            vec![]
+        } else {
+            vec!["file".into()]
+        };
+    }
+    let entries = |b: &[u8]| {
+        let mut a = zip::ZipArchive::new(std::io::Cursor::new(b.to_vec())).unwrap();
+        (0..a.len())
+            .map(|i| {
+                let mut f = a.by_index(i).unwrap();
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut f, &mut data).unwrap();
+                (f.name().to_string(), data)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let (a, b) = (entries(old), entries(new));
+    a.keys()
+        .chain(b.keys())
+        .filter(|k| a.get(*k) != b.get(*k))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 #[test]
 fn patched_corpus_models_reimport_to_the_edited_ir() {
     let Some(dir) = corpus_dir() else {
@@ -80,10 +114,10 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
         let bytes = std::fs::read(f).unwrap();
         let original = unlinked_import::import(&name, &bytes).unwrap();
 
-        // No edits: the content is unchanged.
+        // No edits: every byte of content is unchanged.
         let same = unlinked_import::patch::apply_edits(&name, &bytes, &[]).unwrap();
-        if unlinked_import::import(&name, &same).unwrap() != original {
-            failures.push(format!("{name}: empty patch changed the model"));
+        if let Some(changed) = changed_content(&bytes, &same).into_iter().next() {
+            failures.push(format!("{name}: empty patch changed {changed}"));
         }
 
         let edits = edits_for(&original);
@@ -93,6 +127,18 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
         }
         match unlinked_import::patch::apply_edits(&name, &bytes, &edits) {
             Ok(patched) => match unlinked_import::import(&name, &patched) {
+                // Edits touch only diagram parts; everything else is raw.
+                _ if changed_content(&bytes, &patched).iter().any(|p| {
+                    !p.starts_with("simulink/blockdiagram.xml")
+                        && !p.starts_with("simulink/systems/")
+                        && p != "file"
+                }) =>
+                {
+                    failures.push(format!(
+                        "{name}: edit changed non-diagram content {:?}",
+                        changed_content(&bytes, &patched)
+                    ));
+                }
                 Ok(actual) if actual.root == expected.root => {}
                 Ok(actual) => {
                     let diff = unlinked_model::diff::diff(&expected, &actual);

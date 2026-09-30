@@ -67,6 +67,15 @@ fn decode(lines: &[String]) -> String {
     out
 }
 
+/// Whether `value` can be written unquoted without changing the file's
+/// structure: a single non-empty token with no quotes, braces or newlines.
+fn is_bare_token(value: &str) -> bool {
+    !value.is_empty()
+        && !value
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '{' | '}' | '#'))
+}
+
 fn quote(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
@@ -120,7 +129,7 @@ impl Section {
                 _ => None,
             })
             .unwrap_or_else(|| format!("{}  ", indent_of(&self.header)));
-        let line = format!("{indent}{key}\t{text}");
+        let line = format!("{indent}{key}\t{text}{}", self.eol());
         match self
             .items
             .iter_mut()
@@ -166,28 +175,27 @@ impl Section {
 
     fn write(&self, out: &mut String) {
         out.push_str(&self.header);
-        out.push('\n');
         for i in &self.items {
             write_item(i, out);
         }
         out.push_str(&self.footer);
-        out.push('\n');
     }
+
+    /// The line terminator this section uses.
+    fn eol(&self) -> &str {
+        eol_of(&self.header)
+    }
+}
+
+fn eol_of(line: &str) -> &str {
+    &line[line.trim_end_matches(['\r', '\n']).len()..]
 }
 
 fn write_item(item: &Item, out: &mut String) {
     match item {
-        Item::Prop { lines, .. } => {
-            for l in lines {
-                out.push_str(l);
-                out.push('\n');
-            }
-        }
+        Item::Prop { lines, .. } => lines.iter().for_each(|l| out.push_str(l)),
         Item::Section(s) => s.write(out),
-        Item::Raw(l) => {
-            out.push_str(l);
-            out.push('\n');
-        }
+        Item::Raw(l) => out.push_str(l),
     }
 }
 
@@ -202,15 +210,16 @@ fn parse(text: &str) -> Result<MdlFile, ImportError> {
     let mut stack: Vec<Section> = Vec::new();
     let mut top: Vec<Item> = Vec::new();
     let mut tail = String::new();
-    let mut lines = text.lines().peekable();
+    // Lines keep their own terminators (LF, CRLF or none at EOF).
+    let mut lines = text.split_inclusive('\n').peekable();
     let mut budget = MAX_NODES;
     let mut offset = 0usize;
     while let Some(line) = lines.next() {
-        offset += line.len() + 1;
+        offset += line.len();
         budget = budget.checked_sub(1).ok_or_else(|| err("too many lines"))?;
         let t = line.trim();
         if t.starts_with("__MWOPC_PACKAGE_BEGIN__") {
-            tail = text[offset - line.len() - 1..].to_string();
+            tail = text[offset - line.len()..].to_string();
             break;
         }
         let item = if t == "}" {
@@ -236,7 +245,7 @@ fn parse(text: &str) -> Result<MdlFile, ImportError> {
             let quoted = t[key.len()..].trim_start().starts_with('"');
             while quoted && lines.peek().is_some_and(|n| n.trim().starts_with('"')) {
                 let next = lines.next().unwrap();
-                offset += next.len() + 1;
+                offset += next.len();
                 prop_lines.push(next.to_string());
             }
             Item::Prop {
@@ -272,9 +281,15 @@ impl MdlFile {
         })?;
         let mut sys = model.sections_mut().find(|s| s.tag == "System")?;
         for name in path {
+            let is_named =
+                |b: &Section| b.tag == "Block" && b.prop("Name").as_deref() == Some(name.as_str());
+            // An ambiguous name has no single target.
+            if sys.sections().filter(|b| is_named(b)).count() != 1 {
+                return None;
+            }
             sys = sys
                 .sections_mut()
-                .find(|b| b.tag == "Block" && b.prop("Name").as_deref() == Some(name.as_str()))?
+                .find(|b| is_named(b))?
                 .sections_mut()
                 .find(|s| s.tag == "System")?;
         }
@@ -410,11 +425,18 @@ fn apply_edit(file: &mut MdlFile, edit: &Edit, name: &str) -> Result<(), ImportE
     let sys = file
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
-    let i = sys
-        .items
-        .iter()
-        .position(|i| matches!(i, Item::Section(b) if b.tag == "Block" && b.prop("Name").as_deref() == Some(name)))
-        .ok_or_else(|| ImportError::Mdl(format!("no block {name:?}")))?;
+    let mut matches = sys.items.iter().enumerate().filter(|(_, i)| {
+        matches!(i, Item::Section(b) if b.tag == "Block" && b.prop("Name").as_deref() == Some(name))
+    });
+    let i = match (matches.next(), matches.next()) {
+        (Some((i, _)), None) => i,
+        (None, _) => return Err(ImportError::Edit(format!("no block {name:?}"))),
+        (Some(_), Some(_)) => {
+            return Err(ImportError::Edit(format!(
+                "block name {name:?} is ambiguous"
+            )))
+        }
+    };
     fn block_at(sys: &mut Section, i: usize) -> &mut Section {
         match &mut sys.items[i] {
             Item::Section(b) => b,
@@ -438,7 +460,7 @@ fn apply_edit(file: &mut MdlFile, edit: &Edit, name: &str) -> Result<(), ImportE
         } => {
             let b = block_at(sys, i);
             if !set_mask_parameter(b, key, value) {
-                let bare = b.was_quoted(key) == Some(false);
+                let bare = b.was_quoted(key) == Some(false) && is_bare_token(value);
                 b.set_prop(key, value, bare);
             }
         }
@@ -519,6 +541,41 @@ mod tests {
             !out.contains("Line {"),
             "line left without destination is removed:\n{out}"
         );
+    }
+
+    #[test]
+    fn crlf_and_opc_tail_are_preserved() {
+        let src = "Model {\r\n  System {\r\n    Block {\r\n      Name\t\"g\"\r\n      Gain\t\"2\"\r\n    }\r\n  }\r\n}\r\n__MWOPC_PACKAGE_BEGIN__ R2020a\r\nbinary\ttail";
+        assert_eq!(parse(src).unwrap().to_text(), src);
+        let sp = Edit::SetParameter {
+            system: vec![],
+            id: "x".into(),
+            name: "Gain".into(),
+            value: "5".into(),
+        };
+        let out = apply(src, &[(sp, "g".into())]).unwrap();
+        assert_eq!(out, src.replace("Gain\t\"2\"", "Gain\t\"5\""));
+    }
+
+    #[test]
+    fn bare_values_cannot_inject_structure() {
+        let src =
+            "Model {\n  System {\n    Block {\n      Name\t\"g\"\n      Inputs\t2\n    }\n  }\n}\n";
+        let sp = |value: &str| {
+            let e = Edit::SetParameter {
+                system: vec![],
+                id: "x".into(),
+                name: "Inputs".into(),
+                value: value.into(),
+            };
+            apply(src, &[(e, "g".into())]).unwrap()
+        };
+        assert!(sp("3").contains("Inputs\t3\n"));
+        let out = sp("3\n    }\n    Block {\n      Name\t\"evil\"");
+        assert!(out.contains("Inputs\t\"3\\n    }"), "{out}");
+        let reparsed = parse(&out).unwrap().to_text();
+        assert_eq!(reparsed, out);
+        assert_eq!(out.lines().filter(|l| l.trim() == "Block {").count(), 1);
     }
 
     #[test]

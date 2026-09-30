@@ -101,13 +101,22 @@ impl XElem {
             .iter()
             .filter_map(|c| match c {
                 XNode::Text(t) => Some(unescape(t)),
-                _ => None,
+                XNode::Raw(r) => r
+                    .strip_prefix("<![CDATA[")
+                    .and_then(|r| r.strip_suffix("]]>"))
+                    .map(str::to_string),
+                XNode::Element(_) => None,
             })
             .collect()
     }
 
+    /// Replace all character data (text and CDATA sections) with `value`.
     pub fn set_text(&mut self, value: &str) {
-        self.children.retain(|c| !matches!(c, XNode::Text(_)));
+        self.children.retain(|c| match c {
+            XNode::Text(_) => false,
+            XNode::Raw(r) => !r.starts_with("<![CDATA["),
+            XNode::Element(_) => true,
+        });
         self.children.insert(0, XNode::Text(escape_text(value)));
         self.empty = false;
     }
@@ -170,8 +179,10 @@ impl XElem {
         for (k, v) in &self.attrs {
             out.push(' ');
             out.push_str(k);
+            // Values are kept as written; one that was single-quoted may
+            // contain `"`, which must be escaped inside double quotes.
             out.push_str("=\"");
-            out.push_str(v);
+            out.push_str(&v.replace('"', "&quot;"));
             out.push('"');
         }
         if self.empty && self.children.is_empty() {
@@ -200,6 +211,13 @@ pub struct Document {
 }
 
 impl Document {
+    pub fn root(&self) -> Option<&XElem> {
+        self.nodes.iter().find_map(|n| match n {
+            XNode::Element(e) => Some(e),
+            _ => None,
+        })
+    }
+
     pub fn root_mut(&mut self) -> Option<&mut XElem> {
         self.nodes.iter_mut().find_map(|n| match n {
             XNode::Element(e) => Some(e),
@@ -322,6 +340,26 @@ mod tests {
             doc.to_xml(),
             "<B>\n  <P Name=\"a\">1</P>\n  <P Name=\"b\">2</P>\n</B>"
         );
+    }
+
+    #[test]
+    fn cdata_is_text_and_replaced_by_set_text() {
+        let mut doc = parse("<P Name=\"Gain\"><![CDATA[2]]></P>").unwrap();
+        let p = doc.root_mut().unwrap();
+        assert_eq!(p.text(), "2");
+        p.set_text("5");
+        assert_eq!(doc.to_xml(), "<P Name=\"Gain\">5</P>");
+    }
+
+    #[test]
+    fn single_quoted_attrs_stay_well_formed() {
+        let src = "<A Unknown='a\"b' Name=\"x\"/>";
+        let mut doc = parse(src).unwrap();
+        doc.root_mut().unwrap().set_attr("Name", "y");
+        let out = doc.to_xml();
+        let reparsed = parse(&out).unwrap();
+        assert_eq!(reparsed.root().unwrap().attr("Unknown").unwrap(), "a\"b");
+        assert_eq!(reparsed.root().unwrap().attr("Name").unwrap(), "y");
     }
 
     #[test]
