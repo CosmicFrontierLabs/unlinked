@@ -10,6 +10,7 @@ pub fn flatten(model: &Model) -> Result<Model, Error> {
     fn system(
         sys: &System,
         prefix: &str,
+        display_prefix: &str,
         depth: usize,
         out: &mut System,
     ) -> Result<BTreeMap<(String, PortKind, u32), Endpoint>, Error> {
@@ -47,7 +48,12 @@ pub fn flatten(model: &Model) -> Result<Model, Error> {
                     ));
                 }
                 let child_prefix = format!("{}/", id(prefix, &block.id).0);
-                system(sub, &child_prefix, depth + 1, out)?;
+                let child_display = if display_prefix.is_empty() {
+                    block.name.clone()
+                } else {
+                    format!("{display_prefix}/{}", block.name)
+                };
+                system(sub, &child_prefix, &child_display, depth + 1, out)?;
                 for port in &sub.blocks {
                     let kind = match port.block_type.as_str() {
                         "Inport" => PortKind::In,
@@ -82,6 +88,9 @@ pub fn flatten(model: &Model) -> Result<Model, Error> {
             } else {
                 let mut node = block.clone();
                 node.id = id(prefix, &block.id);
+                if !display_prefix.is_empty() {
+                    node.name = format!("{display_prefix}/{}", block.name);
+                }
                 if depth > 0 && ["Inport", "Outport"].contains(&node.block_type.as_str()) {
                     // Boundary interfaces are identity nodes. Keep type/sample parameters
                     // so the regular compiler can reject unsupported signal semantics.
@@ -120,6 +129,6 @@ pub fn flatten(model: &Model) -> Result<Model, Error> {
     }
     let mut result = model.clone();
     result.root = System::default();
-    system(&model.root, "", 0, &mut result.root)?;
+    system(&model.root, "", "", 0, &mut result.root)?;
     Ok(result)
 }

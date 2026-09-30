@@ -86,16 +86,22 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 "only one scalar output and ordinary input ports are supported",
             ));
         }
-        require(
-            block,
-            "OutDataTypeStr",
-            &[
-                "Inherit: Inherit via internal rule",
-                "Inherit: Inherit via back propagation",
-                "Inherit: Same as input",
-                "double",
-            ],
-        )?;
+        // Logical outputs are represented by exact scalar 0/1 values.
+        // Other blocks retain the existing double-only output restriction.
+        let logical_output = matches!(block.block_type.as_str(), "Logic" | "RelationalOperator")
+            && block.param("OutDataTypeStr") == Some("boolean");
+        if !logical_output {
+            require(
+                block,
+                "OutDataTypeStr",
+                &[
+                    "Inherit: Inherit via internal rule",
+                    "Inherit: Inherit via back propagation",
+                    "Inherit: Same as input",
+                    "double",
+                ],
+            )?;
+        }
         require(block, "SignalType", &["auto", "real"])?;
         require(block, "SaturateOnIntegerOverflow", &["off"])?;
         let p = |key, default| parameter(block, key, default, &ws);
@@ -214,6 +220,35 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             "UnitDelay" => Kind::UnitDelay {
                 initial: p("InitialCondition", "0")?,
             },
+            "Switch" => {
+                // Nonzero criteria agrees for both numeric and boolean controls.
+                // Threshold criteria need signal datatype propagation: Simulink
+                // treats boolean controls specially, so do not guess here.
+                if block.param("Criteria") != Some("u2 ~= 0") {
+                    return Err(block_error(id, "Switch currently requires Criteria=u2 ~= 0; threshold criteria need datatype propagation"));
+                }
+                require(block, "ZeroCross", &["off"])?;
+                Kind::Switch
+            }
+            "RelationalOperator" => {
+                require(block, "ZeroCross", &["off"])?;
+                Kind::Relational {
+                    operation: block.param("Operator").unwrap_or(">=").into(),
+                }
+            }
+            "Logic" => {
+                let operation = block.param("Operator").unwrap_or("AND").to_string();
+                let inputs = if operation == "NOT" {
+                    1
+                } else {
+                    block
+                        .param("Inputs")
+                        .unwrap_or("2")
+                        .parse::<usize>()
+                        .map_err(|_| block_error(id, "invalid Logic input count"))?
+                };
+                Kind::Logic { operation, inputs }
+            }
             "Abs" => Kind::Abs,
             "Trigonometry" => Kind::Unary {
                 operation: block.param("Operator").unwrap_or("sin").into(),
@@ -231,7 +266,7 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         };
         graph.nodes.push(Node {
             id: id.clone(),
-            name: block.name.clone(),
+            name: format!("{}/{}", model.name, block.name),
             kind,
         });
     }

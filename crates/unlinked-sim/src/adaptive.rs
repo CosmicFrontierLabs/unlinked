@@ -7,6 +7,42 @@
 //! dense-output/event implementation; observation boundaries are exact stops.
 use super::{Compiled, Error, Kind, Options};
 
+const TABLEAU: &[(f64, &[f64])] = &[
+    (1.0 / 5.0, &[1.0 / 5.0]),
+    (3.0 / 10.0, &[3.0 / 40.0, 9.0 / 40.0]),
+    (4.0 / 5.0, &[44.0 / 45.0, -56.0 / 15.0, 32.0 / 9.0]),
+    (
+        8.0 / 9.0,
+        &[
+            19372.0 / 6561.0,
+            -25360.0 / 2187.0,
+            64448.0 / 6561.0,
+            -212.0 / 729.0,
+        ],
+    ),
+    (
+        1.0,
+        &[
+            9017.0 / 3168.0,
+            -355.0 / 33.0,
+            46732.0 / 5247.0,
+            49.0 / 176.0,
+            -5103.0 / 18656.0,
+        ],
+    ),
+    (
+        1.0,
+        &[
+            35.0 / 384.0,
+            0.0,
+            500.0 / 1113.0,
+            125.0 / 192.0,
+            -2187.0 / 6784.0,
+            11.0 / 84.0,
+        ],
+    ),
+];
+
 pub(super) struct Adaptive {
     next_step: f64,
     attempts: usize,
@@ -37,7 +73,8 @@ impl Adaptive {
                 ));
             }
             self.attempts += 1;
-            let h = self.next_step.min(end - time);
+            let proposed = self.next_step;
+            let h = proposed.min(end - time);
             let next_time = if h == end - time { end } else { time + h };
             if !h.is_finite() || h <= 0.0 || next_time <= time {
                 return Err(Error::Options(
@@ -48,43 +85,8 @@ impl Adaptive {
             // an endpoint derivative from the left side of a Step must never be
             // reused as the derivative on its right side (no FSAL across events).
             let mut stages = vec![compiled.derivative(&compiled.evaluate(time, &state, false)?)];
-            let tableau: &[(f64, &[f64])] = &[
-                (1.0 / 5.0, &[1.0 / 5.0]),
-                (3.0 / 10.0, &[3.0 / 40.0, 9.0 / 40.0]),
-                (4.0 / 5.0, &[44.0 / 45.0, -56.0 / 15.0, 32.0 / 9.0]),
-                (
-                    8.0 / 9.0,
-                    &[
-                        19372.0 / 6561.0,
-                        -25360.0 / 2187.0,
-                        64448.0 / 6561.0,
-                        -212.0 / 729.0,
-                    ],
-                ),
-                (
-                    1.0,
-                    &[
-                        9017.0 / 3168.0,
-                        -355.0 / 33.0,
-                        46732.0 / 5247.0,
-                        49.0 / 176.0,
-                        -5103.0 / 18656.0,
-                    ],
-                ),
-                (
-                    1.0,
-                    &[
-                        35.0 / 384.0,
-                        0.0,
-                        500.0 / 1113.0,
-                        125.0 / 192.0,
-                        -2187.0 / 6784.0,
-                        11.0 / 84.0,
-                    ],
-                ),
-            ];
             let mut candidate = Vec::new();
-            for &(fraction, weights) in tableau {
+            for &(fraction, weights) in TABLEAU {
                 candidate = state
                     .iter()
                     .enumerate()
@@ -150,6 +152,11 @@ impl Adaptive {
                 state = candidate;
                 time = next_time;
                 self.next_step = h * if rejected { factor.min(1.0) } else { factor };
+                if h < proposed && !rejected {
+                    // An observation boundary is not evidence that the natural
+                    // integration step must shrink in the next interval.
+                    self.next_step = self.next_step.max(proposed);
+                }
                 rejected = false;
             } else {
                 self.next_step = h * factor.min(1.0);
@@ -157,5 +164,47 @@ impl Adaptive {
             }
         }
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Graph, Node, Solver, Wire};
+    #[test]
+    fn clipping_to_observation_boundary_does_not_force_regrowth() {
+        let graph = Graph {
+            nodes: vec![
+                Node {
+                    id: "constant".into(),
+                    name: "constant".into(),
+                    kind: Kind::Constant { value: 1.0 },
+                },
+                Node {
+                    id: "state".into(),
+                    name: "state".into(),
+                    kind: Kind::Integrator { initial: 0.0 },
+                },
+            ],
+            wires: vec![Wire {
+                source: "constant".into(),
+                target: "state".into(),
+                input: 0,
+            }],
+        };
+        let compiled = Compiled::new(&graph).unwrap();
+        let options = Options {
+            solver: Solver::Rk45,
+            max_internal_steps: 2,
+            ..Options::default()
+        };
+        let mut integrator = Adaptive::new(1.0);
+        let state = integrator
+            .advance(&compiled, &options, 0.0, 0.01, &[0.0])
+            .unwrap();
+        let state = integrator
+            .advance(&compiled, &options, 0.01, 1.01, &state)
+            .unwrap();
+        assert!((state[0] - 1.01).abs() < 1e-12);
     }
 }

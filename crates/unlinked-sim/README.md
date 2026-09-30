@@ -8,7 +8,12 @@ IDs mapped to scalar sample vectors, and the selected solver.
 
 Implemented: Constant/Ground, Clock, Step, time-based Sine, Gain, Bias, Sum/Add,
 Product/division, Saturation, Integrator, UnitDelay, Abs, scalar trigonometric
-and math operations, and single-input sinks. Ordinary virtual subsystems lower
+and math operations, scalar relational comparisons, logical operators, nonzero
+Switch routing, and single-input sinks. Logic and relational outputs use exact
+0/1 scalar values, including declared boolean outputs. Switch currently accepts
+only `Criteria=u2 ~= 0`; threshold criteria require signal datatype propagation
+to reproduce boolean-control behavior and therefore reject. Explicit zero-crossing
+detection on Switch/RelationalOperator rejects; no event root finding is implied. Ordinary virtual subsystems lower
 to identity boundary nodes with qualified block IDs. Raw block parameters and model
 workspace expressions use `unlinked-matlab::eval_expr`. Workspace dependencies
 resolve iteratively; unresolved/cyclic references fail.
