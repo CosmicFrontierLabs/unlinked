@@ -71,8 +71,26 @@ pub struct SystemDiff {
     pub connections_removed: Vec<Connection>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChartChange {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChartDiff {
+    pub id: String,
+    pub name: String,
+    pub previous_name: Option<String>,
+    pub change: ChartChange,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelDiff {
+    /// Chart code, graphical state, data, and timing changes.
+    #[serde(default)]
+    pub charts: Vec<ChartDiff>,
     pub blocks: Vec<BlockDiff>,
     /// Systems whose wiring changed.
     pub systems: Vec<SystemDiff>,
@@ -84,7 +102,8 @@ pub struct ModelDiff {
 
 impl ModelDiff {
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.charts.is_empty()
+            && self.blocks.is_empty()
             && self.systems.is_empty()
             && self.config.is_empty()
             && self.workspace.is_empty()
@@ -99,6 +118,12 @@ impl ModelDiff {
     pub fn touches(&self, path: &[String]) -> bool {
         self.blocks.iter().any(|b| b.system.starts_with(path))
             || self.systems.iter().any(|s| s.system.starts_with(path))
+            || self.charts.iter().any(|c| {
+                crate::stateflow::split_path(&c.name).starts_with(path)
+                    || c.previous_name
+                        .as_deref()
+                        .is_some_and(|name| crate::stateflow::split_path(name).starts_with(path))
+            })
     }
 }
 
@@ -247,7 +272,49 @@ pub fn diff(old: &Model, new: &Model) -> ModelDiff {
     diff_system(&old.root, &new.root, &[], &mut out);
     out.config = map_diff(&config_map(old), &config_map(new), &[]);
     out.workspace = map_diff(&old.workspace, &new.workspace, &[]);
+    out.charts = diff_charts(&old.charts, &new.charts);
     out
+}
+
+/// Preserve repeated/empty IDs by occurrence instead of silently collapsing them.
+fn diff_charts(old: &[crate::Chart], new: &[crate::Chart]) -> Vec<ChartDiff> {
+    fn keyed(charts: &[crate::Chart]) -> BTreeMap<(&str, usize), &crate::Chart> {
+        let mut counts = BTreeMap::new();
+        charts
+            .iter()
+            .map(|chart| {
+                let count = counts.entry(chart.id.as_str()).or_insert(0usize);
+                *count += 1;
+                ((chart.id.as_str(), *count), chart)
+            })
+            .collect()
+    }
+    let old = keyed(old);
+    let new = keyed(new);
+    old.keys()
+        .chain(new.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|key| {
+            let (chart, previous_name, change) = match (old.get(&key), new.get(&key)) {
+                (Some(a), Some(b)) if a != b => (
+                    *b,
+                    (a.name != b.name).then(|| a.name.clone()),
+                    ChartChange::Modified,
+                ),
+                (Some(a), None) => (*a, None, ChartChange::Removed),
+                (None, Some(b)) => (*b, None, ChartChange::Added),
+                _ => return None,
+            };
+            Some(ChartDiff {
+                id: chart.id.clone(),
+                name: chart.name.clone(),
+                previous_name,
+                change,
+            })
+        })
+        .collect()
 }
 
 /// Raw solver settings plus the normalized fields, which some files only
@@ -482,5 +549,34 @@ mod tests {
         });
         let d = diff(&old, &new);
         assert_eq!(d.blocks.len(), 1);
+    }
+    #[test]
+    fn chart_scripts_metadata_and_duplicate_ids_are_not_silently_ignored() {
+        let chart: crate::Chart = serde_json::from_value(serde_json::json!({
+            "id":"1", "name":"Sub/Function", "kind":"MatlabFunction",
+            "states":[], "transitions":[], "junctions":[], "script":"function y=f(u); y=u; end"
+        }))
+        .unwrap();
+        let mut a = model(System::default());
+        a.charts = vec![chart.clone(), chart];
+        let mut b = a.clone();
+        assert!(diff(&a, &b).is_empty());
+        b.charts[1].script = Some("function y=f(u); y=2*u; end".into());
+        let d = diff(&a, &b);
+        assert_eq!(d.charts.len(), 1);
+        assert_eq!(d.charts[0].change, ChartChange::Modified);
+        assert!(!d.is_empty());
+        assert!(d.touches(&["Sub".into()]));
+        b.charts[0].sample_time = Some("0.1".into());
+        assert_eq!(diff(&a, &b).charts.len(), 2);
+        b.charts.pop();
+        assert!(diff(&a, &b)
+            .charts
+            .iter()
+            .any(|c| c.change == ChartChange::Removed));
+        b.charts[0].name = "New/Function".into();
+        assert!(diff(&a, &b).touches(&["Sub".into()]));
+        assert!(diff(&a, &b).touches(&["New".into()]));
+        assert_eq!(diff(&model(System::default()), &a).charts.len(), 2);
     }
 }
