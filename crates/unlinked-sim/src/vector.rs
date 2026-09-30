@@ -678,6 +678,12 @@ fn infer(
             return Ok(vec![Some(Shape::vector(input.len() / ports)); *ports]);
         }
     };
+    if block.block_type == "ZeroOrderHold" && output.is_some_and(|s| s.len() > 1 && !s.vector) {
+        return Err(block_error(
+            id,
+            "ZeroOrderHold supports scalar and one-dimensional vector signals only",
+        ));
+    }
     if output.is_some_and(|s| s.len() == 0 || s.len() > MAX_ELEMENTS) {
         return Err(block_error(id, "signal element budget exceeded"));
     }

@@ -151,10 +151,11 @@ removal/bypass semantics are implemented, including nested and routing blocks.
 
 `ZeroOrderHold` samples its input at the initial hit and each subsequent period,
 then holds the value through observation samples and all continuous solver
-stages. Unlike UnitDelay, it has no one-period delay. Scalar, vector, and matrix
-signals retain their dimensions. An absent `SampleTime` defaults to one second;
-explicit `-1` uses the observation step only in single-rate models. Periods must
-be positive integer multiples of the observation step; offsets and continuous
+stages. Unlike UnitDelay, it has no one-period delay. Scalar and one-dimensional
+vector signals retain their dimensions; matrix signals reject. `SampleTime` must
+be explicitly specified (or resolved from imported block defaults). Missing or
+inherited (`-1`) sample times reject until rate inference is supported. Periods
+must be positive integer multiples of the observation step; offsets and continuous
 sample times reject. Sampling is direct-feedthrough at hits, so an algebraic
 feedback loop still rejects. See the [block reference](https://www.mathworks.com/help/simulink/slref/zeroorderhold.html).
 

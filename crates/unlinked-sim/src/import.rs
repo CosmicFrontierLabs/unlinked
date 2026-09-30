@@ -32,6 +32,9 @@ fn period_ticks(
     options: &Options,
     ws: &BTreeMap<String, f64>,
 ) -> Result<usize, Error> {
+    if block.block_type == "ZeroOrderHold" && block.param("SampleTime").is_none() {
+        return Err(block_error(&block.id.0, "ZeroOrderHold requires an explicit positive SampleTime; inherited rates are unsupported"));
+    }
     let random = matches!(
         block.block_type.as_str(),
         "RandomNumber" | "UniformRandomNumber"
@@ -41,14 +44,17 @@ fn period_ticks(
         "SampleTime",
         if random {
             "0.1"
-        } else if matches!(block.block_type.as_str(), "DigitalClock" | "ZeroOrderHold") {
+        } else if matches!(block.block_type.as_str(), "DigitalClock") {
             "1"
         } else {
             "-1"
         },
         ws,
     )?;
-    if value == -1.0 && block.block_type != "DigitalClock" && !random {
+    if value == -1.0
+        && !matches!(block.block_type.as_str(), "DigitalClock" | "ZeroOrderHold")
+        && !random
+    {
         return Ok(1);
     }
     let ticks = value / options.step;
@@ -117,17 +123,8 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             has_multirate |= period_ticks(block, options, &ws)? > 1;
             if matches!(
                 block.block_type.as_str(),
-                "UnitDelay" | "DiscreteTransferFcn" | "ZeroOrderHold"
-            ) && parameter(
-                block,
-                "SampleTime",
-                if block.block_type == "ZeroOrderHold" {
-                    "1"
-                } else {
-                    "-1"
-                },
-                &ws,
-            )? == -1.0
+                "UnitDelay" | "DiscreteTransferFcn"
+            ) && parameter(block, "SampleTime", "-1", &ws)? == -1.0
             {
                 inherited_discrete.get_or_insert(block.id.0.clone());
             }

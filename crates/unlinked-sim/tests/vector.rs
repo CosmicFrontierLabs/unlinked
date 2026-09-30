@@ -509,3 +509,17 @@ fn scalarization_rejects_parameter_text_amplification() {
     let error = compile(&model(vec![b], vec![]), &options()).unwrap_err();
     assert!(error.to_string().contains("text budget"));
 }
+
+#[test]
+fn external_input_expressions_honor_the_callers_cancellation_budget() {
+    let m = model(vec![block("in", "Inport", &[])], vec![]);
+    let expressions = BTreeMap::from([("in".into(), "sum(ones(1000))".into())]);
+    let mut budget = unlinked_matlab::ArrayBudget::default().with_cancellation(|| true);
+    let error =
+        unlinked_sim::evaluate_inputs_with_budget(&m, &expressions, &mut budget).unwrap_err();
+    assert!(
+        error.to_string().contains("execution interrupted"),
+        "{error}"
+    );
+    assert!(unlinked_sim::evaluate_inputs(&m, &expressions).is_ok());
+}

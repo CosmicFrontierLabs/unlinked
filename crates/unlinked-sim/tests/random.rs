@@ -214,7 +214,7 @@ fn imported_parameters_defaults_and_invalid_values() {
 }
 
 #[test]
-fn zero_order_hold_default_period_is_not_inherited() {
+fn zero_order_hold_requires_an_explicit_sample_period() {
     let mut model = source_model("Clock", &[]);
     let mut hold = source_model("ZeroOrderHold", &[]).root.blocks.remove(0);
     hold.id = "hold".into();
@@ -236,6 +236,18 @@ fn zero_order_hold_default_period_is_not_inherited() {
         }),
         ..Default::default()
     });
+    for sample in [None, Some("-1"), Some("0")] {
+        model.root.blocks[1].parameters.remove("SampleTime");
+        if let Some(value) = sample {
+            model.root.blocks[1]
+                .parameters
+                .insert("SampleTime".into(), value.into());
+        }
+        assert!(unlinked_sim::compile(&model, &options(Solver::Rk4)).is_err());
+    }
+    model.root.blocks[1]
+        .parameters
+        .insert("SampleTime".into(), "1".into());
     let trace = unlinked_sim::simulate_model(&model, &options(Solver::Rk4)).unwrap();
     assert_eq!(
         trace.signals["hold"],

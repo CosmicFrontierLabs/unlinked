@@ -655,7 +655,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     html! {
         <div class="sim-panel">
             if props.has_random_sources {
-                <p>{ "Random sources are reproducible in Unlinked, but use a different random sequence from Simulink." }</p>
+                <p class="sim-notice">{ "Random sources are reproducible in Unlinked, but use a different random sequence from Simulink." }</p>
             }
             <div class="sim-form">
                 <label>{ "Start" }<input type="number" step="any" value={o.start.to_string()} oninput={set_num(|o, v| o.start = v)} /></label>
@@ -679,7 +679,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     <textarea rows="2" value={(*workspace).clone()} oninput={set_workspace} placeholder="K = 2\nw = 2*pi*5" />
                 </label>
                 if !props.inputs.is_empty() {
-                    <fieldset class="grow">
+                    <fieldset class="sim-inputs">
                         <legend>{ "Root inputs (constant throughout the run)" }</legend>
                         <p>{ "Enter a numeric expression for each input. Workspace variables are available; values are never filled automatically." }</p>
                         { for props.inputs.iter().map(|(id, name)| {

@@ -340,6 +340,19 @@ fn zero_order_hold_preserves_vector_values_and_rejects_algebraic_feedback() {
     let t = simulate_model(&m, &options()).unwrap();
     close(&t.signals["hold[1]"], &[2.; 10]);
     close(&t.signals["hold[2]"], &[-3.; 10]);
+    for (value, rank) in [("[1 2;3 4]", "on"), ("[1 2]", "off")] {
+        let mut matrix = m.clone();
+        matrix.root.blocks[0]
+            .parameters
+            .insert("Value".into(), value.into());
+        matrix.root.blocks[0]
+            .parameters
+            .insert("VectorParams1D".into(), rank.into());
+        assert!(compile(&matrix, &options())
+            .unwrap_err()
+            .to_string()
+            .contains("one-dimensional vector"));
+    }
     let feedback = model(
         vec![block("hold", "ZeroOrderHold", &[("SampleTime", "0.2")])],
         vec![line("hold", 1, "hold", 1)],
