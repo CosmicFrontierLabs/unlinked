@@ -8,10 +8,11 @@
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
-use unlinked_model::{Block, Chart, Model, System};
+use unlinked_model::edit::Edit;
+use unlinked_model::{Block, BlockId, Chart, Model, Rect, System};
 use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
-use web_sys::{Element, HtmlElement, MouseEvent, WheelEvent};
+use web_sys::{Element, HtmlElement, HtmlInputElement, KeyboardEvent, MouseEvent, WheelEvent};
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq)]
@@ -20,6 +21,38 @@ pub struct DiagramProps {
     /// Changes relative to an older version, highlighted on the diagram.
     #[prop_or_default]
     pub diff: Option<Rc<ModelDiff>>,
+    /// Enables editing: blocks can be dragged, renamed, re-parameterized and
+    /// deleted, and each change is reported here.
+    #[prop_or_default]
+    pub on_edit: Option<Callback<Edit>>,
+    /// The view re-fits when this changes; by default whenever the model
+    /// changes. Editors pass a stable key so edits keep the current view.
+    #[prop_or_default]
+    pub fit_key: Option<AttrValue>,
+}
+
+/// Grid block positions snap to when dragged.
+const SNAP: f64 = 5.0;
+
+/// Pointer interaction in progress on the diagram.
+enum Drag {
+    Pan {
+        sx: f64,
+        sy: f64,
+        start: View,
+        moved: bool,
+    },
+    Block {
+        sx: f64,
+        sy: f64,
+        group: Element,
+        id: String,
+        rect: Rect,
+        offset: (f64, f64),
+        moved: bool,
+    },
+    /// Released; kept so the following click knows whether it was a drag.
+    Ended { moved: bool },
 }
 
 /// CSS outlining changed blocks in the system at `path`: added green,
@@ -182,8 +215,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         x: 0.0,
         y: 0.0,
     });
-    let drag = use_mut_ref(|| None::<(f64, f64, View, bool)>);
+    let drag = use_mut_ref(|| None::<Drag>);
     let container = use_node_ref();
+    let fit_key = props
+        .fit_key
+        .clone()
+        .unwrap_or_else(|| AttrValue::from(format!("{:p}", Rc::as_ptr(&props.model))));
 
     let model = props.model.clone();
     let rendered = use_memo(
@@ -203,16 +240,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let view = view.clone();
         let container = container.clone();
         let rendered = rendered.clone();
-        use_effect_with(
-            (Rc::as_ptr(&props.model) as usize, (*path).clone()),
-            move |_| {
-                if let (Some(el), Ok(svg)) = (container.cast::<HtmlElement>(), rendered.as_ref()) {
-                    if let Some(size) = svg_size(svg) {
-                        view.dispatch(ViewAction::Set(fit(&el, size)));
-                    }
+        use_effect_with((fit_key.clone(), (*path).clone()), move |_| {
+            if let (Some(el), Ok(svg)) = (container.cast::<HtmlElement>(), rendered.as_ref()) {
+                if let Some(size) = svg_size(svg) {
+                    view.dispatch(ViewAction::Set(fit(&el, size)));
                 }
-            },
-        );
+            }
+        });
     }
 
     // Wheel zoom around the cursor. Registered by hand so the listener is
@@ -243,55 +277,153 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         });
     }
 
+    let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+    let system = props.model.system_at(&refs);
+
     let onmousedown = {
-        let drag = drag.clone();
-        let view = view.clone();
+        let (drag, view, on_edit) = (drag.clone(), view.clone(), props.on_edit.clone());
+        let blocks: Vec<(String, Rect)> = system
+            .map(|s| {
+                s.blocks
+                    .iter()
+                    .map(|b| (b.id.0.clone(), b.position))
+                    .collect()
+            })
+            .unwrap_or_default();
         Callback::from(move |e: MouseEvent| {
-            if e.button() == 0 {
-                *drag.borrow_mut() = Some((e.client_x() as f64, e.client_y() as f64, *view, false));
+            if e.button() != 0 {
+                return;
             }
+            let (sx, sy) = (e.client_x() as f64, e.client_y() as f64);
+            let grabbed = on_edit.as_ref().and_then(|_| {
+                let group = block_group(e.target())?;
+                let id = group.get_attribute("data-sid")?;
+                let rect = blocks.iter().find(|(b, _)| *b == id)?.1;
+                Some((group, id, rect))
+            });
+            *drag.borrow_mut() = Some(match grabbed {
+                Some((group, id, rect)) => Drag::Block {
+                    sx,
+                    sy,
+                    group,
+                    id,
+                    rect,
+                    offset: (0.0, 0.0),
+                    moved: false,
+                },
+                None => Drag::Pan {
+                    sx,
+                    sy,
+                    start: *view,
+                    moved: false,
+                },
+            });
         })
     };
     let onmousemove = {
-        let drag = drag.clone();
-        let view = view.clone();
+        let (drag, view) = (drag.clone(), view.clone());
         Callback::from(move |e: MouseEvent| {
-            let mut d = drag.borrow_mut();
-            // A NaN anchor marks a drag that already ended (button released
-            // or pointer left); only the click handler still reads it.
-            if let Some((sx, sy, start, moved)) = d.as_mut().filter(|d| !d.0.is_nan()) {
-                let (dx, dy) = (e.client_x() as f64 - *sx, e.client_y() as f64 - *sy);
-                if dx.abs() + dy.abs() > 3.0 {
-                    *moved = true;
+            let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
+            match drag.borrow_mut().as_mut() {
+                Some(Drag::Pan {
+                    sx,
+                    sy,
+                    start,
+                    moved,
+                }) => {
+                    let (dx, dy) = (cx - *sx, cy - *sy);
+                    *moved |= dx.abs() + dy.abs() > 3.0;
+                    if *moved {
+                        view.dispatch(ViewAction::Set(View {
+                            scale: start.scale,
+                            x: start.x + dx,
+                            y: start.y + dy,
+                        }));
+                    }
                 }
-                if *moved {
-                    view.dispatch(ViewAction::Set(View {
-                        scale: start.scale,
-                        x: start.x + dx,
-                        y: start.y + dy,
-                    }));
+                Some(Drag::Block {
+                    sx,
+                    sy,
+                    group,
+                    offset,
+                    moved,
+                    ..
+                }) => {
+                    let (dx, dy) = (cx - *sx, cy - *sy);
+                    *moved |= dx.abs() + dy.abs() > 3.0;
+                    if *moved {
+                        // Snap in diagram units; preview by translating the
+                        // block's group until the edit is applied.
+                        let snap = |v: f64| (v / view.scale / SNAP).round() * SNAP;
+                        *offset = (snap(dx), snap(dy));
+                        let _ = group.set_attribute(
+                            "transform",
+                            &format!("translate({} {})", offset.0, offset.1),
+                        );
+                    }
                 }
+                _ => {}
             }
         })
     };
     let end_drag = {
-        let drag = drag.clone();
+        let (drag, on_edit, path) = (drag.clone(), props.on_edit.clone(), path.clone());
         Callback::from(move |_: MouseEvent| {
-            if let Some(d) = drag.borrow_mut().as_mut() {
-                // Keep the "moved" flag for the click handler, drop the anchor.
-                d.0 = f64::NAN;
-            }
+            let mut d = drag.borrow_mut();
+            let moved = match d.take() {
+                Some(Drag::Pan { moved, .. }) => moved,
+                Some(Drag::Block {
+                    id,
+                    rect,
+                    offset,
+                    moved,
+                    ..
+                }) => {
+                    if let (true, Some(on_edit)) = (moved && offset != (0.0, 0.0), &on_edit) {
+                        on_edit.emit(Edit::MoveBlock {
+                            system: (*path).clone(),
+                            id: BlockId(id),
+                            position: Rect::new(
+                                rect.left + offset.0,
+                                rect.top + offset.1,
+                                rect.right + offset.0,
+                                rect.bottom + offset.1,
+                            ),
+                        });
+                    }
+                    moved
+                }
+                Some(Drag::Ended { moved }) => moved,
+                None => return,
+            };
+            *d = Some(Drag::Ended { moved });
         })
     };
     let onclick = {
         let drag = drag.clone();
         let selected = selected.clone();
         Callback::from(move |e: MouseEvent| {
-            let moved = drag.borrow_mut().take().is_some_and(|d| d.3);
+            let moved = matches!(drag.borrow_mut().take(), Some(Drag::Ended { moved: true }));
             if moved {
                 return;
             }
             selected.set(block_group(e.target()).and_then(|g| g.get_attribute("data-sid")));
+        })
+    };
+    let onkeydown = {
+        let (selected, on_edit, path) = (selected.clone(), props.on_edit.clone(), path.clone());
+        Callback::from(move |e: KeyboardEvent| {
+            if !matches!(e.key().as_str(), "Delete" | "Backspace") {
+                return;
+            }
+            if let (Some(on_edit), Some(sid)) = (&on_edit, (*selected).clone()) {
+                e.prevent_default();
+                on_edit.emit(Edit::DeleteBlock {
+                    system: (*path).clone(),
+                    id: BlockId(sid),
+                });
+                selected.set(None);
+            }
         })
     };
     let ondblclick = {
@@ -316,8 +448,6 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
 
-    let refs: Vec<&str> = path.iter().map(String::as_str).collect();
-    let system = props.model.system_at(&refs);
     let selected_block = system.and_then(|s| {
         selected
             .as_ref()
@@ -420,15 +550,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         move |p: Vec<String>| { path.set(p); selected.set(None); }
                     })} />
                 </aside>
-                <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"))}
-                    ref={container}
+                <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"))}
+                    ref={container} tabindex="0"
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={end_drag}
-                    {onclick} {ondblclick}>
+                    {onclick} {ondblclick} {onkeydown}>
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }</div>
                 </div>
                 if let Some(b) = selected_block {
-                    <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))} on_open={Callback::from({
+                    <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
+                        system={(*path).clone()} on_edit={props.on_edit.clone()} on_open={Callback::from({
                         let path = path.clone();
                         let selected = selected.clone();
                         move |name: String| {
@@ -500,7 +631,10 @@ struct InspectorProps {
     block: Rc<Block>,
     /// Stateflow chart implementing the block.
     chart: Option<Rc<Chart>>,
+    /// Path of the system containing the block.
+    system: Vec<String>,
     on_open: Callback<String>,
+    on_edit: Option<Callback<Edit>>,
 }
 
 #[function_component(Inspector)]
@@ -518,11 +652,72 @@ fn inspector(props: &InspectorProps) -> Html {
     });
     let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
     let script = props.chart.as_ref().and_then(|c| c.script.clone());
+    // A value cell: editable input when editing, code otherwise. Changes
+    // are committed on blur or Enter.
+    let value_cell = |name: &str, value: &str| -> Html {
+        match &props.on_edit {
+            Some(on_edit) => {
+                let (on_edit, system, id, name, current) = (
+                    on_edit.clone(),
+                    props.system.clone(),
+                    b.id.clone(),
+                    name.to_string(),
+                    value.to_string(),
+                );
+                let onchange = Callback::from(move |e: Event| {
+                    let value = e.target_unchecked_into::<HtmlInputElement>().value();
+                    if value != current {
+                        on_edit.emit(Edit::SetParameter {
+                            system: system.clone(),
+                            id: id.clone(),
+                            name: name.clone(),
+                            value,
+                        });
+                    }
+                });
+                html! { <input class="param" value={value.to_string()} {onchange} /> }
+            }
+            None => html! { <code>{ value }</code> },
+        }
+    };
+    let title = match &props.on_edit {
+        Some(on_edit) => {
+            let (on_edit, system, id, current) = (
+                on_edit.clone(),
+                props.system.clone(),
+                b.id.clone(),
+                b.name.clone(),
+            );
+            let onchange = Callback::from(move |e: Event| {
+                let name = e.target_unchecked_into::<HtmlInputElement>().value();
+                if name != current && !name.trim().is_empty() {
+                    on_edit.emit(Edit::RenameBlock {
+                        system: system.clone(),
+                        id: id.clone(),
+                        name,
+                    });
+                }
+            });
+            html! { <input class="block-name" value={b.name.clone()} {onchange} /> }
+        }
+        None => html! { <h3>{ b.name.replace('\n', " ") }</h3> },
+    };
+    let delete = props.on_edit.clone().map(|on_edit| {
+        let (system, id) = (props.system.clone(), b.id.clone());
+        let onclick = Callback::from(move |_: MouseEvent| {
+            on_edit.emit(Edit::DeleteBlock {
+                system: system.clone(),
+                id: id.clone(),
+            })
+        });
+        html! { <button class="danger" {onclick}>{ "Delete block" }</button> }
+    });
     html! {
         <aside class="inspector">
-            <h3>{ b.name.replace('\n', " ") }</h3>
+            { title }
             <div class="muted">{ format!("{kind} · SID {}", b.id) }</div>
             { for open }
+            { for delete }
             if let Some(script) = script {
                 <h4>{ "MATLAB code" }</h4>
                 <pre class="script"><code>{ script }</code></pre>
@@ -534,14 +729,14 @@ fn inspector(props: &InspectorProps) -> Html {
                 <h4>{ "Mask parameters" }</h4>
                 <table>
                     { for mask.parameters.iter().map(|p| html! {
-                        <tr><td title={p.prompt.clone().unwrap_or_default()}>{ &p.name }</td><td><code>{ &p.value }</code></td></tr>
+                        <tr><td title={p.prompt.clone().unwrap_or_default()}>{ &p.name }</td><td>{ value_cell(&p.name, &p.value) }</td></tr>
                     }) }
                 </table>
             }
             <h4>{ "Parameters" }</h4>
             <table>
                 { for b.parameters.iter().filter(|(k, _)| k.as_str() != "ZOrder").map(|(k, v)| html! {
-                    <tr><td>{ k }</td><td><code>{ v }</code></td></tr>
+                    <tr><td>{ k }</td><td>{ value_cell(k, v) }</td></tr>
                 }) }
             </table>
         </aside>

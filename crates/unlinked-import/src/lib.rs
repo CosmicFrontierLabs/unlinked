@@ -8,6 +8,7 @@
 
 mod convert;
 pub mod mdl;
+pub mod patch;
 pub mod slx;
 pub mod stateflow;
 pub mod tree;
@@ -43,6 +44,8 @@ pub enum ImportError {
     TooLarge,
     #[error("invalid XML: {0}")]
     Xml(String),
+    #[error("cannot apply edit: {0}")]
+    Edit(String),
     #[error("invalid MDL: {0}")]
     Mdl(String),
 }
