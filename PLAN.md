@@ -37,7 +37,7 @@ live in the separate [unlinked-test-cases](https://github.com/meawoppl/unlinked-
 repo (30 third-party models, 1 synthetic model and 9 `.m` scripts), read
 from `UNLINKED_TEST_CASES`; corpus tests skip when it is absent and run in
 CI. Per-model import, render and simulation coverage is tracked in
-[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) (added by #18).
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 ## Delivered
 
@@ -86,6 +86,16 @@ CI. Per-model import, render and simulation coverage is tracked in
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
   matrix signals lowered to scalars. The authoritative list and its limits are
   in [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
+- Multirate discrete scheduling on integer sample ticks (held values between
+  hits and through solver stages), and local Goto/From routing.
+- Pure scalar MATLAB Function charts execute through a bounded function
+  interpreter; anything stateful, non-scalar, complex, variable-size or with
+  its own scheduling is rejected.
+- Root inputs can be bound explicitly (`unlinked sim --input-value`).
+- Coverage: all 31 corpus models import and render. With no inputs or
+  overrides only the synthetic reference model compiles for simulation; the
+  AutoLayout models run with explicit root inputs, and a real MATLAB Function
+  block runs in isolation. See [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 - Workspace from expressions and from a same-project `.m` init script, chosen
   in the Simulate tab, pinned to its version and evaluated by the bounded
   interpreter; explicit workspace entries override init values.
@@ -99,21 +109,15 @@ CI. Per-model import, render and simulation coverage is tracked in
   files.
 - Details: [`crates/unlinked-matlab/README.md`](crates/unlinked-matlab/README.md).
 
-## In review
-Move these into Delivered when they merge.
-- #18: multirate discrete scheduling, local Goto/From, a pure MATLAB function
-  interpreter, execution of scalar MATLAB Function charts, and
-  `docs/COMPATIBILITY.md`. By default 1 of the 31 corpus models compiles for
-  simulation; more run as isolated blocks or with explicit root inputs, as
-  listed there.
-
 ## Roadmap (not supported yet)
 
 These are deliberately out of scope today and are rejected when encountered:
 
 - **Stateflow execution** of state charts (states, transitions, events, temporal
   logic). Charts import, render and diff, but only pure scalar MATLAB Function
-  charts are headed for simulation (#18).
+  charts simulate.
+- **Whole-model coverage**: most real corpus models still need unsupported
+  blocks, masks, libraries or external inputs before they can run.
 - **General masks and toolboxes**: mask initialization code, masked library
   internals that need MathWorks libraries, Simscape and other toolboxes.
 - **Full MATLAB language**: cells, structs, classes, function handles, strings
