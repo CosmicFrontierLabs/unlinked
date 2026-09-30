@@ -9,10 +9,19 @@ yew = { version = "0.21", features = ["csr"] }
 yew-router = "0.18"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = "0.3"
+web-sys = { version = "0.3", features = ["Element", "HtmlElement", "HtmlInputElement", "File", "FileList", "DragEvent", "DataTransfer", "WheelEvent", "MouseEvent", "EventTarget", "DomRect", "Window", "Storage", "HtmlSelectElement"] }
 gloo-net = "0.6"
 gloo-timers = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ws-bridge = { version = "0.1", features = ["yew-client"] }
 shared = { path = "../shared" }
+unlinked-model = { version = "0.1.0", path = "../crates/unlinked-model" }
+unlinked-import = { version = "0.1.0", path = "../crates/unlinked-import" }
+unlinked-render = { version = "0.1.0", path = "../crates/unlinked-render" }
+gloo-file = { version = "0.4.0", features = ["futures"] }
+gloo-events = "0.3.0"
+js-sys = "0.3.106"
+uuid = { version = "1.26.1", features = ["js"] }
+chrono = { version = "0.4.45", default-features = false, features = ["serde", "clock", "wasmbind"] }
+gloo-utils = "0.3.0"
