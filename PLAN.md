@@ -104,9 +104,9 @@ CI. Per-model import, render and simulation coverage is tracked in
 - Array-first evaluator and Rust code generator for a bounded subset: real
   matrices, indexing, control flow, local functions, common builtins. Checked
   against Octave on the corpus scripts. LLVM IR comes from compiling the
-  generated Rust with `rustc` (CLI only); there is no in-process LLVM backend.
+  generated typed ndarray/nalgebra Cargo project with `cargo rustc` (CLI only); there is no in-process LLVM backend.
 - In-browser MATLAB → Rust page, also available as a tab on project `.m`
-  files.
+  files, with complete vendored-helper Cargo project downloads.
 - Details: [`crates/unlinked-matlab/README.md`](crates/unlinked-matlab/README.md).
 
 ## Roadmap (not supported yet)

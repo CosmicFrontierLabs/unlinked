@@ -28,3 +28,6 @@ gloo-utils = "0.3.0"
 unlinked-matlab = { path = "../crates/unlinked-matlab" }
 rizzma = { version = "1.13.0", default-features = false, features = ["wasm"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+
+zip = { version = "8.6.0", default-features = false }
+base64 = "0.22"

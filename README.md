@@ -42,13 +42,13 @@ cargo run -p unlinked-cli -- info model.slx
 cargo run -p unlinked-cli -- render model.slx -o diagram.svg
 cargo run -p unlinked-cli -- render model.slx --system Controller -o controller.svg
 cargo run -p unlinked-cli -- sim model.mdl --stop 10 --step 0.01 --solver rk45 --var 'K=2*pi' -o trace.csv
-cargo run -p unlinked-cli -- transpile example.m -o example.rs
+cargo run -p unlinked-cli -- transpile example.m -o example-rust
 cargo run -p unlinked-cli -- transpile example.m --emit llvm-ir -o example.ll
 ```
 
 Repeat `--system` for each nested subsystem; each argument is an exact block name, including literal slashes. SVG output uses an opaque dark background. Simulation output supports JSON and CSV; RK45 exposes `--rtol`, `--atol`, and `--max-internal-steps`. Run a subcommand with `--help` for all options.
 
-The `/transpile` browser page generates downloadable Rust locally, without uploading source or running the result. LLVM emission requires a local `rustc`. It compiles generated Rust without executing it. The web server does not spawn a compiler. Selected initialization scripts run only through the bounded MATLAB interpreter; uploaded files and model callbacks never execute automatically. CLI/model browser inputs are bounded at 16 MiB; server file storage has a separately configurable upload limit.
+The `/transpile` browser page generates downloadable typed Rust Cargo projects using ndarray and nalgebra locally, without uploading source or running the result. LLVM emission requires local Cargo and rustc. It builds the generated project without executing it; Cargo may fetch dependencies. The web server does not spawn a compiler. Selected initialization scripts run only through the bounded MATLAB interpreter; uploaded files and model callbacks never execute automatically. CLI/model browser inputs are bounded at 16 MiB; server file storage has a separately configurable upload limit.
 
 ## Authentication and deployment
 

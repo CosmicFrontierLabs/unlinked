@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
 use unlinked_model::Model;
 use unlinked_sim::{Options, Solver, Trace};
@@ -88,8 +88,8 @@ enum Action {
         /// Export functions as pub fn f_name; reject script statements.
         #[arg(long)]
         library: bool,
-        /// LLVM output invokes local rustc to compile generated Rust, without running it.
-        #[arg(long, value_enum, default_value_t = Emit::Rust)]
+        /// Emit a Cargo project (default), source only, or LLVM IR via cargo rustc.
+        #[arg(long, value_enum, default_value_t = Emit::Project)]
         emit: Emit,
     },
 }
@@ -106,6 +106,7 @@ enum TraceFormat {
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Emit {
+    Project,
     Rust,
     LlvmIr,
 }
@@ -238,38 +239,70 @@ fn trace_csv(trace: &Trace) -> Result<Vec<u8>> {
     }
     csv.into_inner().map_err(|e| e.into_error().into())
 }
-fn compile_llvm(source: &str, library: bool, output: &Path) -> Result<()> {
-    // Only our generated Rust is sent to rustc. There are no external crates,
-    // build scripts, proc macros, user-supplied Rust, or executable invocation.
-    let mut child = Command::new("rustc")
-        .args([
-            "--edition=2024",
-            "--crate-name",
-            "unlinked_generated",
-            "--crate-type",
-            if library { "lib" } else { "bin" },
-            "--emit=llvm-ir",
-            "-",
-        ])
-        .arg("-o")
-        .arg(output)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("cannot start rustc; install Rust or use --emit rust")?;
-    let write = child
-        .stdin
-        .take()
-        .context("rustc stdin unavailable")?
-        .write_all(source.as_bytes());
-    let result = child.wait_with_output().context("cannot wait for rustc")?;
-    if !result.status.success() {
-        bail!("rustc failed: {}", String::from_utf8_lossy(&result.stderr));
+fn write_project(project: &unlinked_matlab::GeneratedProject, root: &Path) -> Result<()> {
+    // Reserve the output directory atomically; never overwrite existing files.
+    std::fs::create_dir(root).with_context(|| {
+        format!(
+            "cannot create project {}; choose a new directory",
+            root.display()
+        )
+    })?;
+    for (relative, contents) in project.files() {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().context("missing project file parent")?)?;
+        std::fs::write(&path, contents)
+            .with_context(|| format!("cannot write {}", path.display()))?;
     }
-    write.context("cannot send generated Rust to compiler")?;
     Ok(())
 }
+fn compile_llvm(project: &unlinked_matlab::GeneratedProject, output: &Path) -> Result<()> {
+    let temporary = tempfile::Builder::new()
+        .prefix("unlinked-llvm-")
+        .tempdir()?;
+    let root = temporary.path().join("project");
+    write_project(project, &root)?;
+    let target = temporary.path().join("target");
+    let mut command = Command::new("cargo");
+    command
+        .args(["rustc", "--release", "--manifest-path"])
+        .arg(root.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target);
+    if project.library {
+        command.arg("--lib");
+    } else {
+        command.args(["--bin", "generated_matlab"]);
+    }
+    let compiled = command
+        .args(["--", "--emit=llvm-ir"])
+        .output()
+        .context("cannot start cargo; install Rust or emit the project without compiling")?;
+    if !compiled.status.success() {
+        bail!(
+            "cargo rustc failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+    }
+    let artifacts: Vec<_> = std::fs::read_dir(target.join("release/deps"))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|s| s == "ll")
+                && p.file_stem()
+                    .is_some_and(|s| s.to_string_lossy().starts_with("generated_matlab-"))
+        })
+        .collect();
+    if artifacts.len() != 1 {
+        bail!(
+            "expected one generated LLVM module, found {}",
+            artifacts.len()
+        );
+    }
+    std::fs::copy(&artifacts[0], output)
+        .with_context(|| format!("cannot write {}", output.display()))?;
+    Ok(())
+}
+
 fn run(args: Args) -> Result<()> {
     match args.command {
         Action::Coverage { input, output } => {
@@ -380,19 +413,34 @@ fn run(args: Args) -> Result<()> {
         } => {
             let bytes = read_input(&input)?;
             let source = std::str::from_utf8(&bytes).context("MATLAB source must be UTF-8")?;
-            let generated = if library {
-                unlinked_matlab::transpile_library(source)
-            } else {
-                unlinked_matlab::transpile(source)
-            }
-            .context("transpilation failed")?;
+            let generated = unlinked_matlab::generate_project(source, library)
+                .context("transpilation failed")?;
             match emit {
-                Emit::Rust => write_output(output.as_deref(), generated.as_bytes()),
+                Emit::Project => {
+                    let default = PathBuf::from(format!(
+                        "{}-rust",
+                        input
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .filter(|s| *s != "-")
+                            .unwrap_or("generated-matlab")
+                    ));
+                    let output = output.as_deref().unwrap_or(&default);
+                    if output == Path::new("-") {
+                        bail!(
+                            "project output requires a directory; use --emit rust for source on stdout"
+                        );
+                    }
+                    write_project(&generated, output)?;
+                    eprintln!("Wrote Cargo project {}", output.display());
+                    Ok(())
+                }
+                Emit::Rust => write_output(output.as_deref(), generated.source.as_bytes()),
                 Emit::LlvmIr => {
                     let output = output.as_deref().filter(|p| *p != Path::new("-")).context(
                         "--emit llvm-ir requires --output PATH (LLVM output cannot be stdout)",
                     )?;
-                    compile_llvm(&generated, library, output)
+                    compile_llvm(&generated, output)
                 }
             }
         }

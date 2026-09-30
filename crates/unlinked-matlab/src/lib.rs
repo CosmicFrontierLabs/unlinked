@@ -3,11 +3,13 @@
 pub mod array_runtime;
 mod arrays;
 mod comments;
+pub mod project;
 pub use arrays::{
     ArrayBudget, FunctionProgram, FunctionSignature, eval_array_expr, eval_array_expr_with_budget,
-    eval_function, eval_script, eval_script_with_budget, transpile_arrays,
+    eval_function, eval_script, eval_script_with_budget, transpile_typed,
 };
-use std::collections::{BTreeMap, BTreeSet};
+pub use project::{GeneratedProject, generate_project};
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,19 +156,6 @@ enum Expr {
     Binary(String, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
 }
-#[derive(Debug)]
-enum Stmt {
-    Assign(String, Expr),
-    Display(Expr),
-    For(String, Expr, Expr, Expr, Vec<Stmt>),
-    If(Vec<(Expr, Vec<Stmt>)>, Vec<Stmt>),
-}
-struct Function {
-    name: String,
-    args: Vec<String>,
-    output: String,
-    body: Vec<Stmt>,
-}
 struct Parser {
     tokens: Vec<Spanned>,
     pos: usize,
@@ -181,9 +170,6 @@ impl Parser {
             line: self.tokens[self.pos].line,
             message: message.into(),
         }
-    }
-    fn is_name(&self, name: &str) -> bool {
-        self.token() == &Token::Name(name.into())
     }
     fn op(&mut self, op: &str) -> bool {
         if self.token() == &Token::Op(op.into()) {
@@ -200,26 +186,9 @@ impl Parser {
             Err(self.error(format!("expected '{op}'")))
         }
     }
-    fn name(&mut self) -> Result<String, Error> {
-        if let Token::Name(name) = self.token() {
-            let name = name.clone();
-            self.pos += 1;
-            Ok(name)
-        } else {
-            Err(self.error("expected identifier"))
-        }
-    }
     fn separators(&mut self) {
         while self.token() == &Token::Newline {
             self.pos += 1;
-        }
-    }
-    fn end_statement(&mut self) -> Result<(), Error> {
-        if matches!(self.token(), Token::Newline | Token::Eof) {
-            self.separators();
-            Ok(())
-        } else {
-            Err(self.error("expected newline or semicolon"))
         }
     }
     fn expr(&mut self, min: u8) -> Result<Expr, Error> {
@@ -286,121 +255,6 @@ impl Parser {
         }
         Ok(lhs)
     }
-    fn body(&mut self) -> Result<Vec<Stmt>, Error> {
-        if self.depth >= 64 {
-            return Err(self.error("statement nesting exceeds subset limit of 64"));
-        }
-        self.depth += 1;
-        let result = self.body_inner();
-        self.depth -= 1;
-        result
-    }
-    fn body_inner(&mut self) -> Result<Vec<Stmt>, Error> {
-        let mut body = Vec::new();
-        self.separators();
-        while !matches!(self.token(), Token::Eof)
-            && !["end", "else", "elseif", "function"]
-                .iter()
-                .any(|n| self.is_name(n))
-        {
-            body.push(self.statement()?);
-        }
-        Ok(body)
-    }
-    fn end(&mut self) -> Result<(), Error> {
-        if !self.is_name("end") {
-            return Err(self.error("expected 'end'"));
-        }
-        self.pos += 1;
-        self.end_statement()
-    }
-    fn statement(&mut self) -> Result<Stmt, Error> {
-        let name = self.name()?;
-        let stmt = match name.as_str() {
-            "for" => {
-                let var = self.name()?;
-                self.expect_op("=")?;
-                let start = self.expr(0)?;
-                self.expect_op(":")?;
-                let second = self.expr(0)?;
-                let (step, stop) = if self.op(":") {
-                    (second, self.expr(0)?)
-                } else {
-                    (Expr::Number(1.0), second)
-                };
-                self.end_statement()?;
-                let body = self.body()?;
-                self.end()?;
-                return Ok(Stmt::For(var, start, step, stop, body));
-            }
-            "if" => {
-                let condition = self.expr(0)?;
-                self.end_statement()?;
-                let mut branches = vec![(condition, self.body()?)];
-                while self.is_name("elseif") {
-                    self.pos += 1;
-                    let condition = self.expr(0)?;
-                    self.end_statement()?;
-                    branches.push((condition, self.body()?));
-                }
-                let otherwise = if self.is_name("else") {
-                    self.pos += 1;
-                    self.end_statement()?;
-                    self.body()?
-                } else {
-                    Vec::new()
-                };
-                self.end()?;
-                return Ok(Stmt::If(branches, otherwise));
-            }
-            "disp" => {
-                self.expect_op("(")?;
-                let expr = self.expr(0)?;
-                self.expect_op(")")?;
-                Stmt::Display(expr)
-            }
-            "while" | "switch" | "global" | "persistent" | "classdef" | "parfor" | "try"
-            | "return" | "break" | "continue" => {
-                return Err(self.error(format!("unsupported statement '{name}'")));
-            }
-            _ => {
-                self.expect_op("=")?;
-                Stmt::Assign(name, self.expr(0)?)
-            }
-        };
-        self.end_statement()?;
-        Ok(stmt)
-    }
-    fn function(&mut self) -> Result<Function, Error> {
-        self.pos += 1;
-        let output = self.name()?;
-        self.expect_op("=")?;
-        let name = self.name()?;
-        self.expect_op("(")?;
-        let mut args = Vec::new();
-        if !self.op(")") {
-            loop {
-                let arg = self.name()?;
-                if args.contains(&arg) {
-                    return Err(self.error("duplicate function parameter"));
-                }
-                args.push(arg);
-                if self.op(")") {
-                    break;
-                }
-                self.expect_op(",")?;
-            }
-        }
-        self.end_statement()?;
-        let body = self.body()?;
-        self.end()?;
-        Ok(Function {
-            name,
-            args,
-            output,
-            body,
-        })
-    }
 }
 
 fn semantic(message: impl Into<String>) -> Error {
@@ -417,286 +271,15 @@ fn builtin(name: &str) -> Option<usize> {
         _ => None,
     }
 }
-fn emit_expr(
-    expr: &Expr,
-    known: &BTreeSet<String>,
-    functions: &BTreeMap<String, usize>,
-) -> Result<String, Error> {
-    Ok(match expr {
-        Expr::Number(n) => format!("{n:?}_f64"),
-        Expr::Var(name) => match name.as_str() {
-            _ if known.contains(name) => format!("v_{name}"),
-            "pi" => "std::f64::consts::PI".into(),
-            "Inf" | "inf" => "f64::INFINITY".into(),
-            "NaN" | "nan" => "f64::NAN".into(),
-            "true" => "1.0_f64".into(),
-            "false" => "0.0_f64".into(),
-            _ => {
-                return Err(semantic(format!(
-                    "variable '{name}' is not definitely assigned"
-                )));
-            }
-        },
-        Expr::Unary(op, a) => {
-            let a = emit_expr(a, known, functions)?;
-            match op.as_str() {
-                "+" => a,
-                "-" => format!("(-({a}))"),
-                _ => format!("((!matlab_bool({a})) as u8 as f64)"),
-            }
-        }
-        Expr::Binary(op, a, b) => {
-            let a = emit_expr(a, known, functions)?;
-            let b = emit_expr(b, known, functions)?;
-            match op.as_str() {
-                "^" => format!("({a}).powf({b})"),
-                "&&" | "||" => format!("((matlab_bool({a}) {op} matlab_bool({b})) as u8 as f64)"),
-                "==" | "~=" | "<" | ">" | "<=" | ">=" => format!(
-                    "((({a}) {} ({b})) as u8 as f64)",
-                    if op == "~=" { "!=" } else { op }
-                ),
-                _ => format!("(({a}) {op} ({b}))"),
-            }
-        }
-        Expr::Call(name, args) => {
-            if known.contains(name) {
-                return Err(semantic(format!(
-                    "indexing or calling variable '{name}' is unsupported"
-                )));
-            }
-            let arity = functions
-                .get(name)
-                .copied()
-                .or_else(|| builtin(name))
-                .ok_or_else(|| semantic(format!("unsupported function '{name}'")))?;
-            if args.len() != arity {
-                return Err(semantic(format!(
-                    "'{name}' expects {arity} arguments, got {}",
-                    args.len()
-                )));
-            }
-            let args = args
-                .iter()
-                .map(|a| emit_expr(a, known, functions))
-                .collect::<Result<Vec<_>, _>>()?;
-            if functions.contains_key(name) {
-                format!("f_{name}({})", args.join(", "))
-            } else if name == "mod" {
-                format!("matlab_mod({}, {})", args[0], args[1])
-            } else if name == "sign" {
-                format!("matlab_sign({})", args[0])
-            } else {
-                format!(
-                    "({}).{}({})",
-                    args[0],
-                    if name == "log" { "ln" } else { name },
-                    args[1..].join(", ")
-                )
-            }
-        }
-    })
-}
-fn assigned(body: &[Stmt], out: &mut BTreeSet<String>) {
-    for stmt in body {
-        match stmt {
-            Stmt::Assign(name, _) => {
-                out.insert(name.clone());
-            }
-            Stmt::For(name, _, _, _, body) => {
-                out.insert(name.clone());
-                assigned(body, out);
-            }
-            Stmt::If(branches, other) => {
-                for (_, body) in branches {
-                    assigned(body, out);
-                }
-                assigned(other, out);
-            }
-            _ => {}
-        }
-    }
-}
-fn emit_body(
-    body: &[Stmt],
-    known: &mut BTreeSet<String>,
-    functions: &BTreeMap<String, usize>,
-    serial: &mut usize,
-) -> Result<String, Error> {
-    let mut out = String::new();
-    for stmt in body {
-        match stmt {
-            Stmt::Assign(name, expr) => {
-                let expr = emit_expr(expr, known, functions)?;
-                out.push_str(&format!("v_{name} = {expr};\n"));
-                known.insert(name.clone());
-            }
-            Stmt::Display(expr) => out.push_str(&format!(
-                "println!(\"{{}}\", {});\n",
-                emit_expr(expr, known, functions)?
-            )),
-            Stmt::For(name, start, step, stop, body) => {
-                let start = emit_expr(start, known, functions)?;
-                let step = emit_expr(step, known, functions)?;
-                let stop = emit_expr(stop, known, functions)?;
-                *serial += 1;
-                let id = *serial;
-                let mut inner = known.clone();
-                inner.insert(name.clone());
-                let body = emit_body(body, &mut inner, functions, serial)?;
-                out.push_str(&format!("for range_{id} in matlab_range({start}, {step}, {stop}) {{\nv_{name} = range_{id};\n{body}}}\n"));
-                // A range may be empty: newly assigned variables cannot escape safely.
-            }
-            Stmt::If(branches, other) => {
-                let mut paths = Vec::new();
-                for (i, (condition, body)) in branches.iter().enumerate() {
-                    let condition = emit_expr(condition, known, functions)?;
-                    let mut inner = known.clone();
-                    let body = emit_body(body, &mut inner, functions, serial)?;
-                    paths.push(inner);
-                    out.push_str(&format!(
-                        "{}if matlab_bool({condition}) {{\n{body}}}",
-                        if i == 0 { "" } else { " else " }
-                    ));
-                }
-                let mut inner = known.clone();
-                let body = emit_body(other, &mut inner, functions, serial)?;
-                paths.push(inner);
-                out.push_str(&format!(" else {{\n{body}}}\n"));
-                if let Some(first) = paths.first() {
-                    *known = first
-                        .iter()
-                        .filter(|name| paths.iter().all(|p| p.contains(*name)))
-                        .cloned()
-                        .collect();
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-fn declarations(body: &[Stmt], args: &[String]) -> String {
-    let mut vars = BTreeSet::new();
-    assigned(body, &mut vars);
-    vars.into_iter()
-        .filter(|n| !args.contains(n))
-        .map(|n| format!("let mut v_{n}: f64;\n"))
-        .collect()
-}
-
-/// Translate supported scripts and local functions into a standalone Rust program.
-/// Selects the scalar or array frontend from the source features. Unsupported
-/// syntax and statically unknown variables produce diagnostics.
-/// This function does not execute code. Semantic diagnostics currently use line 1.
+/// Generate a typed Rust script using ndarray and nalgebra-backed helpers.
+/// Use `generate_project` for its dependency manifest and vendored helper crate.
 pub fn transpile(source: &str) -> Result<String, Error> {
-    if arrays::selects_array_frontend(source) {
-        arrays::transpile_arrays(source, false)
-    } else {
-        transpile_inner(source, false)
-    }
+    transpile_typed(source, false)
 }
-
-/// Translate a function file into a Rust library or module; scripts are rejected.
-/// Scalar-only functions export `f_name(f64, ...) -> f64`. Array-feature programs
-/// export `f_name(Vec<Value>) -> ArrayResult<Vec<Value>>` for dynamic shapes and
-/// multiple outputs. See [`transpile_arrays`] and [`array_runtime::Value`].
-/// The output can be passed to `rustc --crate-type=lib --emit=llvm-ir,link`.
+/// Generate typed public functions; script statements are rejected.
 pub fn transpile_library(source: &str) -> Result<String, Error> {
-    if arrays::selects_array_frontend(source) {
-        arrays::transpile_arrays(source, true)
-    } else {
-        transpile_inner(source, true)
-    }
+    transpile_typed(source, true)
 }
-
-fn transpile_inner(source: &str, library: bool) -> Result<String, Error> {
-    let mut parser = Parser {
-        tokens: lex(source)?,
-        pos: 0,
-        depth: 0,
-    };
-    let body = parser.body()?;
-    let mut functions = Vec::new();
-    while parser.is_name("function") {
-        functions.push(parser.function()?);
-    }
-    if !matches!(parser.token(), Token::Eof) {
-        return Err(parser.error("unexpected token after script; local functions must appear last"));
-    }
-    if library && (!body.is_empty() || functions.is_empty()) {
-        return Err(semantic(
-            "library mode requires one or more functions and no script statements",
-        ));
-    }
-    let mut signatures = BTreeMap::new();
-    for function in &functions {
-        if builtin(&function.name).is_some() {
-            return Err(semantic("shadowing built-in functions is unsupported"));
-        }
-        if signatures
-            .insert(function.name.clone(), function.args.len())
-            .is_some()
-        {
-            return Err(semantic("duplicate function declaration"));
-        }
-    }
-    let mut out = String::from(RUNTIME);
-    let mut serial = 0;
-    for function in functions {
-        let args = function
-            .args
-            .iter()
-            .map(|a| format!("mut v_{a}: f64"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut known = function.args.iter().cloned().collect();
-        let generated = emit_body(&function.body, &mut known, &signatures, &mut serial)?;
-        if !known.contains(&function.output) {
-            return Err(semantic(format!(
-                "function '{}' output '{}' is not definitely assigned",
-                function.name, function.output
-            )));
-        }
-        out.push_str(&format!(
-            "pub fn f_{}({args}) -> f64 {{\n{}{generated}v_{}\n}}\n",
-            function.name,
-            declarations(&function.body, &function.args),
-            function.output
-        ));
-    }
-    if !library {
-        let generated = emit_body(&body, &mut BTreeSet::new(), &signatures, &mut serial)?;
-        out.push_str(&format!(
-            "fn main() {{\n{}{generated}}}\n",
-            declarations(&body, &[])
-        ));
-    }
-    Ok(out)
-}
-const RUNTIME: &str = r#"// Generated by unlinked-matlab. Scalar subset; see crate README.
-#![allow(unused_mut, unused_variables, unused_assignments, dead_code, non_snake_case, unused_parens)]
-fn matlab_sign(x: f64) -> f64 { if x == 0.0 { 0.0 } else { x.signum() } }
-fn matlab_bool(x: f64) -> bool { assert!(!x.is_nan(), "NaN cannot be converted to logical"); x != 0.0 }
-fn matlab_mod(x: f64, y: f64) -> f64 {
-    if y == 0.0 { return x; }
-    let q = x / y;
-    if !q.is_finite() || !y.is_finite() { return f64::NAN; }
-    if (q - q.round()).abs() <= 2.0 * f64::EPSILON * q.abs() { return 0.0_f64.copysign(y); }
-    x - q.floor() * y
-}
-fn matlab_range(start: f64, step: f64, stop: f64) -> impl Iterator<Item = f64> {
-    assert!(start.is_finite() && step.is_finite() && stop.is_finite(), "non-finite range");
-    assert!(step != 0.0, "zero range step is unsupported");
-    let intervals = (stop - start) / step;
-    let count = if intervals < 0.0 { 0 } else {
-        let tolerance = 4.0 * f64::EPSILON * intervals.abs().max(1.0);
-        let count = (intervals + tolerance).floor() + 1.0;
-        assert!(count <= 1_000_000.0, "range exceeds subset limit of 1000000 iterations");
-        count as usize
-    };
-    assert!(count != 0, "empty for range requires an array-valued loop variable; unsupported scalar subset");
-    (0..count).map(move |i| start + i as f64 * step)
-}
-"#;
 
 /// Evaluate one scalar parameter expression using an explicit variable workspace.
 /// No assignments, user-defined functions, file access or process execution occur.

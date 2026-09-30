@@ -13,6 +13,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 serde_json = "1"
+tempfile = "3"
 unlinked-import = { path = "../unlinked-import" }
 unlinked-model = { path = "../unlinked-model" }
 unlinked-matlab = { path = "../unlinked-matlab" }
