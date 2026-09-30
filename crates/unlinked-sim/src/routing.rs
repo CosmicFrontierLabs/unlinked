@@ -20,6 +20,15 @@ fn system(system: &mut System, depth: usize, remaining: &mut usize) -> Result<()
         .ok_or_else(|| Error::Options("routing block budget exceeded".into()))?;
     let mut tags = BTreeMap::new();
     for block in &system.blocks {
+        if block
+            .param("Commented")
+            .is_some_and(|value| value.trim() != "off")
+        {
+            return Err(block_error(
+                &block.id.0,
+                "commented or commented-through blocks are unsupported",
+            ));
+        }
         if block.block_type == "Goto" {
             if block.param("TagVisibility").unwrap_or("local") != "local" {
                 return Err(block_error(

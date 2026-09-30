@@ -272,3 +272,28 @@ fn inherited_slower_sample_rate_is_not_silently_assigned_output_step() {
     let error = compile(&m, &options()).unwrap_err().to_string();
     assert!(error.contains("inherited sample-rate propagation"));
 }
+
+#[test]
+fn nearly_aligned_stop_cannot_add_an_extra_discrete_update() {
+    let m = model(
+        vec![
+            block("clock", "Clock", &[]),
+            block("delay", "UnitDelay", &[("SampleTime", "0.1")]),
+        ],
+        vec![line("clock", 1, "delay", 1)],
+    );
+    let trace = simulate_model(&m, &options()).unwrap();
+    assert_eq!(trace.time.len(), 10);
+    let bad = Options {
+        stop: 0.900000000001,
+        ..options()
+    };
+    let near = simulate_model(&m, &bad).unwrap();
+    assert_eq!(near.time.len(), 10);
+    assert!((near.signals["delay"][9] - 0.8).abs() < 1e-12);
+    let rounding = Options {
+        stop: 0.1 * 9.0,
+        ..options()
+    };
+    assert_eq!(simulate_model(&m, &rounding).unwrap().time.len(), 10);
+}

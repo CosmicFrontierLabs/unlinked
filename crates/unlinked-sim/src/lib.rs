@@ -568,8 +568,7 @@ pub fn simulate_with_observer_and_budget(
         return Err(Error::Options("Rk45 requires 0 < relative_tolerance <= 1, positive finite absolute_tolerance, and 1..=1,000,000 internal steps".into()));
     }
     let ticks = (o.stop - o.start) / o.step;
-    let near_integer = (ticks == 0.0 || ticks.round() >= 1.0)
-        && (ticks - ticks.round()).abs() <= 8.0 * f64::EPSILON * ticks.abs().max(1.0);
+    let near_integer = on_grid(ticks);
     let intervals = if near_integer {
         ticks.round()
     } else {

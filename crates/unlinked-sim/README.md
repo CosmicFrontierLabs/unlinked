@@ -136,3 +136,13 @@ conditional ports, masks and links fail explicitly. Chart-path matching does
 not change the imported model. The corpus test isolates the unchanged
 `PID Control/ud` function from `rovSim_los.slx` and checks its source formula;
 it does not claim that the complete ROV model or its stateful guidance chart runs.
+
+Function execution has a deterministic default budget of 20 million estimated
+operations across the entire run, including all solver stages. Adaptive RK45 can
+consume more function work than RK4 on the same output grid and may reach this
+limit sooner. Trusted native callers can pass an explicit `ArrayBudget` to
+`simulate_with_observer_and_budget`; server jobs retain the fixed budget, shared
+with initialization, plus the 30-second cooperative deadline and 25,001-sample
+cap. Budget exhaustion is an explicit error, never a partial successful trace.
+Blocks marked `Commented=on` or `Commented=through` are rejected until their
+removal/bypass semantics are implemented, including nested and routing blocks.
