@@ -105,7 +105,7 @@ pub fn local_viewer() -> Html {
     match &*state {
         Load::Loaded(model) => html! {
             <div class="page-fill">
-                <div class="subbar">
+                <div class="subbar file-bar">
                     { picker }
                     <span class="muted">{ "Local preview only. To simulate, upload this model to a project and select its Simulate tab." }</span>
                     <Link<Route> to={Route::Home} classes="button">{ "Open projects to simulate" }</Link<Route>>
