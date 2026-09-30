@@ -757,6 +757,7 @@ dependencies = [
  "serde_json",
  "shared",
  "unlinked-import",
+ "unlinked-matlab",
  "unlinked-model",
  "unlinked-render",
  "uuid",

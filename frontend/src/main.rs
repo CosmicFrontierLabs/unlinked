@@ -4,6 +4,7 @@ mod diagram;
 mod fetch;
 mod local_viewer;
 mod pages;
+mod transpiler;
 
 use auth::{Login, Session, SessionProvider, UserMenu};
 use local_viewer::LocalViewer;
@@ -18,6 +19,8 @@ pub enum Route {
     Home,
     #[at("/login")]
     Login,
+    #[at("/transpile")]
+    Transpile,
     #[at("/view")]
     LocalView,
     #[at("/orgs/:org_id")]
@@ -41,6 +44,7 @@ fn switch(route: Route) -> Html {
     match route {
         Route::Home => html! { <Home /> },
         Route::Login => html! { <Login /> },
+        Route::Transpile => html! { <transpiler::Transpiler /> },
         Route::LocalView => html! { <LocalViewer /> },
         Route::Org { org_id } => html! { <RequireLogin><OrgPage {org_id} /></RequireLogin> },
         Route::Project { project_id } => {
@@ -70,6 +74,7 @@ pub fn app() -> Html {
                     <Link<Route> to={Route::Home} classes="brand">{ "Unlinked" }</Link<Route>>
                     <nav>
                         <Link<Route> to={Route::LocalView}>{ "Open local model" }</Link<Route>>
+                        <Link<Route> to={Route::Transpile}>{ "MATLAB to Rust" }</Link<Route>>
                     </nav>
                     <UserMenu />
                 </header>
