@@ -90,6 +90,32 @@ fn default_plotted(signals: &[SimulationSignal], outports: &[String]) -> Vec<usi
     }
 }
 
+/// Columns of a stored trace in the order and with the names recorded when
+/// it ran. Signals are matched to trace columns by stable ID; trace columns
+/// without recorded metadata (runs stored before names were kept) follow,
+/// labelled by ID.
+fn stored_columns(
+    mut columns: BTreeMap<String, Vec<f64>>,
+    recorded: &[SimulationSignal],
+) -> (Vec<SimulationSignal>, Vec<Vec<f64>>) {
+    let mut signals = Vec::with_capacity(columns.len());
+    let mut data = Vec::with_capacity(columns.len());
+    for s in recorded {
+        if let Some(column) = columns.remove(&s.id) {
+            signals.push(s.clone());
+            data.push(column);
+        }
+    }
+    for (id, column) in columns {
+        signals.push(SimulationSignal {
+            name: id.clone(),
+            id,
+        });
+        data.push(column);
+    }
+    (signals, data)
+}
+
 /// Picker order: Outports, then other block outputs, then generated
 /// signals (listed only when `show_generated`). Indices stay the trace
 /// order, so selection is unaffected by presentation.
@@ -817,6 +843,23 @@ mod tests {
         let outports = vec!["cart position (m)".to_string()];
         assert_eq!(picker_order(&signals(), &outports, false), vec![3, 0, 2]);
         assert_eq!(picker_order(&signals(), &outports, true), vec![3, 0, 2, 1]);
+    }
+
+    #[test]
+    fn stored_columns_follow_recorded_order_and_names() {
+        let columns = BTreeMap::from([
+            ("10".to_string(), vec![1.0]),
+            ("7".to_string(), vec![2.0]),
+            ("9".to_string(), vec![3.0]),
+        ]);
+        let recorded = vec![sig("7", "cart position (m):1"), sig("10", "force:1")];
+        let (signals, data) = stored_columns(columns, &recorded);
+        let ids: Vec<&str> = signals.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["7", "10", "9"]);
+        assert_eq!(label(&signals[0].name), "cart position (m):1");
+        // No metadata for "9": labelled by its ID.
+        assert_eq!(signals[2].name, "9");
+        assert_eq!(data, vec![vec![2.0], vec![1.0], vec![3.0]]);
     }
 
     #[test]
