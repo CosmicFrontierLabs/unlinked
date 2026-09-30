@@ -2,11 +2,13 @@
 //! both happen in the browser; nothing is uploaded.
 
 use crate::diagram::DiagramView;
+use crate::Route;
 use std::rc::Rc;
 use unlinked_model::Model;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{DragEvent, Event, HtmlInputElement};
 use yew::prelude::*;
+use yew_router::prelude::Link;
 
 enum Load {
     Empty,
@@ -103,7 +105,11 @@ pub fn local_viewer() -> Html {
     match &*state {
         Load::Loaded(model) => html! {
             <div class="page-fill">
-                <div class="subbar">{ picker }</div>
+                <div class="subbar file-bar">
+                    { picker }
+                    <span class="muted">{ "Local preview only. To simulate, upload this model to a project and select its Simulate tab." }</span>
+                    <Link<Route> to={Route::Home} classes="button">{ "Open projects to simulate" }</Link<Route>>
+                </div>
                 <DiagramView model={model.clone()} />
             </div>
         },
