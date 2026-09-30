@@ -68,10 +68,7 @@ fn descend_mut<'a>(mut e: &'a mut XElem, path: &[usize]) -> &'a mut XElem {
     e
 }
 
-fn part_root<'a>(
-    parts: &'a [(String, Document, bool)],
-    part: usize,
-) -> Result<&'a XElem, ImportError> {
+fn part_root(parts: &[(String, Document, bool)], part: usize) -> Result<&XElem, ImportError> {
     parts[part]
         .1
         .root()
