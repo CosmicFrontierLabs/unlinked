@@ -4,6 +4,7 @@ mod diagram;
 mod fetch;
 mod local_viewer;
 mod pages;
+mod sim;
 
 use auth::{Login, Session, SessionProvider, UserMenu};
 use local_viewer::LocalViewer;
