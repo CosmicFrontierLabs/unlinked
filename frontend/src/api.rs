@@ -9,7 +9,7 @@ use shared::{
     AddOrgMemberRequest, AddProjectMemberRequest, AuditEntry, AuthProvidersResponse,
     CreateOrgRequest, CreateProjectRequest, ErrorResponse, FileInfo, FileVersionInfo, OrgMember,
     OrgRole, Organization, Project, ProjectMember, ProjectRole, RenameFileRequest,
-    UpdateOrgMemberRequest, UpdateProjectMemberRequest, UserInfo,
+    SimulationResult, SimulationRun, UpdateOrgMemberRequest, UpdateProjectMemberRequest, UserInfo,
 };
 use std::fmt;
 use uuid::Uuid;
@@ -266,6 +266,16 @@ pub async fn upload(project: Uuid, path: &str, message: &str, bytes: &[u8]) -> A
         .await
         .map_err(network)?;
     check(resp).await?.json().await.map_err(network)
+}
+
+// Simulations
+
+pub async fn simulation_runs(file: Uuid) -> ApiResult<Vec<SimulationRun>> {
+    json(Request::get(&format!("/api/files/{file}/simulations"))).await
+}
+
+pub async fn simulation_result(run: Uuid) -> ApiResult<SimulationResult> {
+    json(Request::get(&format!("/api/simulations/{run}"))).await
 }
 
 pub async fn rename_file(project: Uuid, file: Uuid, path: String) -> ApiResult<()> {
