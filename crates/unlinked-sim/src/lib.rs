@@ -25,6 +25,8 @@ pub enum Solver {
     Euler,
     #[default]
     Rk4,
+    /// Adaptive Dormand–Prince 5(4), sampled on the requested output grid.
+    Rk45,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,6 +38,12 @@ pub struct Options {
     pub solver: Solver,
     /// Includes the initial sample. Prevents accidental unbounded allocation.
     pub max_samples: usize,
+    /// Relative local error tolerance for Rk45 (positive, at most one).
+    pub relative_tolerance: f64,
+    /// Absolute local error tolerance for Rk45 (positive and finite).
+    pub absolute_tolerance: f64,
+    /// Total accepted and rejected Rk45 attempts across the complete run.
+    pub max_internal_steps: usize,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -45,6 +53,9 @@ impl Default for Options {
             step: 0.01,
             solver: Solver::Rk4,
             max_samples: 100_001,
+            relative_tolerance: 1e-6,
+            absolute_tolerance: 1e-9,
+            max_internal_steps: 100_000,
         }
     }
 }
@@ -362,7 +373,7 @@ impl<'a> Compiled<'a> {
     }
 }
 
-/// Execute a bounded fixed-step scalar graph. Integrators are simultaneous, delays update
+/// Execute a bounded scalar graph on a fixed observation grid. Integrators are simultaneous, delays update
 /// only after every continuous solver stage, and algebraic loops are rejected before running.
 pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
     simulate_with_observer(graph, options, |_| true)
@@ -394,6 +405,17 @@ pub fn simulate_with_observer(
         return Err(Error::Options(
             "require finite start <= stop and positive finite step".into(),
         ));
+    }
+    if o.solver == Solver::Rk45
+        && (!o.relative_tolerance.is_finite()
+            || o.relative_tolerance <= 0.0
+            || o.relative_tolerance > 1.0
+            || !o.absolute_tolerance.is_finite()
+            || o.absolute_tolerance <= 0.0
+            || o.max_internal_steps == 0
+            || o.max_internal_steps > 1_000_000)
+    {
+        return Err(Error::Options("Rk45 requires 0 < relative_tolerance <= 1, positive finite absolute_tolerance, and 1..=1,000,000 internal steps".into()));
     }
     let ticks = (o.stop - o.start) / o.step;
     let near_integer = (ticks == 0.0 || ticks.round() >= 1.0)
@@ -469,6 +491,7 @@ pub fn simulate_with_observer(
             .collect(),
         solver: o.solver,
     };
+    let mut adaptive = adaptive::Adaptive::new(o.step);
     for sample in 0..count {
         let t = if sample + 1 == count {
             o.stop
@@ -498,6 +521,14 @@ pub fn simulate_with_observer(
         }
         let k1 = compiled.derivative(&values);
         let mut next = match o.solver {
+            Solver::Rk45 => {
+                let end = if sample + 2 == count {
+                    o.stop
+                } else {
+                    (o.start + (sample + 1) as f64 * o.step).min(o.stop)
+                };
+                adaptive.advance(&compiled, o, t, end, &state)?
+            }
             Solver::Euler => state
                 .iter()
                 .zip(&k1)
@@ -545,6 +576,7 @@ pub fn simulate_with_observer(
     Ok(trace)
 }
 
+mod adaptive;
 mod flatten;
 mod import;
 pub use import::{compile, simulate_model, simulate_model_with_observer};

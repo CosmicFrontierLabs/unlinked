@@ -13,8 +13,14 @@ to identity boundary nodes with qualified block IDs. Raw block parameters and mo
 workspace expressions use `unlinked-matlab::eval_expr`. Workspace dependencies
 resolve iteratively; unresolved/cyclic references fail.
 
-Euler and classical fourth-order Runge–Kutta advance continuous states
-simultaneously. UnitDelay updates once per requested step after solver stages.
+Euler, classical fourth-order Runge–Kutta, and adaptive Dormand–Prince 5(4)
+(`Solver::Rk45`, JSON `rk45`) advance continuous states simultaneously. Rk45
+uses internal accepted/rejected substeps while preserving the requested output
+grid. Its maximum component error is scaled by `absolute_tolerance +
+relative_tolerance * max(abs(old), abs(new))`, defaulting to 1e-9 and 1e-6.
+These are local error targets, not a global-error guarantee. It stops at output
+boundaries rather than interpolating dense output. Defaults allow 100,000 total
+internal attempts (accepted plus rejected), with a hard cap of 1,000,000. UnitDelay updates once per requested step after solver stages.
 The initial sample is recorded, and the final step may be shorter to reach the
 requested stop time. Step discontinuities must align with the sampling grid.
 The solver uses the left limit at a transition when integrating the preceding
@@ -32,8 +38,10 @@ trace; these blocks do not produce external files.
 
 Output is limited to 1,000,001 samples and ten million scalar values. Default
 options cap samples at 100,001. Integration accuracy must be checked for the
-model and chosen step; there is no adaptive error control, event root finder,
-stiff solver, implicit solver or Stateflow execution yet.
+model and chosen step; there is no event root finder, stiff solver, implicit solver or Stateflow
+execution yet. Rk45 implements the Dormand–Prince pair, not full MATLAB ode45
+compatibility. Cancellation observers run at output boundaries; internal work
+between boundaries is bounded by the attempt limit.
 
 Tests compare feedback decay against `exp(-t)` and the closed-form Euler
 recurrence, check simultaneous delay updates and decimal step boundaries, and
