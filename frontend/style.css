@@ -677,3 +677,13 @@ button:disabled {
     word-break: break-all;
     font-size: 0.75rem;
 }
+
+.signal.generated {
+    color: var(--muted);
+}
+
+.signal.toggle {
+    margin-top: 0.4rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
