@@ -7,11 +7,13 @@
 //! Block parameters are kept as raw MATLAB expression strings; evaluating them
 //! is left to consumers that need numbers.
 
+pub mod catalog;
 pub mod diff;
 pub mod edit;
 pub mod geometry;
 pub mod scope;
 pub mod stateflow;
+pub mod validation;
 
 pub use stateflow::{
     Chart, ChartData, ChartKind, DataScope, Junction, JunctionKind, State, StateKind, Transition,
