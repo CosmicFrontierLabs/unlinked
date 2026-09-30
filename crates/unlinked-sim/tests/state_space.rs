@@ -41,6 +41,7 @@ fn line(source: &str, target: &str, input: u32) -> Line {
 }
 fn model(numerator: &str, denominator: &str) -> Model {
     Model {
+        charts: Vec::new(),
         name: "response".into(),
         source: SourceFormat::Mdl,
         charts: vec![],
