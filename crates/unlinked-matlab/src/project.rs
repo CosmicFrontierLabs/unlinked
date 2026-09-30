@@ -16,7 +16,7 @@ pub fn generate_project(source: &str, library: bool) -> Result<GeneratedProject,
         manifest: String::from(concat!(
             "[package]\nname = \"generated_matlab\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n",
             "# Isolated from any enclosing Cargo workspace.\n[workspace]\n\n",
-            "[dependencies]\nndarray = \"=0.17.2\"\nnalgebra = \"=0.35.0\"\n",
+            "[dependencies]\nndarray = \"=0.17.2\"\nnalgebra = { version = \"=0.35.0\", default-features = false, features = [\"std\"] }\n",
             "unlinked-matlab-rt = { path = \"matlab-rt\" }\n"
         )),
         library,
