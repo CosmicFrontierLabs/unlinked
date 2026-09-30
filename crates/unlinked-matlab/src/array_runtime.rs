@@ -151,6 +151,9 @@ impl Value {
         let mut v = self.clone();
         v.rows = self.cols;
         v.cols = self.rows;
+        if self.data.is_empty() {
+            return v;
+        }
         for c in 0..self.cols {
             for r in 0..self.rows {
                 v.data[c + r * self.cols] = self.data[r + c * self.rows];
@@ -200,7 +203,13 @@ impl Value {
         } else if indices.len() == 2 {
             let rows = index_positions(&indices[0], self.rows, false)?;
             let cols = index_positions(&indices[1], self.cols, false)?;
-            let mut data = Vec::with_capacity(checked_size(rows.len(), cols.len())?);
+            let size = checked_size(rows.len(), cols.len())?;
+            if size == 0 {
+                let mut result = Value::new(rows.len(), cols.len(), Vec::new())?;
+                result.kind = self.kind;
+                return Ok(result);
+            }
+            let mut data = Vec::with_capacity(size);
             for c in &cols {
                 for r in &rows {
                     data.push(self.data[r + c * self.rows]);
@@ -265,10 +274,13 @@ impl Value {
                 self.cols = new_cols;
                 self.data = data;
             }
-            positions = cols
-                .iter()
-                .flat_map(|c| rows.iter().map(move |r| r + c * new_rows))
-                .collect();
+            positions = if rows.is_empty() || cols.is_empty() {
+                Vec::new()
+            } else {
+                cols.iter()
+                    .flat_map(|c| rows.iter().map(move |r| r + c * new_rows))
+                    .collect()
+            };
         } else {
             return Err("only one- and two-dimensional indexing is supported".into());
         }
@@ -379,7 +391,21 @@ pub fn concatenate(rows: Vec<Vec<Value>>) -> ArrayResult<Value> {
         return Err("vertical concatenation width mismatch".into());
     }
     let height: usize = assembled.iter().map(|v| v.rows).sum();
-    let mut data = Vec::with_capacity(checked_size(height, width)?);
+    let size = checked_size(height, width)?;
+    // Shaped empty inputs retain dimensions but have no cells to interleave.
+    // Avoid width * row-count work when the total element count is zero.
+    if size == 0 {
+        return Ok(Value {
+            rows: height,
+            cols: width,
+            data: Vec::new(),
+            kind,
+        });
+    }
+    // Empty rows constrain width above but contribute no output cells.
+    // Removing them also bounds mixed empty/nonempty concatenation work.
+    assembled.retain(|row| row.rows != 0);
+    let mut data = Vec::with_capacity(size);
     for c in 0..width {
         for row in &assembled {
             data.extend_from_slice(&row.data[c * row.rows..(c + 1) * row.rows]);
@@ -482,7 +508,7 @@ fn elementwise(op: &str, a: &Value, b: &Value) -> ArrayResult<Value> {
     let rows = broadcast(a.rows, b.rows)?;
     let cols = broadcast(a.cols, b.cols)?;
     let mut data = Vec::with_capacity(checked_size(rows, cols)?);
-    for c in 0..cols {
+    for c in 0..if rows == 0 { 0 } else { cols } {
         for r in 0..rows {
             let x =
                 a.data[if a.rows == 1 { 0 } else { r } + if a.cols == 1 { 0 } else { c * a.rows }];
@@ -540,6 +566,11 @@ fn multiply(a: &Value, b: &Value) -> ArrayResult<Value> {
         return Err("matrix multiplication inner dimensions disagree".into());
     }
     let size = checked_size(a.rows, b.cols)?;
+    // An empty result requires no multiply-adds; looping over its empty rows
+    // otherwise permits enormous inner-dimension * output-column work.
+    if size == 0 {
+        return Value::new(a.rows, b.cols, Vec::new());
+    }
     if size.saturating_mul(a.cols) > 10_000_000 {
         return Err("matrix product exceeds ten million multiply-add operations".into());
     }
@@ -874,6 +905,12 @@ fn reduction(name: &str, value: &Value, dim: usize) -> ArrayResult<Value> {
         )
     };
     let mut out = Value::new(rows, cols, vec![0.0; checked_size(rows, cols)?])?;
+    if out.data.is_empty() {
+        if name == "all" || name == "any" {
+            out.kind = ValueKind::Logical;
+        }
+        return Ok(out);
+    }
     for c in 0..cols {
         for r in 0..rows {
             let length = if dim == 1 { value.rows } else { value.cols };
