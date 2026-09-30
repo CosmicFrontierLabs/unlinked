@@ -564,3 +564,61 @@ ul.runs li {
 a.compare {
     font-size: 0.8rem;
 }
+
+/* Editing */
+.edit-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.4rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-alt);
+}
+
+.edit-bar.editing {
+    border-bottom-color: var(--orange);
+}
+
+.edit-bar .spacer {
+    flex: 1;
+}
+
+.edit-bar.error {
+    color: var(--red);
+}
+
+.diagram.editing g.block {
+    cursor: move;
+}
+
+.diagram:focus {
+    outline: none;
+}
+
+.inspector input.param {
+    width: 100%;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.85em;
+}
+
+.inspector input.block-name {
+    width: 100%;
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+
+button.danger {
+    border-color: var(--red);
+    color: var(--red);
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* Lines are not interactive; let clicks reach the blocks beneath them. */
+.diagram g.lines {
+    pointer-events: none;
+}

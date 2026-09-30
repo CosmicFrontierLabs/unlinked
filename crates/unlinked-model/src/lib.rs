@@ -8,6 +8,7 @@
 //! is left to consumers that need numbers.
 
 pub mod diff;
+pub mod edit;
 pub mod geometry;
 pub mod stateflow;
 

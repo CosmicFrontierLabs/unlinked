@@ -2,6 +2,7 @@
 
 use crate::api::{self, ApiError};
 use crate::diagram::DiagramView;
+use crate::editor::ModelEditor;
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
 use crate::sim::SimulationPanel;
 use crate::Route;
@@ -11,7 +12,7 @@ use shared::{
     Project, ProjectRole, UserInfo,
 };
 use std::rc::Rc;
-use unlinked_model::diff::{BlockChange, ModelDiff};
+use unlinked_model::diff::{BlockChange, ChartChange, ModelDiff};
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::{Event, HtmlInputElement, HtmlSelectElement, InputEvent};
@@ -613,7 +614,9 @@ pub struct FileProps {
 }
 
 enum Content {
-    Model(Rc<unlinked_model::Model>),
+    /// The imported model with the file's path and raw bytes (needed to
+    /// patch it when editing).
+    Model(Rc<unlinked_model::Model>, String, Rc<Vec<u8>>),
     Text(String),
     Binary,
 }
@@ -649,7 +652,7 @@ pub fn file_page(props: &FileProps) -> Html {
             let bytes = api::content(p, f, v).await?;
             Ok(if is_model(&info.path) {
                 match unlinked_import::import(&info.path, &bytes) {
-                    Ok(m) => Content::Model(Rc::new(m)),
+                    Ok(m) => Content::Model(Rc::new(m), info.path, Rc::new(bytes)),
                     Err(e) => {
                         return Err(ApiError {
                             status: 0,
@@ -666,6 +669,19 @@ pub fn file_page(props: &FileProps) -> Html {
         },
     );
     let editor = matches!(&*project, Fetch::Ready(p) if p.my_role >= ProjectRole::Editor);
+    // After saving edits, show the new latest version.
+    let on_saved = {
+        let (navigator, reload) = (use_navigator(), reload.clone());
+        Callback::from(move |_: ()| {
+            if let Some(nav) = &navigator {
+                nav.push(&Route::File {
+                    project_id,
+                    file_id,
+                });
+            }
+            reload.dispatch(());
+        })
+    };
 
     let on_new_version = {
         let (file, reload, error) = (file.clone(), reload.clone(), error.clone());
@@ -765,14 +781,19 @@ pub fn file_page(props: &FileProps) -> Html {
     let body = view(&content, |c: &Content| match c {
         // Keyed by model identity so a new version remounts the viewer with
         // fresh navigation state instead of keeping a stale subsystem path.
-        Content::Model(m) => html! {
+        Content::Model(m, path, bytes) => html! {
             <>
                 <div class="tabs">
                     { tab_button(Tab::Diagram, "Diagram") }
                     { tab_button(Tab::Simulate, "Simulate") }
                 </div>
                 if *tab == Tab::Diagram {
-                    <DiagramView key={format!("{:p}", Rc::as_ptr(m))} model={m.clone()} />
+                    // Keyed by the loaded model so a different version
+                    // remounts with fresh navigation and edit state.
+                    <ModelEditor key={format!("{:p}", Rc::as_ptr(m))} {project_id} path={path.clone()}
+                        model={m.clone()} bytes={bytes.clone()} can_edit={editor}
+                        fit_key={AttrValue::from(format!("{:p}", Rc::as_ptr(m)))}
+                        on_saved={on_saved.clone()} />
                 } else if let Some(version) = shown_version {
                     <SimulationPanel key={version} {file_id} {version} config={m.config.clone()}
                         outports={m.root.blocks.iter().filter(|b| b.block_type == "Outport").map(|b| b.name.clone()).collect::<Vec<_>>()} />
@@ -945,6 +966,23 @@ pub fn compare_page(props: &CompareProps) -> Html {
                                         <strong>{ format!("{place}{}", b.name.replace('\n', " ")) }</strong>
                                         <span class="muted">{ format!(" {}", b.block_type) }</span>
                                         <div>{ text }</div>
+                                    </li>
+                                }
+                            }) }
+                            { for d.charts.iter().map(|c| {
+                                let (class, what) = match c.change {
+                                    ChartChange::Added => ("added", "chart added".to_string()),
+                                    ChartChange::Removed => ("removed", "chart removed".to_string()),
+                                    ChartChange::Modified => ("modified", match &c.previous_name {
+                                        Some(old) => format!("chart changed (was {})", old.replace('\n', " ")),
+                                        None => "chart code, states, data or timing changed".to_string(),
+                                    }),
+                                };
+                                html! {
+                                    <li class={classes!("change", class)}>
+                                        <strong>{ c.name.replace('\n', " ") }</strong>
+                                        <span class="muted">{ " Stateflow / MATLAB Function" }</span>
+                                        <div>{ what }</div>
                                     </li>
                                 }
                             }) }
