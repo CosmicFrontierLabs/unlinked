@@ -22,6 +22,37 @@ struct View {
     y: f64,
 }
 
+enum ViewAction {
+    Set(View),
+    /// Multiply the scale by `factor`, keeping container point (cx, cy) fixed.
+    Zoom {
+        factor: f64,
+        cx: f64,
+        cy: f64,
+    },
+}
+
+/// A reducer rather than plain state so long-lived listeners (the wheel
+/// handler) always act on the current view instead of a captured snapshot.
+impl Reducible for View {
+    type Action = ViewAction;
+
+    fn reduce(self: Rc<Self>, action: ViewAction) -> Rc<Self> {
+        match action {
+            ViewAction::Set(v) => Rc::new(v),
+            ViewAction::Zoom { factor, cx, cy } => {
+                let scale = (self.scale * factor).clamp(0.02, 20.0);
+                let k = scale / self.scale;
+                Rc::new(View {
+                    scale,
+                    x: cx - (cx - self.x) * k,
+                    y: cy - (cy - self.y) * k,
+                })
+            }
+        }
+    }
+}
+
 /// Width and height from the `viewBox` of a rendered SVG.
 fn svg_size(svg: &str) -> Option<(f64, f64)> {
     let vb = svg.split("viewBox=\"").nth(1)?.split('"').next()?;
@@ -53,10 +84,21 @@ fn block_group(target: Option<web_sys::EventTarget>) -> Option<Element> {
         .flatten()
 }
 
+/// Escape text for use inside a double-quoted CSS string: quotes and
+/// backslashes are escaped, control characters become hex escapes.
 fn css_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\a ")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_control() => out.push_str(&format!("\\{:x} ", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[function_component(DiagramView)]
@@ -64,7 +106,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let path = use_state(Vec::<String>::new);
     let selected = use_state(|| None::<String>);
     let theme = use_state(|| Theme::Dark);
-    let view = use_state(|| View {
+    let view = use_reducer(|| View {
         scale: 1.0,
         x: 0.0,
         y: 0.0,
@@ -95,7 +137,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             move |_| {
                 if let (Some(el), Ok(svg)) = (container.cast::<HtmlElement>(), rendered.as_ref()) {
                     if let Some(size) = svg_size(svg) {
-                        view.set(fit(&el, size));
+                        view.dispatch(ViewAction::Set(fit(&el, size)));
                     }
                 }
             },
@@ -118,18 +160,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         let e = e.dyn_ref::<WheelEvent>().unwrap();
                         e.prevent_default();
                         let rect = target.get_bounding_client_rect();
-                        let (cx, cy) = (
-                            e.client_x() as f64 - rect.left(),
-                            e.client_y() as f64 - rect.top(),
-                        );
-                        let v = *view;
-                        let factor = (-e.delta_y() * 0.0015).exp();
-                        let scale = (v.scale * factor).clamp(0.02, 20.0);
-                        let k = scale / v.scale;
-                        view.set(View {
-                            scale,
-                            x: cx - (cx - v.x) * k,
-                            y: cy - (cy - v.y) * k,
+                        view.dispatch(ViewAction::Zoom {
+                            factor: (-e.delta_y() * 0.0015).exp(),
+                            cx: e.client_x() as f64 - rect.left(),
+                            cy: e.client_y() as f64 - rect.top(),
                         });
                     },
                 )
@@ -152,17 +186,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let view = view.clone();
         Callback::from(move |e: MouseEvent| {
             let mut d = drag.borrow_mut();
-            if let Some((sx, sy, start, moved)) = d.as_mut() {
+            // A NaN anchor marks a drag that already ended (button released
+            // or pointer left); only the click handler still reads it.
+            if let Some((sx, sy, start, moved)) = d.as_mut().filter(|d| !d.0.is_nan()) {
                 let (dx, dy) = (e.client_x() as f64 - *sx, e.client_y() as f64 - *sy);
                 if dx.abs() + dy.abs() > 3.0 {
                     *moved = true;
                 }
                 if *moved {
-                    view.set(View {
+                    view.dispatch(ViewAction::Set(View {
                         scale: start.scale,
                         x: start.x + dx,
                         y: start.y + dy,
-                    });
+                    }));
                 }
             }
         })
@@ -256,7 +292,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         Callback::from(move |_: MouseEvent| {
             if let (Some(el), Ok(svg)) = (container.cast::<HtmlElement>(), rendered.as_ref()) {
                 if let Some(size) = svg_size(svg) {
-                    view.set(fit(&el, size));
+                    view.dispatch(ViewAction::Set(fit(&el, size)));
                 }
             }
         })
