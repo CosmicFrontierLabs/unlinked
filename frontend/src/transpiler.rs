@@ -4,9 +4,21 @@ use yew::prelude::*;
 const EXAMPLE: &str =
     "A = [1 2; 3 4];\nx = [2; 1];\ny = A*x;\nfprintf('y = %g, %g\\n', y(1), y(2));\n";
 
+#[derive(Properties, PartialEq)]
+pub struct TranspilerProps {
+    /// Initial source, e.g. a project `.m` file; an example otherwise.
+    #[prop_or_default]
+    pub source: Option<AttrValue>,
+}
+
 #[function_component(Transpiler)]
-pub fn transpiler() -> Html {
-    let source = use_state(|| EXAMPLE.to_string());
+pub fn transpiler(props: &TranspilerProps) -> Html {
+    let source = use_state(|| {
+        props
+            .source
+            .as_ref()
+            .map_or_else(|| EXAMPLE.to_string(), |s| s.to_string())
+    });
     let library = use_state(|| false);
     let generated = use_state(|| None::<Result<String, String>>);
     let edit = {
