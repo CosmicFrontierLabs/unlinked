@@ -563,6 +563,25 @@ fn aggregate_parameter_budgets_and_generated_recursion_are_enforced() {
 }
 
 #[test]
+fn parameter_budget_can_be_shared_across_entire_model() {
+    let mut budget = unlinked_matlab::ArrayBudget::with_limits(8, 1000);
+    let ws = BTreeMap::new();
+    unlinked_matlab::eval_array_expr_with_budget("ones(2)", &ws, &mut budget).unwrap();
+    assert!(budget.remaining_elements() < 8);
+    assert!(unlinked_matlab::eval_array_expr_with_budget("ones(2)", &ws, &mut budget).is_err());
+    let mut budget = unlinked_matlab::ArrayBudget::with_limits(100, 1);
+    assert!(unlinked_matlab::eval_array_expr_with_budget("missing+1", &ws, &mut budget).is_err());
+}
+
+#[test]
+fn wide_matrix_literals_are_bounded_by_size_not_expression_tree_depth() {
+    let row = ["0"; 64].join(" ");
+    let literal = format!("[{}]", vec![row; 64].join(";"));
+    let value = unlinked_matlab::eval_array_expr(&literal, &BTreeMap::new()).unwrap();
+    assert_eq!((value.rows, value.cols, value.data.len()), (64, 64, 4096));
+}
+
+#[test]
 fn shaped_empty_concatenation_rejects_dimension_mismatches() {
     for expression in [
         "[zeros(0,3);zeros(0,4)]",

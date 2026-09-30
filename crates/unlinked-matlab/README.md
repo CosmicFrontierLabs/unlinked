@@ -2,9 +2,10 @@
 
 Dependency-free MATLAB/Octave frontend for supported real scalar, matrix and
 character-array programs targeting Rust and LLVM. The library
-parses input and generates source; it never executes input, launches a compiler,
-loads files, or provides operating-system builtins. It is suitable for use from a
-WASM application or a server.
+parses input and generates source without executing it. Explicit bounded APIs
+also evaluate pure expressions and restricted initialization scripts in process.
+The library never launches a compiler, loads files, or provides operating-system
+builtins. It is suitable for use from a WASM application or a server.
 
 ```rust
 use std::collections::BTreeMap;
@@ -123,7 +124,9 @@ user functions. Scalar `eval_expr` remains unchanged for existing simulation
 callers. Pure array evaluation additionally caps aggregate intermediate values at
 eight million elements and estimated numeric work at twenty million operations
 per expression; these budgets prevent repeated large subexpressions from evading
-the individual array limits. `Value` exposes `rows`, `cols`, `data` in **column-major** order, and
+the individual array limits. Reuse `ArrayBudget` with
+`eval_array_expr_with_budget` to enforce a single budget across an entire model's
+workspace and block parameters, including token-processing work for failed calls. `Value` exposes `rows`, `cols`, `data` in **column-major** order, and
 `kind` (`Numeric`, `Logical`, or `Character`). `Value::new`, `Value::row`, and
 `Value::scalar` construct inputs; `validate` checks externally constructed values.
 
@@ -160,7 +163,7 @@ Supported array behavior:
   Numeric display/formatting aims at useful values, not byte-for-byte MATLAB
   command-window formatting. `fprintf` accepts a format string, never a file ID.
 
-Array-subset limits are 256 KiB source, 16384 tokens per source, 512 tokens and
+Array-subset limits are 256 KiB source, 16384 tokens per source, 256 expression-tree levels and
 256 operators per expression, 64 parser/call nesting levels, one million elements
 per array/dimension, one million executed statements/loop iterations, ten million
 operations per matrix multiplication/solve, and four MB per formatted string.
@@ -189,3 +192,33 @@ Octave differs for a logical row-vector mask applied to a matrix: it can return
 a row vector. That shape corner is not included in the shared-conformance claim.
 The special `find([])` and `find(0)` results are 0-by-0, matching the
 [MathWorks documented convention](https://www.mathworks.com/help/matlab/ref/find.html).
+
+## Bounded initialization scripts
+
+`eval_script(source, &Environment) -> Result<Environment, Error>` interprets a
+restricted initialization script in process, returning a new workspace. It never
+compiles code or launches a process. `eval_script_with_budget` also accepts
+`&mut ArrayBudget`, allowing initialization and subsequent model-parameter
+expressions to share one aggregate budget. Failures leave the original workspace
+unchanged.
+
+Supported statements are assignments, indexed assignments/growth, `if`/`elseif`/
+`else`, column-wise `for`, `while`, and loop-local `break`/`continue`. Expressions
+use the existing pure array evaluator. Functions, multiple-output assignments,
+`return`, standalone call statements, printing/formatting, and file/process/network
+builtins are rejected. Unsupported capabilities are checked in unexecuted branches
+too. No files are loaded automatically; callers must explicitly supply script text
+and initial variables.
+
+The initialization workspace is limited to 256 variables, 1024 elements per stored
+value, and 100000 stored elements total. Names are at most 63 ASCII letters, digits
+or underscores, beginning with a letter. Execution stops after 100000 statement
+and loop-condition steps, including empty loop bodies. Intermediate expressions
+retain their existing one-million-element array cap, eight-million-element
+aggregate default, and twenty-million estimated-operation default. Source/token/
+parser nesting limits also apply. These limits cover one interpreter invocation;
+callers remain responsible for request concurrency and aggregate server load.
+
+Tests check initialization against eight fixed Octave scripts, empty and nested
+loops, indexed growth, forbidden capabilities in dead branches, atomic errors,
+workspace limits, runaway loops and budgets shared with later parameter evaluation.

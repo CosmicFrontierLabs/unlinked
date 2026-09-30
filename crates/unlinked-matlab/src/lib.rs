@@ -2,7 +2,10 @@
 //! Parsing and transpilation do not execute source code or launch a compiler.
 pub mod array_runtime;
 mod arrays;
-pub use arrays::{eval_array_expr, transpile_arrays};
+pub use arrays::{
+    ArrayBudget, eval_array_expr, eval_array_expr_with_budget, eval_script,
+    eval_script_with_budget, transpile_arrays,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 

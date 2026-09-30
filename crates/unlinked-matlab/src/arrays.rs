@@ -1,5 +1,8 @@
 //! Native Rust code generation for the real matrix and character-array subset.
+#[path = "script.rs"]
+mod script;
 use crate::Error;
+pub use script::{eval_script, eval_script_with_budget};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -191,6 +194,28 @@ enum Expr {
     Array(Vec<Vec<Expr>>),
     Apply(String, Vec<Expr>),
 }
+fn expression_depth(expr: &Expr) -> usize {
+    match expr {
+        Expr::Unary(_, value) => 1 + expression_depth(value),
+        Expr::Binary(_, left, right) => 1 + expression_depth(left).max(expression_depth(right)),
+        Expr::Range(a, b, c) => {
+            1 + expression_depth(a)
+                .max(expression_depth(b))
+                .max(expression_depth(c))
+        }
+        Expr::Array(rows) => {
+            1 + rows
+                .iter()
+                .flatten()
+                .map(expression_depth)
+                .max()
+                .unwrap_or(0)
+        }
+        Expr::Apply(_, args) => 1 + args.iter().map(expression_depth).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
 #[derive(Debug)]
 enum Target {
     Name(String),
@@ -284,7 +309,6 @@ impl Parser {
         result
     }
     fn expr_inner(&mut self, min: u8, in_array: bool) -> Result<Expr, Error> {
-        let expression_start = self.pos;
         let mut lhs = match self.token().clone() {
             Token::Number(n) => {
                 self.pos += 1;
@@ -343,8 +367,8 @@ impl Parser {
         };
         let mut operators = 0;
         loop {
-            if self.pos - expression_start > 512 {
-                return Err(self.fail("expression exceeds 512-token limit"));
+            if expression_depth(&lhs) > 256 {
+                return Err(self.fail("expression tree exceeds 256 levels"));
             }
             if operators >= 256 {
                 return Err(self.fail("expression exceeds 256 operators"));
@@ -1084,6 +1108,15 @@ pub fn eval_array_expr(
     source: &str,
     workspace: &BTreeMap<String, crate::array_runtime::Value>,
 ) -> Result<crate::array_runtime::Value, Error> {
+    eval_array_expr_with_budget(source, workspace, &mut ArrayBudget::default())
+}
+
+/// Evaluate against a shared budget to bound a complete model's parameter work.
+pub fn eval_array_expr_with_budget(
+    source: &str,
+    workspace: &BTreeMap<String, crate::array_runtime::Value>,
+    budget: &mut ArrayBudget,
+) -> Result<crate::array_runtime::Value, Error> {
     for value in workspace.values() {
         value.validate().map_err(|e| error(1, e))?;
     }
@@ -1092,27 +1125,44 @@ pub fn eval_array_expr(
         pos: 0,
         depth: 0,
     };
+    budget
+        .operations(parser.tokens.len())
+        .map_err(|e| error(1, e))?;
     let expr = parser.expr(0, false)?;
     parser.separators();
     if !matches!(parser.token(), Token::Eof) {
         return Err(parser.fail("expected end of array expression"));
     }
-    eval(
-        &expr,
-        workspace,
-        None,
-        &mut EvalBudget {
-            values: 8_000_000,
-            operations: 20_000_000,
-        },
-    )
-    .map_err(|e| error(1, e))
+    eval(&expr, workspace, None, budget).map_err(|e| error(1, e))
 }
-struct EvalBudget {
+
+/// Aggregate intermediate-element and estimated-operation budget. Reuse across
+/// calls when evaluating all workspace and block parameters for one model.
+pub struct ArrayBudget {
     values: usize,
     operations: usize,
 }
-impl EvalBudget {
+impl Default for ArrayBudget {
+    fn default() -> Self {
+        Self {
+            values: 8_000_000,
+            operations: 20_000_000,
+        }
+    }
+}
+impl ArrayBudget {
+    pub fn with_limits(intermediate_elements: usize, operations: usize) -> Self {
+        Self {
+            values: intermediate_elements,
+            operations,
+        }
+    }
+    pub fn remaining_elements(&self) -> usize {
+        self.values
+    }
+    pub fn remaining_operations(&self) -> usize {
+        self.operations
+    }
     fn operations(&mut self, count: usize) -> Result<(), String> {
         self.operations = self
             .operations
@@ -1133,7 +1183,7 @@ fn eval(
     expr: &Expr,
     workspace: &BTreeMap<String, crate::array_runtime::Value>,
     end: Option<f64>,
-    budget: &mut EvalBudget,
+    budget: &mut ArrayBudget,
 ) -> crate::array_runtime::ArrayResult<crate::array_runtime::Value> {
     use crate::array_runtime::{self as rt, Index, Value};
     let value = match expr {
