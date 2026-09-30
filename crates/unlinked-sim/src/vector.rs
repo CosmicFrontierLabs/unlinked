@@ -80,6 +80,7 @@ enum Operation {
         ports: usize,
     },
     Transfer,
+    MatlabFunction,
 }
 struct Spec {
     operation: Operation,
@@ -395,6 +396,24 @@ fn describe(
             };
             (Operation::Demux { widths, ports }, 1, None)
         }
+        "MatlabFunction" => {
+            if block.ports.inputs > 256 || block.ports.outputs != 1 {
+                return Err(block_error(
+                    id,
+                    "MATLAB Function requires at most 256 inputs and exactly one output port",
+                ));
+            }
+            if block
+                .param("Script")
+                .is_none_or(|source| source.len() > 262_144)
+            {
+                return Err(block_error(
+                    id,
+                    "missing or oversized MATLAB Function script",
+                ));
+            }
+            (Operation::MatlabFunction, block.ports.inputs as usize, None)
+        }
         "TransferFcn" | "DiscreteTransferFcn" | "StateSpace" => (Operation::Transfer, 1, None),
         "Bias" | "Saturate" | "Saturation" | "Abs" | "Trigonometry" | "Math" | "Scope"
         | "Display" | "Outport" | "Terminator" | "ToWorkspace" => (Operation::Elementwise, 1, None),
@@ -599,7 +618,7 @@ fn infer(
         }
         Operation::Reduce => inputs[0].map(|_| Shape::SCALAR),
         Operation::Elementwise => broadcast(id, inputs.iter().copied())?,
-        Operation::Transfer => Some(Shape::SCALAR),
+        Operation::Transfer | Operation::MatlabFunction => Some(Shape::SCALAR),
         Operation::Mux { .. } => {
             if inputs.iter().any(Option::is_none) {
                 None
@@ -705,6 +724,21 @@ fn identity(block: &Block) -> Block {
 pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
     if model.root.blocks.len() > MAX_NODES {
         return Err(Error::Options("model node budget exceeded".into()));
+    }
+    let function_blocks: Vec<_> = model
+        .root
+        .blocks
+        .iter()
+        .filter(|b| b.block_type == "MatlabFunction")
+        .collect();
+    if function_blocks.len() > 1024
+        || function_blocks.iter().fold(0usize, |total, b| {
+            total.saturating_add(b.param("Script").map_or(0, str::len))
+        }) > 1_048_576
+    {
+        return Err(Error::Options(
+            "MATLAB Function graph exceeds 1024 functions or 1 MiB total source".into(),
+        ));
     }
     let mut budget = ArrayBudget::default();
     let workspace = workspace(model, &mut budget)?;
@@ -1047,6 +1081,14 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
                 }
             }
             _ => {
+                if matches!(spec.operation, Operation::MatlabFunction)
+                    && input_shapes.iter().any(|shape| *shape != Shape::SCALAR)
+                {
+                    return Err(block_error(
+                        &block.id.0,
+                        "MATLAB Function inputs must be scalar",
+                    ));
+                }
                 if matches!(spec.operation, Operation::Transfer) && input_shapes[0] != Shape::SCALAR
                 {
                     return Err(block_error(

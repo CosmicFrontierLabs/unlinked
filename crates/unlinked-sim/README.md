@@ -114,3 +114,13 @@ between boundaries is bounded by the attempt limit.
 Tests compare feedback decay against `exp(-t)` and the closed-form Euler
 recurrence, check simultaneous delay updates and decimal step boundaries, and
 exercise importer diagnostics, resource budgets and invalid graphs.
+
+Pure `MatlabFunction` execution nodes support up to 256 scalar inputs and exactly
+one finite numeric/logical scalar output. The engine prepares each function once
+per graph execution and shares one `ArrayBudget` across all function nodes,
+observation samples and continuous solver stages. No subprocess or native
+compiler runs during simulation. `simulate_with_observer_and_budget` accepts a
+budget carrying a cooperative deadline/cancellation callback. Source totals are
+limited to 1 MiB and 1,024 functions per graph; individual interpreter limits also
+apply. Persistent/global state, printing, external access, non-scalar outputs and
+multiple output ports reject explicitly.

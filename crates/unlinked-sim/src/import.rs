@@ -191,6 +191,18 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             }
         }
         let kind = match block.block_type.as_str() {
+            "MatlabFunction" => {
+                let script = block
+                    .param("Script")
+                    .ok_or_else(|| block_error(id, "missing MATLAB Function script"))?
+                    .to_owned();
+                require(block, "SampleTime", &["-1", "0"])?;
+                Kind::MatlabFunction {
+                    script,
+                    inputs: block.ports.inputs as usize,
+                }
+            }
+
             "TransferFcn" => {
                 let input = super::transfer::lower(
                     block,

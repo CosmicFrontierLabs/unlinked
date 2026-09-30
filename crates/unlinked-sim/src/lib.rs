@@ -128,6 +128,11 @@ pub enum Kind {
     Unary {
         operation: String,
     },
+    /// Pure, stateless function with scalar inputs and exactly one scalar output.
+    MatlabFunction {
+        script: String,
+        inputs: usize,
+    },
     Sink,
 }
 impl Kind {
@@ -140,7 +145,7 @@ impl Kind {
             | Self::DigitalClock { .. } => 0,
             Self::Switch => 3,
             Self::Relational { .. } => 2,
-            Self::Logic { inputs, .. } => *inputs,
+            Self::Logic { inputs, .. } | Self::MatlabFunction { inputs, .. } => *inputs,
             Self::Sum { signs } => signs.len(),
             Self::Product { divide } => divide.len(),
             _ => 1,
@@ -199,6 +204,7 @@ struct Compiled<'a> {
     inputs: Vec<Vec<usize>>,
     order: Vec<usize>,
     states: Vec<usize>,
+    matlab: matlab_function::Runtime,
 }
 fn on_grid(ticks: f64) -> bool {
     ticks == 0.0 || (ticks.round() >= 1.0 && (ticks - ticks.round()).abs() <= 1e-9)
@@ -212,6 +218,7 @@ fn block_error(id: &str, message: impl Into<String>) -> Error {
 }
 impl<'a> Compiled<'a> {
     fn new(graph: &'a Graph) -> Result<Self, Error> {
+        let matlab = matlab_function::Runtime::prepare(graph)?;
         let mut ids = BTreeMap::new();
         for (i, node) in graph.nodes.iter().enumerate() {
             if ids.insert(node.id.as_str(), i).is_some() {
@@ -368,6 +375,7 @@ impl<'a> Compiled<'a> {
             inputs,
             order,
             states,
+            matlab,
         })
     }
     fn evaluate(&self, t: f64, state: &[f64], left_limit: bool) -> Result<Vec<f64>, Error> {
@@ -457,6 +465,11 @@ impl<'a> Compiled<'a> {
                     "sqrt" => x(0).sqrt(),
                     _ => unreachable!(),
                 },
+                Kind::MatlabFunction { inputs, .. } => self.matlab.evaluate(
+                    i,
+                    &self.graph.nodes[i].id,
+                    (0..*inputs).map(x).collect(),
+                )?,
                 Kind::Sink => x(0),
                 Kind::SampleHold { period_ticks } => {
                     if sample.is_some_and(|tick| tick % period_ticks == 0) {
@@ -514,6 +527,22 @@ pub struct Sample<'a> {
 pub fn simulate_with_observer(
     graph: &Graph,
     options: &Options,
+    observer: impl FnMut(Sample<'_>) -> bool,
+) -> Result<Trace, Error> {
+    simulate_with_observer_and_budget(
+        graph,
+        options,
+        unlinked_matlab::ArrayBudget::default(),
+        observer,
+    )
+}
+
+/// As `simulate_with_observer`, with one function-execution budget shared across
+/// all blocks, samples and solver stages. The budget may carry a deadline check.
+pub fn simulate_with_observer_and_budget(
+    graph: &Graph,
+    options: &Options,
+    budget: unlinked_matlab::ArrayBudget,
     mut observer: impl FnMut(Sample<'_>) -> bool,
 ) -> Result<Trace, Error> {
     let o = options;
@@ -596,6 +625,7 @@ pub fn simulate_with_observer(
     }
     let graph = &normalized;
     let compiled = Compiled::new(graph)?;
+    compiled.matlab.budget.replace(budget);
     let mut state: Vec<f64> = compiled
         .states
         .iter()
@@ -727,6 +757,7 @@ mod adaptive;
 mod flatten;
 mod import;
 mod inputs;
+mod matlab_function;
 pub use inputs::{compile_with_inputs, evaluate_inputs, simulate_model_with_inputs, InputValues};
 mod state_space;
 mod transfer;
