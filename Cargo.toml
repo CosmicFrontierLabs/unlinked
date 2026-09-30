@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "backend",
+    "frontend",
+    "shared",
+]
+resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
