@@ -141,6 +141,10 @@ struct Compiled<'a> {
     order: Vec<usize>,
     states: Vec<usize>,
 }
+fn on_grid(ticks: f64) -> bool {
+    ticks == 0.0 || (ticks.round() >= 1.0 && (ticks - ticks.round()).abs() <= 1e-9)
+}
+
 fn block_error(id: &str, message: impl Into<String>) -> Error {
     Error::Block {
         block: id.to_owned(),
@@ -282,7 +286,7 @@ impl<'a> Compiled<'a> {
             states,
         })
     }
-    fn evaluate(&self, t: f64, state: &[f64]) -> Result<Vec<f64>, Error> {
+    fn evaluate(&self, t: f64, state: &[f64], left_limit: bool) -> Result<Vec<f64>, Error> {
         let mut values = vec![0.0; self.graph.nodes.len()];
         for (s, i) in self.states.iter().enumerate() {
             values[*i] = state[s];
@@ -296,9 +300,9 @@ impl<'a> Compiled<'a> {
                     before,
                     after,
                 } => {
-                    if t < *time
-                        && (*time - t) > 8.0 * f64::EPSILON * time.abs().max(t.abs()).max(1.0)
-                    {
+                    let near = (t - time).abs()
+                        <= 8.0 * f64::EPSILON * time.abs().max(t.abs()).max(f64::MIN_POSITIVE);
+                    if (t < *time && !near) || (left_limit && near) {
                         *before
                     } else {
                         *after
@@ -414,7 +418,7 @@ pub fn simulate_with_observer(
         .any(|n| matches!(n.kind, Kind::UnitDelay { .. }))
     {
         let ticks = (o.stop - o.start) / o.step;
-        if (ticks - ticks.round()).abs() > 1e-9 {
+        if !on_grid(ticks) {
             return Err(Error::Options(
                 "UnitDelay requires stop time on the fixed-step grid".into(),
             ));
@@ -428,7 +432,7 @@ pub fn simulate_with_observer(
     for node in &graph.nodes {
         if let Kind::Step { time, .. } = node.kind {
             let ticks = (time - o.start) / o.step;
-            if time > o.start && time < o.stop && (ticks - ticks.round()).abs() > 1e-9 {
+            if time > o.start && time < o.stop && !on_grid(ticks) {
                 return Err(block_error(
                     &node.id,
                     "Step transition must align with fixed-step grid",
@@ -441,11 +445,7 @@ pub fn simulate_with_observer(
     let mut normalized = graph.clone();
     for node in &mut normalized.nodes {
         if let Kind::Step { time, .. } = &mut node.kind {
-            if *time >= o.start
-                && *time <= o.stop
-                && (((*time - o.start) / o.step) - ((*time - o.start) / o.step).round()).abs()
-                    <= 1e-9
-            {
+            if *time >= o.start && *time <= o.stop && on_grid((*time - o.start) / o.step) {
                 *time = o.start + ((*time - o.start) / o.step).round() * o.step;
             }
         }
@@ -475,7 +475,7 @@ pub fn simulate_with_observer(
         } else {
             (o.start + sample as f64 * o.step).min(o.stop)
         };
-        let values = compiled.evaluate(t, &state)?;
+        let values = compiled.evaluate(t, &state, false)?;
         if !observer(Sample {
             time: t,
             nodes: &graph.nodes,
@@ -511,19 +511,19 @@ pub fn simulate_with_observer(
                         .map(|(s, k)| s + h * factor * k)
                         .collect::<Vec<_>>()
                 };
-                let k2 = compiled.derivative(&compiled.evaluate(t + h / 2.0, &stage(&k1, 0.5))?);
-                let k3 = compiled.derivative(&compiled.evaluate(t + h / 2.0, &stage(&k2, 0.5))?);
-                // Evaluate the left limit at the interval boundary: Step switches are sampled
-                // at the next tick, not prematurely integrated over the preceding interval.
-                let endpoint = t + h;
-                let stage_time = if graph.nodes.iter().any(
-                    |n| matches!(n.kind,Kind::Step {time,..} if (time-endpoint).abs()<=1e-9*o.step),
-                ) {
-                    endpoint - (1e-9 * o.step).max(32.0 * f64::EPSILON * endpoint.abs().max(1.0))
-                } else {
-                    endpoint
-                };
-                let k4 = compiled.derivative(&compiled.evaluate(stage_time, &stage(&k3, 1.0))?);
+                let k2 = compiled.derivative(&compiled.evaluate(
+                    t + h / 2.0,
+                    &stage(&k1, 0.5),
+                    false,
+                )?);
+                let k3 = compiled.derivative(&compiled.evaluate(
+                    t + h / 2.0,
+                    &stage(&k2, 0.5),
+                    false,
+                )?);
+                // Only discontinuous Step outputs use the left limit. Smooth
+                // sources still evaluate at the exact stage time.
+                let k4 = compiled.derivative(&compiled.evaluate(t + h, &stage(&k3, 1.0), true)?);
                 (0..state.len())
                     .map(|i| state[i] + h * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) / 6.0)
                     .collect()

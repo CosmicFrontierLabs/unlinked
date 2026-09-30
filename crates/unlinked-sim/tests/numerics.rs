@@ -310,3 +310,33 @@ fn observer_streams_samples_and_can_cancel() {
         ]
     );
 }
+
+#[test]
+fn tiny_step_times_and_smooth_sources_use_distinct_stage_limits() {
+    let g = Graph {
+        nodes: vec![
+            node(
+                "step",
+                Kind::Step {
+                    time: 1e-20,
+                    before: 0.0,
+                    after: 1.0,
+                },
+            ),
+            node("clock", Kind::Clock),
+            node("int", Kind::Integrator { initial: 0.0 }),
+        ],
+        wires: vec![wire("clock", "int", 0)],
+    };
+    let t = simulate(
+        &g,
+        &Options {
+            stop: 1e-20,
+            step: 1.0,
+            ..options()
+        },
+    )
+    .unwrap();
+    assert_eq!(t.signals["step"], vec![0.0, 1.0]);
+    assert!((t.signals["int"][1] - 5e-41).abs() < 1e-55);
+}

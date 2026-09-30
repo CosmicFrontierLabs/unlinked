@@ -122,10 +122,7 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             "Step" => {
                 let time = p("Time", "1")?;
                 let ticks = (time - options.start) / options.step;
-                if time > options.start
-                    && time < options.stop
-                    && (ticks - ticks.round()).abs() > 1e-9
-                {
+                if time > options.start && time < options.stop && !on_grid(ticks) {
                     return Err(block_error(
                         id,
                         "Step transition must align with fixed-step grid",
