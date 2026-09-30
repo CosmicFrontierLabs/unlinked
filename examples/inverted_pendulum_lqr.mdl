@@ -1,0 +1,175 @@
+Model {
+  Name "inverted_pendulum_lqr"
+  Version 8.0
+  Solver "ode4"
+  StartTime "0"
+  StopTime "5"
+  FixedStep "0.01"
+  System {
+    Name "inverted_pendulum_lqr"
+    Block {
+      BlockType Sum
+      Name "Sum"
+      SID "1"
+      Position [300, 90, 330, 150]
+      Inputs "++"
+    }
+    Block {
+      BlockType Integrator
+      Name "State x"
+      SID "2"
+      Position [380, 100, 420, 140]
+      InitialCondition "[0; 0; 0.2; 0]"
+    }
+    Block {
+      BlockType Gain
+      Name "A"
+      SID "3"
+      Position [360, 190, 420, 220]
+      Orientation "left"
+      Gain "[0 1 0 0; 0 -0.181818 2.672727 0; 0 0 0 1; 0 -0.454545 31.181818 0]"
+      Multiplication "Matrix(K*u)"
+    }
+    Block {
+      BlockType Gain
+      Name "LQR gain -K"
+      SID "4"
+      Position [360, 260, 420, 290]
+      Orientation "left"
+      Gain "[70.7107 37.8345 -105.5298 -20.9238]"
+      Multiplication "Matrix(K*u)"
+    }
+    Block {
+      BlockType Gain
+      Name "B"
+      SID "5"
+      Position [260, 260, 320, 290]
+      Orientation "left"
+      Gain "[0; 1.818182; 0; 4.545455]"
+      Multiplication "Matrix(K*u)"
+    }
+    Block {
+      BlockType Demux
+      Name "States"
+      SID "6"
+      Position [560, 20, 565, 245]
+      Outputs "4"
+    }
+    Block {
+      BlockType Outport
+      Name "cart position (m)"
+      SID "7"
+      Position [620, 55, 650, 75]
+      Port "1"
+    }
+    Block {
+      BlockType Outport
+      Name "cart velocity (m/s)"
+      SID "8"
+      Position [620, 100, 650, 120]
+      Port "2"
+    }
+    Block {
+      BlockType Outport
+      Name "pendulum angle (rad)"
+      SID "9"
+      Position [620, 145, 650, 165]
+      Port "3"
+    }
+    Block {
+      BlockType Outport
+      Name "angular velocity (rad/s)"
+      SID "10"
+      Position [620, 190, 650, 210]
+      Port "4"
+    }
+    Block {
+      BlockType Outport
+      Name "cart force (N)"
+      SID "11"
+      Position [380, 315, 410, 335]
+      Port "5"
+    }
+    Line {
+      SrcBlock "Sum"
+      SrcPort 1
+      DstBlock "State x"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "State x"
+      SrcPort 1
+      Points [60, 0]
+      Branch {
+        DstBlock "States"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 90]
+        DstBlock "A"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 160]
+        DstBlock "LQR gain -K"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "A"
+      SrcPort 1
+      Points [-80, 0; 0, -75]
+      DstBlock "Sum"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "LQR gain -K"
+      SrcPort 1
+      Points [-20, 0]
+      Branch {
+        DstBlock "B"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 50]
+        DstBlock "cart force (N)"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "B"
+      SrcPort 1
+      Points [-20, 0; 0, -165]
+      DstBlock "Sum"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "States"
+      SrcPort 1
+      DstBlock "cart position (m)"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "States"
+      SrcPort 2
+      DstBlock "cart velocity (m/s)"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "States"
+      SrcPort 3
+      DstBlock "pendulum angle (rad)"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "States"
+      SrcPort 4
+      DstBlock "angular velocity (rad/s)"
+      DstPort 1
+    }
+    Annotation {
+      Name "Linearized cart-pole with LQR state feedback\nM = 0.5 kg, m = 0.2 kg, l = 0.3 m, b = 0.1 N/m/s\nStarts tilted 0.2 rad; K = lqr(A, B, diag([5000 0 100 0]), 1)"
+      Position [120, 20]
+    }
+  }
+}

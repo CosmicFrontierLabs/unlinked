@@ -1,0 +1,168 @@
+Model {
+  Name "mass_spring_damper_pid"
+  Version 8.0
+  Solver "ode4"
+  StartTime "0"
+  StopTime "3"
+  FixedStep "0.001"
+  System {
+    Name "mass_spring_damper_pid"
+    Block {
+      BlockType Step
+      Name "Setpoint"
+      SID "1"
+      Position [30, 90, 60, 120]
+      Time "0.5"
+      Before "0"
+      After "1"
+    }
+    Block {
+      BlockType Sum
+      Name "Error"
+      SID "2"
+      Position [110, 95, 130, 125]
+      Inputs "+-"
+    }
+    Block {
+      BlockType Gain
+      Name "Kp"
+      SID "3"
+      Position [200, 50, 240, 80]
+      Gain "Kp"
+    }
+    Block {
+      BlockType Integrator
+      Name "Integral"
+      SID "4"
+      Position [200, 95, 230, 125]
+      InitialCondition "0"
+    }
+    Block {
+      BlockType Gain
+      Name "Ki"
+      SID "5"
+      Position [260, 95, 300, 125]
+      Gain "Ki"
+    }
+    Block {
+      BlockType TransferFcn
+      Name "Filtered derivative"
+      SID "6"
+      Position [200, 140, 260, 170]
+      Numerator "[Kd 0]"
+      Denominator "[Tf 1]"
+    }
+    Block {
+      BlockType Sum
+      Name "PID"
+      SID "7"
+      Position [340, 80, 360, 140]
+      Inputs "+++"
+    }
+    Block {
+      BlockType TransferFcn
+      Name "Mass-spring-damper"
+      SID "8"
+      Position [410, 90, 490, 130]
+      Numerator "[1]"
+      Denominator "[m b k]"
+    }
+    Block {
+      BlockType Outport
+      Name "position (m)"
+      SID "9"
+      Position [580, 100, 610, 120]
+      Port "1"
+    }
+    Block {
+      BlockType Outport
+      Name "control force (N)"
+      SID "10"
+      Position [420, 30, 450, 50]
+      Port "2"
+    }
+    Line {
+      SrcBlock "Setpoint"
+      SrcPort 1
+      DstBlock "Error"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Error"
+      SrcPort 1
+      Points [40, 0]
+      Branch {
+        Points [0, -45]
+        DstBlock "Kp"
+        DstPort 1
+      }
+      Branch {
+        DstBlock "Integral"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 45]
+        DstBlock "Filtered derivative"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "Integral"
+      SrcPort 1
+      DstBlock "Ki"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Kp"
+      SrcPort 1
+      Points [80, 0; 0, 30]
+      DstBlock "PID"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Ki"
+      SrcPort 1
+      DstBlock "PID"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "Filtered derivative"
+      SrcPort 1
+      Points [50, 0; 0, -30]
+      DstBlock "PID"
+      DstPort 3
+    }
+    Line {
+      SrcBlock "PID"
+      SrcPort 1
+      Points [20, 0]
+      Branch {
+        DstBlock "Mass-spring-damper"
+        DstPort 1
+      }
+      Branch {
+        Points [0, -70]
+        DstBlock "control force (N)"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "Mass-spring-damper"
+      SrcPort 1
+      Points [40, 0]
+      Branch {
+        DstBlock "position (m)"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 90; -440, 0; 0, -85]
+        DstBlock "Error"
+        DstPort 2
+      }
+    }
+    Annotation {
+      Name "Mass-spring-damper position control with a PID controller\nParameters come from the init script mass_spring_damper_params.m\nUnit step setpoint at t = 0.5 s"
+      Position [120, 230]
+    }
+  }
+}

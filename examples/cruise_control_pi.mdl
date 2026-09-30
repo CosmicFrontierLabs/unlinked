@@ -1,0 +1,193 @@
+Model {
+  Name "cruise_control_pi"
+  Version 8.0
+  Solver "ode4"
+  StartTime "0"
+  StopTime "30"
+  FixedStep "0.01"
+  System {
+    Name "cruise_control_pi"
+    Block {
+      BlockType Step
+      Name "Set speed"
+      SID "1"
+      Position [30, 90, 60, 120]
+      Time "1"
+      Before "0"
+      After "10"
+    }
+    Block {
+      BlockType Sum
+      Name "Error"
+      SID "2"
+      Position [110, 95, 130, 125]
+      Inputs "+-"
+    }
+    Block {
+      BlockType Gain
+      Name "Kp"
+      SID "3"
+      Position [200, 50, 240, 80]
+      Gain "1500"
+    }
+    Block {
+      BlockType Integrator
+      Name "Integral"
+      SID "4"
+      Position [200, 125, 230, 155]
+      InitialCondition "0"
+    }
+    Block {
+      BlockType Gain
+      Name "Ki"
+      SID "5"
+      Position [260, 125, 300, 155]
+      Gain "300"
+    }
+    Block {
+      BlockType Sum
+      Name "PI"
+      SID "6"
+      Position [340, 90, 360, 130]
+      Inputs "++"
+    }
+    Block {
+      BlockType Saturate
+      Name "Engine force limit"
+      SID "7"
+      Position [400, 95, 440, 125]
+      UpperLimit "5000"
+      LowerLimit "-5000"
+    }
+    Block {
+      BlockType Step
+      Name "Hill (grade force)"
+      SID "8"
+      Position [440, 180, 470, 210]
+      Time "15"
+      Before "0"
+      After "-800"
+    }
+    Block {
+      BlockType Sum
+      Name "Net force"
+      SID "9"
+      Position [500, 95, 520, 125]
+      Inputs "++"
+    }
+    Block {
+      BlockType TransferFcn
+      Name "Vehicle"
+      SID "10"
+      Position [570, 90, 650, 130]
+      Numerator "[1]"
+      Denominator "[1000 50]"
+    }
+    Block {
+      BlockType Outport
+      Name "speed (m/s)"
+      SID "11"
+      Position [740, 100, 770, 120]
+      Port "1"
+    }
+    Block {
+      BlockType Outport
+      Name "engine force (N)"
+      SID "12"
+      Position [500, 30, 530, 50]
+      Port "2"
+    }
+    Line {
+      SrcBlock "Set speed"
+      SrcPort 1
+      DstBlock "Error"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Error"
+      SrcPort 1
+      Points [40, 0]
+      Branch {
+        Points [0, -45]
+        DstBlock "Kp"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 30]
+        DstBlock "Integral"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "Integral"
+      SrcPort 1
+      DstBlock "Ki"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Kp"
+      SrcPort 1
+      Points [70, 0; 0, 35]
+      DstBlock "PI"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Ki"
+      SrcPort 1
+      Points [20, 0; 0, -40]
+      DstBlock "PI"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "PI"
+      SrcPort 1
+      DstBlock "Engine force limit"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Engine force limit"
+      SrcPort 1
+      Points [20, 0]
+      Branch {
+        DstBlock "Net force"
+        DstPort 1
+      }
+      Branch {
+        Points [0, -70]
+        DstBlock "engine force (N)"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "Hill (grade force)"
+      SrcPort 1
+      Points [10, 0; 0, -80]
+      DstBlock "Net force"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "Net force"
+      SrcPort 1
+      DstBlock "Vehicle"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Vehicle"
+      SrcPort 1
+      Points [50, 0]
+      Branch {
+        DstBlock "speed (m/s)"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 130; -620, 0; 0, -115]
+        DstBlock "Error"
+        DstPort 2
+      }
+    }
+    Annotation {
+      Name "Cruise control: PI speed controller with engine force limits\nm = 1000 kg, b = 50 N s/m; 10 m/s set speed at t = 1 s\nA hill adds -800 N at t = 15 s; integral action removes the error\nThe overshoot comes partly from integrator windup at the force limit"
+      Position [120, 280]
+    }
+  }
+}

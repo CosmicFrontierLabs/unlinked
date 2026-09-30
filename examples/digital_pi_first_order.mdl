@@ -1,0 +1,221 @@
+Model {
+  Name "digital_pi_first_order"
+  Version 8.0
+  Solver "ode4"
+  StartTime "0"
+  StopTime "10"
+  FixedStep "0.01"
+  System {
+    Name "digital_pi_first_order"
+    Block {
+      BlockType Step
+      Name "Setpoint"
+      SID "1"
+      Position [30, 90, 60, 120]
+      Time "1"
+      Before "0"
+      After "1"
+    }
+    Block {
+      BlockType Sum
+      Name "Error"
+      SID "2"
+      Position [110, 95, 130, 125]
+      Inputs "+-"
+    }
+    Block {
+      BlockType ZeroOrderHold
+      Name "Sample (Ts = 0.1 s)"
+      SID "3"
+      Position [170, 95, 200, 125]
+      SampleTime "0.1"
+    }
+    Block {
+      BlockType Gain
+      Name "Kp"
+      SID "4"
+      Position [260, 50, 300, 80]
+      Gain "4"
+    }
+    Block {
+      BlockType Gain
+      Name "Ki*Ts"
+      SID "5"
+      Position [260, 130, 300, 160]
+      Gain "0.08"
+    }
+    Block {
+      BlockType Sum
+      Name "Accumulate"
+      SID "6"
+      Position [340, 115, 360, 175]
+      Inputs "++"
+    }
+    Block {
+      BlockType UnitDelay
+      Name "z^-1"
+      SID "7"
+      Position [340, 200, 370, 230]
+      Orientation "left"
+      InitialCondition "0"
+      SampleTime "0.1"
+    }
+    Block {
+      BlockType Sum
+      Name "Control"
+      SID "8"
+      Position [420, 70, 440, 130]
+      Inputs "++"
+    }
+    Block {
+      BlockType TransferFcn
+      Name "Plant 1/(5s+1)"
+      SID "9"
+      Position [490, 80, 570, 120]
+      Numerator "[1]"
+      Denominator "[5 1]"
+    }
+    Block {
+      BlockType RandomNumber
+      Name "Sensor noise"
+      SID "10"
+      Position [380, 290, 420, 320]
+      Orientation "left"
+      Mean "0"
+      Variance "0.0004"
+      Seed "42"
+      SampleTime "0.1"
+    }
+    Block {
+      BlockType Sum
+      Name "Measured"
+      SID "11"
+      Position [300, 250, 320, 280]
+      Orientation "left"
+      Inputs "++"
+    }
+    Block {
+      BlockType Outport
+      Name "output"
+      SID "12"
+      Position [660, 90, 690, 110]
+      Port "1"
+    }
+    Block {
+      BlockType Outport
+      Name "control"
+      SID "13"
+      Position [500, 30, 530, 50]
+      Port "2"
+    }
+    Line {
+      SrcBlock "Setpoint"
+      SrcPort 1
+      DstBlock "Error"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Error"
+      SrcPort 1
+      DstBlock "Sample (Ts = 0.1 s)"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Sample (Ts = 0.1 s)"
+      SrcPort 1
+      Points [20, 0]
+      Branch {
+        Points [0, -45]
+        DstBlock "Kp"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 35]
+        DstBlock "Ki*Ts"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "Ki*Ts"
+      SrcPort 1
+      Points [20, 0; 0, -10]
+      DstBlock "Accumulate"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Accumulate"
+      SrcPort 1
+      Points [20, 0]
+      Branch {
+        Points [0, -30]
+        DstBlock "Control"
+        DstPort 2
+      }
+      Branch {
+        Points [0, 70]
+        DstBlock "z^-1"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "z^-1"
+      SrcPort 1
+      Points [-20, 0; 0, -60]
+      DstBlock "Accumulate"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "Kp"
+      SrcPort 1
+      Points [100, 0; 0, 20]
+      DstBlock "Control"
+      DstPort 1
+    }
+    Line {
+      SrcBlock "Control"
+      SrcPort 1
+      Points [20, 0]
+      Branch {
+        DstBlock "Plant 1/(5s+1)"
+        DstPort 1
+      }
+      Branch {
+        Points [0, -60]
+        DstBlock "control"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "Plant 1/(5s+1)"
+      SrcPort 1
+      Points [40, 0]
+      Branch {
+        DstBlock "output"
+        DstPort 1
+      }
+      Branch {
+        Points [0, 160]
+        DstBlock "Measured"
+        DstPort 1
+      }
+    }
+    Line {
+      SrcBlock "Sensor noise"
+      SrcPort 1
+      Points [-30, 0; 0, -35]
+      DstBlock "Measured"
+      DstPort 2
+    }
+    Line {
+      SrcBlock "Measured"
+      SrcPort 1
+      Points [-210, 0; 0, -150]
+      DstBlock "Error"
+      DstPort 2
+    }
+    Annotation {
+      Name "Digital PI control of a first-order plant, sampled every 0.1 s\nThe integral is a unit-delay accumulator: acc[k] = acc[k-1] + Ki Ts e[k]\nSeeded Gaussian sensor noise (sigma = 0.02); Kp = 4, Ki = 0.8"
+      Position [120, 350]
+    }
+  }
+}
