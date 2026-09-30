@@ -136,5 +136,7 @@ These are deliberately out of scope today and are rejected when encountered:
   release build, container) is green.
 - All API/WS types live in `shared` with serde round-trip tests; migrations
   are embedded and applied at startup.
-- Untrusted input (models, scripts, edits) is bounded by explicit size, work
-  and time budgets on both the browser and server paths.
+- Untrusted input (models, scripts, edits) is bounded by explicit size and
+  work budgets on both the browser and server paths. Server simulation jobs
+  also have cooperative deadlines and cancellation; browser import and
+  transpilation have no wall-clock deadline.
