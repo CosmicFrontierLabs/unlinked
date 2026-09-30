@@ -688,7 +688,11 @@ pub fn parse_numbers(s: &str) -> Vec<f64> {
 fn parse_points(s: Option<&str>) -> Vec<Point> {
     let Some(s) = s else { return Vec::new() };
     let v = parse_numbers(s);
-    v.chunks_exact(2).map(|c| Point::new(c[0], c[1])).collect()
+    v.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[x, y]| Point::new(*x, *y))
+        .collect()
 }
 
 #[cfg(test)]
