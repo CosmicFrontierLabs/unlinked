@@ -477,6 +477,33 @@ mod tests {
             .await
             .json();
         assert_eq!(overridden.trace.unwrap().signals["2"], vec![12.0; 3]);
+        // Even a script readable by the requester cannot cross project boundaries.
+        let other_project: shared::Project = own
+            .json(
+                Method::POST,
+                &format!("/api/orgs/{}/projects", org.id),
+                &json!({"name":"separate initialization","default_role":"none"}),
+            )
+            .await
+            .json();
+        let other_script: shared::FileInfo = own
+            .upload(other_project.id, "init.m", b"K = 99;".to_vec())
+            .await
+            .json();
+        initialized.init_script.as_mut().unwrap().file_id = other_script.id;
+        let before: Vec<SimulationRun> = own.get(&parameter_route).await.json();
+        assert_eq!(
+            own.json(Method::POST, &parameter_route, &initialized)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        let after: Vec<SimulationRun> = own.get(&parameter_route).await.json();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "rejected initialization creates no run"
+        );
         initialized.init_script.as_mut().unwrap().file_id = Uuid::new_v4();
         assert_eq!(
             view.json(Method::POST, &parameter_route, &initialized)
