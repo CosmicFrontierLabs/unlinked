@@ -15,7 +15,7 @@ const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 #[command(
     name = "unlinked",
     version,
-    about = "Inspect and simulate Simulink files; transpile scalar MATLAB to Rust/LLVM"
+    about = "Inspect, render and simulate Simulink files; transpile scalar MATLAB to Rust/LLVM"
 )]
 struct Args {
     #[command(subcommand)]
@@ -27,6 +27,15 @@ enum Action {
     Info {
         /// Model filename, or - for stdin (format is detected from content).
         input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Render the root diagram or a nested subsystem as standalone SVG.
+    Render {
+        input: PathBuf,
+        /// Exact subsystem block name; repeat for each level (slashes are literal).
+        #[arg(long = "system", value_name = "BLOCK_NAME")]
+        system: Vec<String>,
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
@@ -258,6 +267,21 @@ fn run(args: Args) -> Result<()> {
             json.push(b'\n');
             write_output(output.as_deref(), &json)
         }
+        Action::Render {
+            input,
+            system,
+            output,
+        } => {
+            let model = load_model(&input)?;
+            let path: Vec<&str> = system.iter().map(String::as_str).collect();
+            let options = unlinked_render::RenderOptions {
+                theme: unlinked_render::Theme::Dark,
+                ..Default::default()
+            };
+            let svg =
+                unlinked_render::render_svg(&model, &path, &options).context("rendering failed")?;
+            write_output(output.as_deref(), svg.as_bytes())
+        }
         Action::Sim {
             input,
             start,
@@ -280,8 +304,8 @@ fn run(args: Args) -> Result<()> {
                 step,
                 solver: solver.into(),
                 max_samples,
-                relative_tolerance: rtol,
-                absolute_tolerance: atol,
+                relative_tolerance:rtol,
+                absolute_tolerance:atol,
                 max_internal_steps,
             };
             eprintln!(

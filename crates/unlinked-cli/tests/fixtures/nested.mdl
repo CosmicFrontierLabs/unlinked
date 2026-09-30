@@ -1,0 +1,31 @@
+Model {
+ Name "nested"
+ System {
+  Block {
+   BlockType SubSystem
+   Name "Outer/Slash"
+   SID "10"
+   Position [20, 20, 130, 80]
+   Ports [0, 0]
+   System {
+    Block {
+     BlockType SubSystem
+     Name "Inner"
+     SID "11"
+     Position [20, 20, 100, 80]
+     Ports [0, 0]
+     System {
+      Block {
+       BlockType Constant
+       Name "constant<&>"
+       SID "12"
+       Position [20, 20, 60, 60]
+       Ports [0, 1]
+       Value "1"
+      }
+     }
+    }
+   }
+  }
+ }
+}

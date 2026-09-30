@@ -89,7 +89,10 @@ impl<'a> Converter<'a> {
         bump_port_counts(&mut blocks, &raw_lines);
 
         let by_id: HashMap<&BlockId, &Block> = blocks.iter().map(|b| (&b.id, b)).collect();
-        let lines = raw_lines.iter().map(|l| resolve_line(l, &by_id)).collect();
+        let mut lines = Vec::new();
+        for l in &raw_lines {
+            resolve_line(l, &by_id, &mut lines);
+        }
 
         let annotations = node.children_named("Annotation").map(annotation).collect();
 
@@ -163,6 +166,12 @@ impl<'a> Converter<'a> {
         if let Some(inst) = node.child("InstanceData") {
             for (k, v) in &inst.props {
                 parameters.insert(k.clone(), v.clone());
+            }
+        }
+        // Bus element ports keep `PortName`/`Element` in an interface list.
+        for list in node.children_named("List") {
+            for (k, v) in &list.props {
+                parameters.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
         if let Some(defaults) = self.defaults.get(&block_type) {
@@ -412,6 +421,9 @@ struct RawBranch {
     points: Vec<Point>,
     dst: Option<Endpoint>,
     branches: Vec<RawBranch>,
+    /// A `DEST_DEST` junction with no port of its own: the start of a
+    /// separately drawn sub-net whose first vertex is absolute.
+    detached: bool,
 }
 
 fn raw_line(node: &Node, names: &HashMap<&str, BlockId>) -> RawLine {
@@ -427,10 +439,15 @@ fn raw_line(node: &Node, names: &HashMap<&str, BlockId>) -> RawLine {
     }
 }
 
+/// Branch endpoints are normally `Dst`; physical connection trees (Simscape)
+/// have no line source and store each branch's port as `Src` instead.
 fn raw_branch(node: &Node, names: &HashMap<&str, BlockId>) -> RawBranch {
+    let dst = endpoint(node, "Dst", "DstBlock", "DstPort", PortKind::In, names)
+        .or_else(|| endpoint(node, "Src", "SrcBlock", "SrcPort", PortKind::Out, names));
     RawBranch {
         points: parse_points(node.get("Points")),
-        dst: endpoint(node, "Dst", "DstBlock", "DstPort", PortKind::In, names),
+        detached: dst.is_none() && node.attr("ConnectType") == Some("DEST_DEST"),
+        dst,
         branches: node
             .children_named("Branch")
             .map(|b| raw_branch(b, names))
@@ -543,31 +560,63 @@ fn accumulate(start: Option<Point>, rel: &[Point]) -> Vec<Point> {
     out
 }
 
-fn resolve_line(line: &RawLine, blocks: &HashMap<&BlockId, &Block>) -> Line {
+/// Resolve a line to absolute coordinates. Detached sub-nets are split off
+/// into their own source-less lines, appended to `out` after this one.
+fn resolve_line(line: &RawLine, blocks: &HashMap<&BlockId, &Block>, out: &mut Vec<Line>) {
     let start = anchor(&line.src, blocks);
     let points = accumulate(start, &line.points);
     let tail = points.last().copied().or(start);
-    Line {
+    let mut detached = Vec::new();
+    let branches = resolve_branches(&line.branches, tail, &mut detached);
+    out.push(Line {
         name: line.name.clone(),
         src: line.src.clone(),
         points,
         dst: line.dst.clone(),
-        branches: line
-            .branches
-            .iter()
-            .map(|b| resolve_branch(b, tail))
-            .collect(),
+        branches,
+    });
+    for d in detached {
+        push_detached(d, out);
     }
 }
 
-fn resolve_branch(b: &RawBranch, start: Option<Point>) -> Branch {
-    let points = accumulate(start, &b.points);
-    let tail = points.last().copied().or(start);
-    Branch {
+fn push_detached(d: &RawBranch, out: &mut Vec<Line>) {
+    let points = accumulate(None, &d.points);
+    let tail = points.last().copied();
+    let mut more = Vec::new();
+    let branches = resolve_branches(&d.branches, tail, &mut more);
+    out.push(Line {
+        name: None,
+        src: None,
         points,
-        dst: b.dst.clone(),
-        branches: b.branches.iter().map(|c| resolve_branch(c, tail)).collect(),
+        dst: None,
+        branches,
+    });
+    for m in more {
+        push_detached(m, out);
     }
+}
+
+fn resolve_branches<'r>(
+    bs: &'r [RawBranch],
+    start: Option<Point>,
+    detached: &mut Vec<&'r RawBranch>,
+) -> Vec<Branch> {
+    let mut out = Vec::new();
+    for b in bs {
+        if b.detached {
+            detached.push(b);
+            continue;
+        }
+        let points = accumulate(start, &b.points);
+        let tail = points.last().copied().or(start);
+        out.push(Branch {
+            points,
+            dst: b.dst.clone(),
+            branches: resolve_branches(&b.branches, tail, detached),
+        });
+    }
+    out
 }
 
 fn annotation(node: &Node) -> Annotation {
