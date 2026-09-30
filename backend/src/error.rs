@@ -27,6 +27,15 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    pub fn public_message(&self) -> String {
+        match self {
+            Self::Internal(detail) => {
+                tracing::error!("{detail}");
+                "internal error".into()
+            }
+            other => other.to_string(),
+        }
+    }
     pub fn status(&self) -> StatusCode {
         match self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
@@ -42,13 +51,7 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status();
-        let error = match &self {
-            ApiError::Internal(detail) => {
-                tracing::error!("{detail}");
-                "internal error".to_string()
-            }
-            other => other.to_string(),
-        };
+        let error = self.public_message();
         (status, Json(ErrorResponse { error })).into_response()
     }
 }
@@ -72,3 +75,16 @@ impl From<diesel::r2d2::PoolError> for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn internal_details_are_never_public() {
+        assert_eq!(
+            ApiError::Internal("database credentials detail".into()).public_message(),
+            "internal error"
+        );
+        assert_eq!(ApiError::NotFound.public_message(), "not found");
+    }
+}

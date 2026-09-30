@@ -71,7 +71,7 @@ fn evaluates_workspace_dependencies_and_imported_parameters() {
 #[test]
 fn rejects_unsupported_semantics_and_unknown_parameters() {
     let mut m = model();
-    m.root.blocks[1].block_type = "TransferFcn".into();
+    m.root.blocks[1].block_type = "UnsupportedTransfer".into();
     assert!(compile(&m, &Options::default())
         .unwrap_err()
         .to_string()
@@ -140,4 +140,39 @@ fn virtual_subsystem_interfaces_are_lowered() {
         .parameters
         .insert("TreatAsAtomicUnit".into(), "on".into());
     assert!(compile(&m, &Options::default()).is_err());
+}
+
+#[test]
+fn logical_import_accepts_boolean_outputs_and_rejects_unsupported_modes() {
+    let mut m = model();
+    m.root.blocks[1] = block(
+        "g",
+        "Logic",
+        &[("Operator", "NOT"), ("OutDataTypeStr", "boolean")],
+    );
+    let trace = simulate_model(
+        &m,
+        &Options {
+            stop: 0.0,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(trace.signals["g"], vec![0.0]);
+    m.root.blocks[1] = block(
+        "g",
+        "Logic",
+        &[("Operator", "OR"), ("Inputs", "4294967295")],
+    );
+    assert!(compile(&m, &Options::default()).is_err());
+    m.root.blocks[1] = block("g", "Switch", &[("Criteria", "u2 > Threshold")]);
+    assert!(compile(&m, &Options::default())
+        .unwrap_err()
+        .to_string()
+        .contains("datatype propagation"));
+    m.root.blocks[1] = block("g", "RelationalOperator", &[("ZeroCross", "on")]);
+    assert!(compile(&m, &Options::default())
+        .unwrap_err()
+        .to_string()
+        .contains("ZeroCross"));
 }

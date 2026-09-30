@@ -1,3 +1,5 @@
+mod coverage;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
@@ -23,6 +25,12 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Inventory import, rendering and simulation compilation for a model directory.
+    Coverage {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Import an SLX or MDL model and print structured JSON statistics.
     Info {
         /// Model filename, or - for stdin (format is detected from content).
@@ -52,6 +60,14 @@ enum Action {
         solver: SolverArg,
         #[arg(long, default_value_t = 100_001)]
         max_samples: usize,
+        /// Relative local-error target for adaptive RK45.
+        #[arg(long, default_value_t = 1e-6)]
+        rtol: f64,
+        /// Absolute local-error target for adaptive RK45.
+        #[arg(long, default_value_t = 1e-9)]
+        atol: f64,
+        #[arg(long, default_value_t = 100_000)]
+        max_internal_steps: usize,
         /// Add a scalar workspace expression (repeatable); never execute a MATLAB script.
         #[arg(long = "var", value_name = "NAME=EXPR")]
         variables: Vec<String>,
@@ -78,6 +94,7 @@ enum Action {
 enum SolverArg {
     Euler,
     Rk4,
+    Rk45,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum TraceFormat {
@@ -94,6 +111,7 @@ impl From<SolverArg> for Solver {
         match value {
             SolverArg::Euler => Self::Euler,
             SolverArg::Rk4 => Self::Rk4,
+            SolverArg::Rk45 => Self::Rk45,
         }
     }
 }
@@ -251,6 +269,11 @@ fn compile_llvm(source: &str, library: bool, output: &Path) -> Result<()> {
 }
 fn run(args: Args) -> Result<()> {
     match args.command {
+        Action::Coverage { input, output } => {
+            let mut json = serde_json::to_vec_pretty(&coverage::report(&input)?)?;
+            json.push(b'\n');
+            write_output(output.as_deref(), &json)
+        }
         Action::Info { input, output } => {
             let model = load_model(&input)?;
             let mut json = serde_json::to_vec_pretty(&model_info(&model))?;
@@ -279,6 +302,9 @@ fn run(args: Args) -> Result<()> {
             step,
             solver,
             max_samples,
+            rtol,
+            atol,
+            max_internal_steps,
             variables,
             format,
             output,
@@ -291,6 +317,9 @@ fn run(args: Args) -> Result<()> {
                 step,
                 solver: solver.into(),
                 max_samples,
+                relative_tolerance: rtol,
+                absolute_tolerance: atol,
+                max_internal_steps,
             };
             eprintln!(
                 "Simulating {}: {:?}, start={start}, stop={stop}, step={step}; these explicit settings override imported solver settings",

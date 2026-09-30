@@ -277,3 +277,27 @@ fn svg_rendering_escapes_labels_and_selects_exact_subsystem_names() {
     assert!(!missing.status.success());
     assert!(missing.stdout.is_empty());
 }
+
+#[test]
+fn coverage_reports_failures_without_claiming_execution() {
+    let root = std::env::temp_dir().join(format!("unlinked-coverage-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::copy(fixture(), root.join("valid.mdl")).unwrap();
+    std::fs::write(root.join("invalid.slx"), b"not a model").unwrap();
+    std::fs::write(root.join("ignored.txt"), b"irrelevant").unwrap();
+    let output = binary().arg("coverage").arg(&root).output().unwrap();
+    success(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["summary"]["models"], 2);
+    assert_eq!(report["summary"]["imported"], 1);
+    assert_eq!(report["summary"]["all_systems_rendered"], 1);
+    assert_eq!(report["summary"]["simulation_compiled"], 1);
+    assert!(
+        report["description"]
+            .as_str()
+            .unwrap()
+            .contains("No simulation is run")
+    );
+    assert!(report["models"][0]["import_error"].is_string());
+    std::fs::remove_dir_all(root).unwrap();
+}

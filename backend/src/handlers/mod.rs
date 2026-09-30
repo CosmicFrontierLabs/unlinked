@@ -4,3 +4,6 @@ pub mod health;
 pub mod orgs;
 pub mod projects;
 pub mod websocket;
+
+pub mod simulation_socket;
+pub mod simulations;

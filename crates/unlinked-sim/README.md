@@ -8,17 +8,37 @@ IDs mapped to scalar sample vectors, and the selected solver.
 
 Implemented: Constant/Ground, Clock, Step, time-based Sine, Gain, Bias, Sum/Add,
 Product/division, Saturation, Integrator, UnitDelay, Abs, scalar trigonometric
-and math operations, and single-input sinks. Ordinary virtual subsystems lower
+and math operations, scalar relational comparisons, logical operators, nonzero
+Switch routing, and single-input sinks. Logic and relational outputs use exact
+0/1 scalar values, including declared boolean outputs. Switch currently accepts
+only `Criteria=u2 ~= 0`; threshold criteria require signal datatype propagation
+to reproduce boolean-control behavior and therefore reject. Explicit zero-crossing
+detection on Switch/RelationalOperator rejects; no event root finding is implied. Ordinary virtual subsystems lower
 to identity boundary nodes with qualified block IDs. Raw block parameters and model
 workspace expressions use `unlinked-matlab::eval_expr`. Workspace dependencies
 resolve iteratively; unresolved/cyclic references fail.
 
-Euler and classical fourth-order Runge–Kutta advance continuous states
-simultaneously. UnitDelay updates once per requested step after solver stages.
+Euler, classical fourth-order Runge–Kutta, and adaptive Dormand–Prince 5(4)
+(`Solver::Rk45`, JSON `rk45`) advance continuous states simultaneously. Rk45
+uses internal accepted/rejected substeps while preserving the requested output
+grid. Its maximum component error is scaled by `absolute_tolerance +
+relative_tolerance * max(abs(old), abs(new))`, defaulting to 1e-9 and 1e-6.
+These are local error targets, not a global-error guarantee. It stops at output
+boundaries rather than interpolating dense output. Defaults allow 100,000 total
+internal attempts (accepted plus rejected), with a hard cap of 1,000,000. UnitDelay updates once per requested step after solver stages.
 The initial sample is recorded, and the final step may be shorter to reach the
 requested stop time. Step discontinuities must align with the sampling grid.
 The solver uses the left limit at a transition when integrating the preceding
 interval. Time is in seconds, sine frequency is radians/second.
+
+Proper scalar TransferFcn blocks of order zero, one, or two lower to
+zero-initial-condition controllable state equations, with direct feedthrough
+only when the normalized leading numerator is nonzero. Both numerator and
+denominator accept literal coefficient rows and scalar workspace expressions;
+use commas when an expression contains whitespace. Matrix numerators, array
+workspace variables, higher orders, nonzero initial conditions, and per-block
+absolute tolerances reject. Generated internal states appear in the graph and
+trace with named paths; the original block ID remains its output signal.
 
 Options explicitly override imported solver configuration. This is a supported
 subset, not a claim of general Simulink numerical equivalence. It rejects
@@ -32,8 +52,10 @@ trace; these blocks do not produce external files.
 
 Output is limited to 1,000,001 samples and ten million scalar values. Default
 options cap samples at 100,001. Integration accuracy must be checked for the
-model and chosen step; there is no adaptive error control, event root finder,
-stiff solver, implicit solver or Stateflow execution yet.
+model and chosen step; there is no event root finder, stiff solver, implicit solver or Stateflow
+execution yet. Rk45 implements the Dormand–Prince pair, not full MATLAB ode45
+compatibility. Cancellation observers run at output boundaries; internal work
+between boundaries is bounded by the attempt limit.
 
 Tests compare feedback decay against `exp(-t)` and the closed-form Euler
 recurrence, check simultaneous delay updates and decimal step boundaries, and

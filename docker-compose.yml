@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: unlinked
       POSTGRES_PASSWORD: dev_password
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -31,7 +31,7 @@ services:
       HOST: "0.0.0.0"
       PORT: "3000"
       PUBLIC_URL: "${PUBLIC_URL:-http://localhost:3000}"
-      SESSION_SECRET: "${SESSION_SECRET:-dev-secret-change-in-production-please-this-must-be-at-least-64-bytes}"
+      SESSION_SECRET: "${SESSION_SECRET:-}"
       ALLOWED_EMAIL_DOMAINS: "${ALLOWED_EMAIL_DOMAINS:-}"
       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"

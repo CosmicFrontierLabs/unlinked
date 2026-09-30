@@ -25,6 +25,8 @@ pub enum Solver {
     Euler,
     #[default]
     Rk4,
+    /// Adaptive Dormand–Prince 5(4), sampled on the requested output grid.
+    Rk45,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,6 +38,12 @@ pub struct Options {
     pub solver: Solver,
     /// Includes the initial sample. Prevents accidental unbounded allocation.
     pub max_samples: usize,
+    /// Relative local error tolerance for Rk45 (positive, at most one).
+    pub relative_tolerance: f64,
+    /// Absolute local error tolerance for Rk45 (positive and finite).
+    pub absolute_tolerance: f64,
+    /// Total accepted and rejected Rk45 attempts across the complete run.
+    pub max_internal_steps: usize,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -45,6 +53,9 @@ impl Default for Options {
             step: 0.01,
             solver: Solver::Rk4,
             max_samples: 100_001,
+            relative_tolerance: 1e-6,
+            absolute_tolerance: 1e-9,
+            max_internal_steps: 100_000,
         }
     }
 }
@@ -91,6 +102,15 @@ pub enum Kind {
     UnitDelay {
         initial: f64,
     },
+    /// Scalar numeric switch. All three inputs are evaluated; no lazy branch execution.
+    Switch,
+    Relational {
+        operation: String,
+    },
+    Logic {
+        operation: String,
+        inputs: usize,
+    },
     Abs,
     Unary {
         operation: String,
@@ -101,6 +121,9 @@ impl Kind {
     fn input_count(&self) -> usize {
         match self {
             Self::Constant { .. } | Self::Step { .. } | Self::Sine { .. } | Self::Clock => 0,
+            Self::Switch => 3,
+            Self::Relational { .. } => 2,
+            Self::Logic { inputs, .. } => *inputs,
             Self::Sum { signs } => signs.len(),
             Self::Product { divide } => divide.len(),
             _ => 1,
@@ -185,6 +208,23 @@ impl<'a> Compiled<'a> {
             };
             if values.iter().any(|v| !v.is_finite()) {
                 return Err(block_error(&node.id, "non-finite parameter"));
+            }
+            if let Kind::Relational { operation } = &node.kind {
+                if !["==", "~=", "<", "<=", ">", ">="].contains(&operation.as_str()) {
+                    return Err(block_error(&node.id, "unsupported relational operator"));
+                }
+            }
+            if let Kind::Logic { operation, inputs } = &node.kind {
+                if !["AND", "OR", "NAND", "NOR", "XOR", "NXOR", "NOT"].contains(&operation.as_str())
+                    || *inputs == 0
+                    || *inputs > 1024
+                    || (operation == "NOT" && *inputs != 1)
+                {
+                    return Err(block_error(
+                        &node.id,
+                        "unsupported logic operator or input count",
+                    ));
+                }
             }
             if let Kind::Unary { operation } = &node.kind {
                 if !["sin", "cos", "tan", "exp", "log", "sqrt"].contains(&operation.as_str()) {
@@ -325,6 +365,35 @@ impl<'a> Compiled<'a> {
                         .fold(1.0, |a, (p, d)| if *d { a / x(p) } else { a * x(p) })
                 }
                 Kind::Saturation { lower, upper } => x(0).clamp(*lower, *upper),
+                Kind::Switch => {
+                    if x(1) != 0.0 {
+                        x(0)
+                    } else {
+                        x(2)
+                    }
+                }
+                Kind::Relational { operation } => f64::from(match operation.as_str() {
+                    "==" => x(0) == x(1),
+                    "~=" => x(0) != x(1),
+                    "<" => x(0) < x(1),
+                    "<=" => x(0) <= x(1),
+                    ">" => x(0) > x(1),
+                    ">=" => x(0) >= x(1),
+                    _ => unreachable!(),
+                }),
+                Kind::Logic { operation, inputs } => {
+                    let truth = |p| x(p) != 0.0;
+                    f64::from(match operation.as_str() {
+                        "AND" => (0..*inputs).all(truth),
+                        "OR" => (0..*inputs).any(truth),
+                        "NAND" => !(0..*inputs).all(truth),
+                        "NOR" => !(0..*inputs).any(truth),
+                        "XOR" => (0..*inputs).filter(|&p| truth(p)).count() % 2 == 1,
+                        "NXOR" => (0..*inputs).filter(|&p| truth(p)).count() % 2 == 0,
+                        "NOT" => !truth(0),
+                        _ => unreachable!(),
+                    })
+                }
                 Kind::Abs => x(0).abs(),
                 Kind::Unary { operation } => match operation.as_str() {
                     "sin" => x(0).sin(),
@@ -362,7 +431,7 @@ impl<'a> Compiled<'a> {
     }
 }
 
-/// Execute a bounded fixed-step scalar graph. Integrators are simultaneous, delays update
+/// Execute a bounded scalar graph on a fixed observation grid. Integrators are simultaneous, delays update
 /// only after every continuous solver stage, and algebraic loops are rejected before running.
 pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
     simulate_with_observer(graph, options, |_| true)
@@ -394,6 +463,17 @@ pub fn simulate_with_observer(
         return Err(Error::Options(
             "require finite start <= stop and positive finite step".into(),
         ));
+    }
+    if o.solver == Solver::Rk45
+        && (!o.relative_tolerance.is_finite()
+            || o.relative_tolerance <= 0.0
+            || o.relative_tolerance > 1.0
+            || !o.absolute_tolerance.is_finite()
+            || o.absolute_tolerance <= 0.0
+            || o.max_internal_steps == 0
+            || o.max_internal_steps > 1_000_000)
+    {
+        return Err(Error::Options("Rk45 requires 0 < relative_tolerance <= 1, positive finite absolute_tolerance, and 1..=1,000,000 internal steps".into()));
     }
     let ticks = (o.stop - o.start) / o.step;
     let near_integer = (ticks == 0.0 || ticks.round() >= 1.0)
@@ -469,6 +549,7 @@ pub fn simulate_with_observer(
             .collect(),
         solver: o.solver,
     };
+    let mut adaptive = adaptive::Adaptive::new(o.step);
     for sample in 0..count {
         let t = if sample + 1 == count {
             o.stop
@@ -498,6 +579,14 @@ pub fn simulate_with_observer(
         }
         let k1 = compiled.derivative(&values);
         let mut next = match o.solver {
+            Solver::Rk45 => {
+                let end = if sample + 2 == count {
+                    o.stop
+                } else {
+                    (o.start + (sample + 1) as f64 * o.step).min(o.stop)
+                };
+                adaptive.advance(&compiled, o, t, end, &state)?
+            }
             Solver::Euler => state
                 .iter()
                 .zip(&k1)
@@ -545,6 +634,8 @@ pub fn simulate_with_observer(
     Ok(trace)
 }
 
+mod adaptive;
 mod flatten;
 mod import;
+mod transfer;
 pub use import::{compile, simulate_model, simulate_model_with_observer};

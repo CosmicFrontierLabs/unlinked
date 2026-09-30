@@ -53,3 +53,10 @@ hex = "0.4"
 thiserror = "2"
 url = "2"
 tower-http = { version = "0.6", features = ["fs", "limit", "trace"] }
+
+unlinked-import = { path = "../crates/unlinked-import" }
+unlinked-sim = { path = "../crates/unlinked-sim" }
+
+[dev-dependencies]
+tokio-tungstenite="0.24"
+futures-util="0.3"
