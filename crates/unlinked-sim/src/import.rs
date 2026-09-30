@@ -158,12 +158,15 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     "Inherit: Inherit via internal rule",
                     "Inherit: Inherit via back propagation",
                     "Inherit: Same as input",
+                    "Inherit: auto",
                     "double",
                 ],
             )?;
         }
         require(block, "SignalType", &["auto", "real"])?;
-        require(block, "SaturateOnIntegerOverflow", &["off"])?;
+        // All accepted numeric paths are doubles (integer/fixed-point types
+        // were rejected above), so integer-overflow saturation has no effect.
+        require(block, "SaturateOnIntegerOverflow", &["off", "on"])?;
         let p = |key, default| parameter(block, key, default, &ws);
         let discrete = matches!(
             block.block_type.as_str(),

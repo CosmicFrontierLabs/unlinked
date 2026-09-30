@@ -325,3 +325,46 @@ fn explicit_root_inputs_use_workspace_and_reject_unbound_or_duplicate_ids() {
     bound.extend(["--input-value", "1=6"]);
     assert!(!stdin(&bound, model.as_bytes()).status.success());
 }
+
+#[test]
+fn optional_original_mdl_and_slx_run_with_explicit_external_inputs() {
+    let Some(root) = std::env::var_os("UNLINKED_TEST_CASES") else {
+        return;
+    };
+    let mut traces = Vec::new();
+    for path in [
+        "fixtures/auto-layout/example/AutoLayoutDemo.mdl",
+        "fixtures/auto-layout/imgs/AutoLayout_Cover.slx",
+    ] {
+        let output = binary()
+            .arg("sim")
+            .arg(PathBuf::from(&root).join(path))
+            .args([
+                "--input-value",
+                "9=1",
+                "--input-value",
+                "24=2",
+                "--input-value",
+                "1=3",
+                "--stop",
+                "0.2",
+                "--step",
+                "0.1",
+                "--solver",
+                "rk4",
+            ])
+            .output()
+            .unwrap();
+        success(&output);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        traces.push(report["trace"].clone());
+    }
+    // These two upstream encodings contain the same system. This is a format
+    // equivalence regression, not an independently supplied Simulink oracle.
+    assert_eq!(traces[0], traces[1]);
+    assert_eq!(traces[0]["signals"].as_object().unwrap().len(), 35);
+    assert_eq!(
+        traces[0]["signals"]["9"],
+        serde_json::json!([1.0, 1.0, 1.0])
+    );
+}
