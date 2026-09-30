@@ -244,3 +244,47 @@ fn decimal_stop_time_does_not_add_duplicate_sample() {
     assert_eq!(*t.time.last().unwrap(), 0.14);
     assert!(t.time.windows(2).all(|x| x[0] < x[1]));
 }
+
+#[test]
+fn final_off_grid_step_is_not_shifted() {
+    for stop in [0.24, 0.25] {
+        let g = Graph {
+            nodes: vec![
+                node(
+                    "step",
+                    Kind::Step {
+                        time: stop,
+                        before: 0.0,
+                        after: 1.0,
+                    },
+                ),
+                node("int", Kind::Integrator { initial: 0.0 }),
+            ],
+            wires: vec![wire("step", "int", 0)],
+        };
+        let t = simulate(
+            &g,
+            &Options {
+                stop,
+                step: 0.1,
+                ..options()
+            },
+        )
+        .unwrap();
+        assert_eq!(*t.signals["int"].last().unwrap(), 0.0);
+        assert_eq!(*t.signals["step"].last().unwrap(), 1.0);
+    }
+}
+#[test]
+fn positive_tiny_duration_keeps_both_endpoints() {
+    let t = simulate(
+        &Graph::default(),
+        &Options {
+            stop: 1e-20,
+            step: 1.0,
+            ..options()
+        },
+    )
+    .unwrap();
+    assert_eq!(t.time, vec![0.0, 1e-20]);
+}

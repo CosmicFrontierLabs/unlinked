@@ -371,7 +371,8 @@ pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
         ));
     }
     let ticks = (o.stop - o.start) / o.step;
-    let near_integer = (ticks - ticks.round()).abs() <= 8.0 * f64::EPSILON * ticks.abs().max(1.0);
+    let near_integer = (ticks == 0.0 || ticks.round() >= 1.0)
+        && (ticks - ticks.round()).abs() <= 8.0 * f64::EPSILON * ticks.abs().max(1.0);
     let intervals = if near_integer {
         ticks.round()
     } else {
@@ -419,7 +420,11 @@ pub fn simulate(graph: &Graph, options: &Options) -> Result<Trace, Error> {
     let mut normalized = graph.clone();
     for node in &mut normalized.nodes {
         if let Kind::Step { time, .. } = &mut node.kind {
-            if *time >= o.start && *time <= o.stop {
+            if *time >= o.start
+                && *time <= o.stop
+                && (((*time - o.start) / o.step) - ((*time - o.start) / o.step).round()).abs()
+                    <= 1e-9
+            {
                 *time = o.start + ((*time - o.start) / o.step).round() * o.step;
             }
         }
