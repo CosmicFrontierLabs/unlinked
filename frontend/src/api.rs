@@ -232,6 +232,24 @@ pub async fn content(project: Uuid, file: Uuid, version: Option<Uuid>) -> ApiRes
         .map_err(network)
 }
 
+/// The server's default `MAX_UPLOAD_BYTES`. Checked before reading a file
+/// into memory; the server still enforces its configured limit.
+const MAX_UPLOAD_BYTES: f64 = 50.0 * 1024.0 * 1024.0;
+
+/// Read a user-selected file for upload, refusing oversized files up front.
+pub async fn read_upload(file: web_sys::File) -> ApiResult<Vec<u8>> {
+    let name = file.name();
+    if file.size() > MAX_UPLOAD_BYTES {
+        return Err(ApiError {
+            status: 413,
+            message: format!("{name} is larger than the 50 MiB upload limit"),
+        });
+    }
+    gloo_file::futures::read_as_bytes(&gloo_file::File::from(file))
+        .await
+        .map_err(|e| network(format!("{name}: {e}")))
+}
+
 /// Store `bytes` as a new version of the file at `path` (creating it if new).
 pub async fn upload(project: Uuid, path: &str, message: &str, bytes: &[u8]) -> ApiResult<FileInfo> {
     let url = format!(

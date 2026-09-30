@@ -2,7 +2,7 @@
 
 use crate::api::{self, ApiError};
 use crate::diagram::DiagramView;
-use crate::fetch::{use_fetch, view, Fetch};
+use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
 use crate::Route;
 use chrono::{DateTime, Utc};
 use shared::{
@@ -52,7 +52,7 @@ fn text_input(state: &UseStateHandle<String>, placeholder: &str) -> Html {
 }
 
 /// Run an API mutation; on success bump `reload`, on failure show the error.
-fn mutate<Fut>(fut: Fut, reload: UseStateHandle<u32>, error: UseStateHandle<Option<ApiError>>)
+fn mutate<Fut>(fut: Fut, reload: UseReducerHandle<Reload>, error: UseStateHandle<Option<ApiError>>)
 where
     Fut: std::future::Future<Output = Result<(), ApiError>> + 'static,
 {
@@ -60,7 +60,7 @@ where
         match fut.await {
             Ok(()) => {
                 error.set(None);
-                reload.set(*reload + 1);
+                reload.dispatch(());
             }
             Err(e) => error.set(Some(e)),
         }
@@ -80,10 +80,10 @@ fn error_line(error: &Option<ApiError>) -> Html {
 
 #[function_component(Dashboard)]
 pub fn dashboard() -> Html {
-    let reload = use_state(|| 0u32);
+    let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
-    let orgs = use_fetch(*reload, |_| api::orgs());
-    let projects = use_fetch(*reload, |_| api::all_projects());
+    let orgs = use_fetch(reload.0, |_| api::orgs());
+    let projects = use_fetch(reload.0, |_| api::all_projects());
     let new_org = use_state(String::new);
 
     let create_org = {
@@ -170,13 +170,13 @@ pub struct OrgProps {
 #[function_component(OrgPage)]
 pub fn org_page(props: &OrgProps) -> Html {
     let id = props.org_id;
-    let reload = use_state(|| 0u32);
+    let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
-    let org = use_fetch((id, *reload), move |(id, _)| api::org(id));
-    let members = use_fetch((id, *reload), move |(id, _)| api::org_members(id));
-    let projects = use_fetch((id, *reload), move |(id, _)| api::org_projects(id));
+    let org = use_fetch((id, reload.0), move |(id, _)| api::org(id));
+    let members = use_fetch((id, reload.0), move |(id, _)| api::org_members(id));
+    let projects = use_fetch((id, reload.0), move |(id, _)| api::org_projects(id));
     let admin = matches!(&*org, Fetch::Ready(o) if o.my_role >= OrgRole::Admin);
-    let audit = use_fetch((id, *reload, admin), move |(id, _, admin)| async move {
+    let audit = use_fetch((id, reload.0, admin), move |(id, _, admin)| async move {
         if admin {
             api::audit(id).await
         } else {
@@ -379,11 +379,11 @@ pub struct ProjectProps {
 #[function_component(ProjectPage)]
 pub fn project_page(props: &ProjectProps) -> Html {
     let id = props.project_id;
-    let reload = use_state(|| 0u32);
+    let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
-    let project = use_fetch((id, *reload), move |(id, _)| api::project(id));
-    let files = use_fetch((id, *reload), move |(id, _)| api::files(id));
-    let members = use_fetch((id, *reload), move |(id, _)| api::project_members(id));
+    let project = use_fetch((id, reload.0), move |(id, _)| api::project(id));
+    let files = use_fetch((id, reload.0), move |(id, _)| api::files(id));
+    let members = use_fetch((id, reload.0), move |(id, _)| api::project_members(id));
     let role = match &*project {
         Fetch::Ready(p) => Some(p.my_role),
         _ => None,
@@ -420,17 +420,13 @@ pub fn project_page(props: &ProjectProps) -> Html {
                     } else {
                         format!("{prefix}/{}", f.name())
                     };
-                    let bytes =
-                        match gloo_file::futures::read_as_bytes(&gloo_file::File::from(f)).await {
-                            Ok(b) => b,
-                            Err(e) => {
-                                failure = Some(ApiError {
-                                    status: 0,
-                                    message: format!("{path}: {e}"),
-                                });
-                                break;
-                            }
-                        };
+                    let bytes = match api::read_upload(f).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    };
                     if let Err(e) = api::upload(id, &path, &msg, &bytes).await {
                         failure = Some(ApiError {
                             status: e.status,
@@ -441,7 +437,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
                 }
                 uploading.set(false);
                 error.set(failure);
-                reload.set(*reload + 1);
+                reload.dispatch(());
             });
         })
     };
@@ -628,17 +624,17 @@ fn is_model(path: &str) -> bool {
 #[function_component(FilePage)]
 pub fn file_page(props: &FileProps) -> Html {
     let (project_id, file_id, version_id) = (props.project_id, props.file_id, props.version_id);
-    let reload = use_state(|| 0u32);
+    let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
     let project = use_fetch(project_id, api::project);
-    let file = use_fetch((project_id, file_id, *reload), move |(p, f, _)| {
+    let file = use_fetch((project_id, file_id, reload.0), move |(p, f, _)| {
         api::file(p, f)
     });
-    let versions = use_fetch((project_id, file_id, *reload), move |(p, f, _)| {
+    let versions = use_fetch((project_id, file_id, reload.0), move |(p, f, _)| {
         api::versions(p, f)
     });
     let content = use_fetch(
-        (project_id, file_id, version_id, *reload),
+        (project_id, file_id, version_id, reload.0),
         move |(p, f, v, _)| async move {
             let info = api::file(p, f).await?;
             let bytes = api::content(p, f, v).await?;
@@ -672,26 +668,14 @@ pub fn file_page(props: &FileProps) -> Html {
             };
             input.set_value("");
             let path = info.path.clone();
-            let (reload, error) = (reload.clone(), error.clone());
-            spawn_local(async move {
-                let result = async {
-                    let bytes = gloo_file::futures::read_as_bytes(&gloo_file::File::from(f))
-                        .await
-                        .map_err(|e| ApiError {
-                            status: 0,
-                            message: e.to_string(),
-                        })?;
+            mutate(
+                async move {
+                    let bytes = api::read_upload(f).await?;
                     api::upload(project_id, &path, "", &bytes).await.map(|_| ())
-                }
-                .await;
-                match result {
-                    Ok(()) => {
-                        error.set(None);
-                        reload.set(*reload + 1);
-                    }
-                    Err(e) => error.set(Some(e)),
-                }
-            });
+                },
+                reload.clone(),
+                error.clone(),
+            );
         })
     };
 
@@ -740,7 +724,11 @@ pub fn file_page(props: &FileProps) -> Html {
     };
 
     let body = view(&content, |c: &Content| match c {
-        Content::Model(m) => html! { <DiagramView model={m.clone()} /> },
+        // Keyed by model identity so a new version remounts the viewer with
+        // fresh navigation state instead of keeping a stale subsystem path.
+        Content::Model(m) => html! {
+            <DiagramView key={format!("{:p}", Rc::as_ptr(m))} model={m.clone()} />
+        },
         Content::Text(t) => html! { <pre class="source">{ t }</pre> },
         Content::Binary => html! { <p class="muted">{ "Binary file; use Download." }</p> },
     });
