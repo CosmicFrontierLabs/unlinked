@@ -1,9 +1,16 @@
 //! Creation metadata for a deliberately small native-block palette.
 //!
-//! Defaults are an Unlinked creation profile, not defaults for imported files.
+//! Creation defaults are an Unlinked profile; implicit defaults are separately
+//! recorded for native-block port inference and never written into imported files.
+//! Port rules follow the MathWorks [Integrator](https://www.mathworks.com/help/simulink/slref/integrator.html),
+//! [Mux](https://www.mathworks.com/help/simulink/slref/mux.html), and
+//! [Demux](https://www.mathworks.com/help/simulink/slref/demux.html) references.
+//! New Sum blocks use rectangular icons; ZOH deliberately starts with an explicit
+//! one-second sample period. UnitDelay retains inherited sampling; multirate
+//! simulation may require the user to choose an explicit period.
 //! This module never evaluates MATLAB, runs callbacks, or certifies simulation
 //! support. Unknown imported types and parameters must remain preservable.
-use crate::PortCounts;
+use crate::{PortCounts, System};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -23,12 +30,17 @@ pub struct ParameterDescriptor {
     pub name: &'static str,
     pub label: &'static str,
     pub kind: ParameterKind,
+    /// Explicit value for newly created blocks (may differ from imported defaults).
     pub default: &'static str,
+    /// Verified native-block implicit value when no effective imported value exists.
+    pub implicit_default: Option<&'static str>,
     pub affects_ports: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub enum PortRule {
+    Integrator,
+    Scope,
     Fixed {
         inputs: u32,
         outputs: u32,
@@ -93,13 +105,141 @@ impl BlockDescriptor {
                 }
             }
         }
-        self.ports.resolve(parameters)
+        let effective: BTreeMap<_, _> = self
+            .parameters
+            .iter()
+            .filter(|p| p.affects_ports)
+            .filter_map(|p| {
+                parameters
+                    .get(p.name)
+                    .map(String::as_str)
+                    .or(p.implicit_default)
+                    .map(|value| (p.name.to_string(), value.to_string()))
+            })
+            .collect();
+        self.ports.resolve(&effective)
+    }
+    /// Allocate an Inport/Outport number without changing existing blocks.
+    /// Unresolved, shared (possibly bus-element), or malformed existing numbering
+    /// prevents guessing a free slot until interface metadata is available.
+    pub fn creation_parameters_in(
+        &self,
+        system: &System,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let mut parameters = self.creation_parameters();
+        if matches!(self.type_key, "Inport" | "Outport") {
+            let mut used = std::collections::BTreeSet::new();
+            for block in system
+                .blocks
+                .iter()
+                .filter(|b| b.block_type == self.type_key)
+            {
+                let number = port_number(block.param("Port").ok_or("existing interface numbering is absent; resolve interface metadata before allocating a port")?)?;
+                if !used.insert(number) {
+                    return Err("existing interface number is shared; resolve bus-element metadata before allocating a port".into());
+                }
+            }
+            let number = (1..=MAX_PORTS)
+                .find(|n| !used.contains(n))
+                .ok_or("no free port number")?;
+            parameters.insert("Port".into(), number.to_string());
+        }
+        Ok(parameters)
+    }
+
+    /// Validate an edit without mutating the block. The caller must reject any
+    /// connection removal before committing the returned Known port counts.
+    /// Unresolved counts require semantic resolution before rewiring.
+    pub fn check_edit(
+        &self,
+        current: &BTreeMap<String, String>,
+        name: &str,
+        value: &str,
+    ) -> Result<ParameterEdit, String> {
+        let descriptor = self
+            .parameters
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or("parameter has no catalog schema")?;
+        validate_parameter(descriptor, value)?;
+        if name == "Port" {
+            port_number(value)?;
+        }
+        let mut edited = BTreeMap::new();
+        for p in self.parameters {
+            if let Some(v) = current.get(p.name) {
+                edited.insert(p.name.to_string(), v.clone());
+            }
+        }
+        edited.insert(name.into(), value.into());
+        let ports = self.resolve_ports(&edited);
+        if let PortResolution::Invalid { message, .. } = &ports {
+            return Err(message.clone());
+        }
+        Ok(ParameterEdit {
+            ports,
+            changes_ports: descriptor.affects_ports,
+        })
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParameterEdit {
+    pub ports: PortResolution,
+    pub changes_ports: bool,
+}
+
+pub fn port_number(value: &str) -> Result<u32, String> {
+    let number = value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "port number must be a positive integer literal")?;
+    if !(1..=MAX_PORTS).contains(&number) {
+        return Err(format!("port number must be between 1 and {MAX_PORTS}"));
+    }
+    Ok(number)
+}
+
 impl PortRule {
-    pub fn resolve(self, parameters: &BTreeMap<String, String>) -> PortResolution {
+    fn resolve(self, parameters: &BTreeMap<String, String>) -> PortResolution {
+        let value = |key: &str| parameters.get(key).map(String::as_str).map(str::trim);
         let (parameter, input, widths, signs, other) = match self {
+            Self::Integrator => {
+                for parameter in [
+                    "ExternalReset",
+                    "InitialConditionSource",
+                    "LimitOutput",
+                    "ShowSaturationPort",
+                    "ShowStatePort",
+                ] {
+                    if value(parameter).is_none() {
+                        return PortResolution::Unresolved { parameter };
+                    }
+                }
+                return PortResolution::Known(PortCounts {
+                    inputs: 1
+                        + u32::from(value("ExternalReset") != Some("none"))
+                        + u32::from(value("InitialConditionSource") == Some("external")),
+                    outputs: 1 + u32::from(
+                        value("LimitOutput") == Some("on")
+                            && value("ShowSaturationPort") == Some("on"),
+                    ),
+                    state: u32::from(value("ShowStatePort") == Some("on")),
+                    ..PortCounts::default()
+                });
+            }
+            Self::Scope => {
+                if value("Floating") == Some("on") {
+                    return known(0, 0);
+                }
+                return Self::Count {
+                    parameter: "NumInputPorts",
+                    input: true,
+                    widths: false,
+                    other: 0,
+                }
+                .resolve(parameters);
+            }
             Self::Fixed { inputs, outputs } => return known(inputs, outputs),
             Self::Signs { parameter, signs } => (parameter, true, false, Some(signs), 1),
             Self::Count {
@@ -132,7 +272,7 @@ impl PortRule {
         }) {
             if raw
                 .chars()
-                .all(|c| signs.contains(c) || c == '|' || c.is_whitespace())
+                .all(|c| signs.contains(c) || (signs == "+-" && c == '|') || c.is_whitespace())
             {
                 Some(raw.chars().filter(|&c| signs.contains(c)).count() as f64)
             } else {
@@ -141,36 +281,48 @@ impl PortRule {
         } else {
             None
         };
+        if count.is_none()
+            && signs.is_some()
+            && raw
+                .chars()
+                .all(|c| c.is_whitespace() || "+-*/|".contains(c))
+        {
+            return invalid();
+        }
         let count = count.or_else(|| raw.parse::<f64>().ok());
         let count = if let Some(count) = count {
             count
         } else if widths && raw.starts_with('[') && raw.ends_with(']') {
-            // Only plain numeric row vectors are handled here; expressions,
-            // colon notation and concatenations belong to the evaluator.
+            // Literal row/column vectors only. MATLAB expressions, ranges,
+            // cell arrays and named Mux ports require semantic resolution.
             let inner = &raw[1..raw.len() - 1];
-            if inner.contains(';') {
-                return unresolved();
-            }
             let mut n = 0;
             let mut only_width = 0.0;
-            for token in inner
-                .split(|c: char| c.is_whitespace() || c == ',')
-                .filter(|s| !s.is_empty())
-            {
-                let Ok(width) = token.parse::<f64>() else {
-                    return unresolved();
-                };
-                if width == -1.0 {
-                    return unresolved();
+            let mut row_lengths = Vec::new();
+            for row in inner.split(';') {
+                let mut row_len = 0;
+                for token in row
+                    .split(|c: char| c.is_whitespace() || c == ',')
+                    .filter(|s| !s.is_empty())
+                {
+                    let Ok(width) = token.parse::<f64>() else {
+                        return unresolved();
+                    };
+                    if !width.is_finite() || (width != -1.0 && width < 1.0) || width.fract() != 0.0
+                    {
+                        return invalid();
+                    }
+                    only_width = width;
+                    n += 1;
+                    row_len += 1;
+                    if n > MAX_PORTS {
+                        return invalid();
+                    }
                 }
-                if !width.is_finite() || width < 1.0 || width.fract() != 0.0 {
-                    return invalid();
-                }
-                only_width = width;
-                n += 1;
-                if n > MAX_PORTS {
-                    return invalid();
-                }
+                row_lengths.push(row_len);
+            }
+            if row_lengths.len() > 1 && row_lengths.iter().any(|&n| n != 1) {
+                return invalid();
             }
             if n == 1 {
                 only_width
@@ -218,8 +370,10 @@ pub fn validate_parameter(parameter: &ParameterDescriptor, value: &str) -> Resul
         }
         ParameterKind::IntegerExpression => {
             if let Ok(n) = value.parse::<f64>() {
-                if !n.is_finite() || n.fract() != 0.0 {
-                    return Err("expected an integer expression".into());
+                if !n.is_finite() || n.fract() != 0.0 || n < 1.0 || n > MAX_PORTS as f64 {
+                    return Err(
+                        "expected a positive integer expression within the port limit".into(),
+                    );
                 }
             }
             Ok(())
@@ -230,15 +384,17 @@ pub fn validate_parameter(parameter: &ParameterDescriptor, value: &str) -> Resul
 
 const fn param(
     name: &'static str,
+    label: &'static str,
     kind: ParameterKind,
     default: &'static str,
     affects_ports: bool,
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         name,
-        label: name,
+        label,
         kind,
         default,
+        implicit_default: Some(default),
         affects_ports,
     }
 }
@@ -248,6 +404,7 @@ const fn block(
     category: &'static str,
     parameters: &'static [ParameterDescriptor],
     ports: PortRule,
+    default_size: [f64; 2],
 ) -> BlockDescriptor {
     BlockDescriptor {
         type_key,
@@ -258,11 +415,11 @@ const fn block(
         source_block: None,
         parameters,
         ports,
-        default_size: [60.0, 40.0],
+        default_size,
         creatable: true,
     }
 }
-use ParameterKind::{Enum, Expression as Expr, IntegerExpression as Int};
+use ParameterKind::{Boolean, Enum, Expression as Expr, IntegerExpression as Int};
 const ONE: PortRule = PortRule::Fixed {
     inputs: 1,
     outputs: 1,
@@ -282,45 +439,67 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Constant",
         "Sources",
         &[
-            param("Value", Expr, "1", false),
-            param("SampleTime", Expr, "inf", false),
+            param("Value", "Value", Expr, "1", false),
+            param("SampleTime", "Sample time", Expr, "inf", false),
         ],
         SOURCE,
+        [30.0, 30.0],
     ),
     block(
         "Gain",
         "Gain",
         "Math",
         &[
-            param("Gain", Expr, "1", false),
+            param("Gain", "Gain", Expr, "1", false),
             param(
                 "Multiplication",
-                Enum(&["Element-wise(K.*u)", "Matrix(K*u)"]),
+                "Multiplication",
+                Enum(&[
+                    "Element-wise(K.*u)",
+                    "Matrix(K*u)",
+                    "Matrix(u*K)",
+                    "Matrix(K*u) (u vector)",
+                ]),
                 "Element-wise(K.*u)",
                 false,
             ),
         ],
         ONE,
+        [30.0, 30.0],
     ),
     block(
         "Sum",
         "Sum",
         "Math",
-        &[param("Inputs", Expr, "++", true)],
+        &[
+            param("Inputs", "Inputs", Expr, "++", true),
+            param(
+                "IconShape",
+                "Icon shape",
+                Enum(&["rectangular", "round"]),
+                "rectangular",
+                false,
+            ),
+        ],
         PortRule::Signs {
             parameter: "Inputs",
             signs: "+-",
         },
+        [30.0, 31.0],
     ),
     block(
         "Product",
         "Product",
         "Math",
         &[
-            param("Inputs", Expr, "**", true),
+            ParameterDescriptor {
+                implicit_default: Some("2"),
+                ..param("Inputs", "Inputs", Expr, "**", true)
+            },
             param(
                 "Multiplication",
-                Enum(&["Element-wise(.*)"]),
+                "Multiplication",
+                Enum(&["Element-wise(.*)", "Matrix(*)"]),
                 "Element-wise(.*)",
                 false,
             ),
@@ -329,89 +508,116 @@ pub static BLOCKS: &[BlockDescriptor] = &[
             parameter: "Inputs",
             signs: "*/",
         },
+        [30.0, 31.0],
     ),
     block(
         "Integrator",
         "Integrator",
         "Continuous",
         &[
-            param("InitialCondition", Expr, "0", false),
-            param("ExternalReset", Enum(&["none"]), "none", true),
+            param("InitialCondition", "Initial condition", Expr, "0", false),
+            param(
+                "ExternalReset",
+                "External reset",
+                Enum(&["none", "rising", "falling", "either", "level", "level hold"]),
+                "none",
+                true,
+            ),
             param(
                 "InitialConditionSource",
-                Enum(&["internal"]),
+                "Initial condition source",
+                Enum(&["internal", "external"]),
                 "internal",
                 true,
             ),
+            param("ShowStatePort", "Show state port", Boolean, "off", true),
+            param("LimitOutput", "Limit output", Boolean, "off", true),
+            param(
+                "ShowSaturationPort",
+                "Show saturation port",
+                Boolean,
+                "off",
+                true,
+            ),
+            param("WrapState", "Wrap state", Boolean, "off", false),
         ],
-        ONE,
+        PortRule::Integrator,
+        [40.0, 40.0],
     ),
     block(
         "UnitDelay",
         "Unit Delay",
         "Discrete",
         &[
-            param("InitialCondition", Expr, "0", false),
-            param("SampleTime", Expr, "-1", false),
+            param("InitialCondition", "Initial condition", Expr, "0", false),
+            param("SampleTime", "Sample time", Expr, "-1", false),
         ],
         ONE,
+        [35.0, 34.0],
     ),
     block(
         "ZeroOrderHold",
         "Zero-Order Hold",
         "Discrete",
-        &[param("SampleTime", Expr, "1", false)],
+        &[ParameterDescriptor {
+            implicit_default: Some("-1"),
+            ..param("SampleTime", "Sample time", Expr, "1", false)
+        }],
         ONE,
+        [35.0, 30.0],
     ),
     block(
         "Scope",
         "Scope",
         "Sinks",
-        &[param("NumInputPorts", Int, "1", true)],
-        PortRule::Count {
-            parameter: "NumInputPorts",
-            input: true,
-            widths: false,
-            other: 0,
-        },
+        &[
+            param("NumInputPorts", "Number of input ports", Int, "1", true),
+            param("Floating", "Floating", Boolean, "off", true),
+        ],
+        PortRule::Scope,
+        [30.0, 32.0],
     ),
     block(
         "Inport",
         "Inport",
         "Ports",
-        &[param("Port", Int, "1", false)],
+        &[param("Port", "Port number", Int, "1", false)],
         SOURCE,
+        [30.0, 14.0],
     ),
     block(
         "Outport",
         "Outport",
         "Ports",
-        &[param("Port", Int, "1", false)],
+        &[param("Port", "Port number", Int, "1", false)],
         SINK,
+        [30.0, 14.0],
     ),
     block(
         "Mux",
         "Mux",
         "Routing",
-        &[param("Inputs", Expr, "2", true)],
+        &[param("Inputs", "Inputs", Expr, "2", true)],
         PortRule::Count {
             parameter: "Inputs",
             input: true,
             widths: true,
             other: 1,
         },
+        [5.0, 38.0],
     ),
     block(
         "Demux",
         "Demux",
         "Routing",
-        &[param("Outputs", Expr, "2", true)],
+        &[param("Outputs", "Outputs", Expr, "2", true)],
         PortRule::Count {
             parameter: "Outputs",
             input: false,
             widths: true,
             other: 1,
         },
+        [5.0, 38.0],
     ),
 ];
 
@@ -465,7 +671,7 @@ mod tests {
     }
     #[test]
     fn expressions_and_absent_values_are_never_guessed() {
-        for value in ["n", "numel(K)", "[n 2]", "[1 -1]", "[1;2]", "1+2"] {
+        for value in ["n", "numel(K)", "[n 2]", "1+2"] {
             assert!(
                 matches!(
                     ports("Mux", "Inputs", value),
@@ -474,14 +680,94 @@ mod tests {
                 "{value}"
             );
         }
-        assert!(matches!(
+        assert_eq!(
             find("Sum").unwrap().resolve_ports(&BTreeMap::new()),
-            PortResolution::Unresolved { .. }
-        ));
-        assert!(matches!(
-            ports("Integrator", "ExternalReset", "rising"),
-            PortResolution::Invalid { .. }
-        ));
+            known(2, 1)
+        );
+        assert_eq!(ports("Integrator", "ExternalReset", "rising"), known(2, 1));
         assert!(find("ThirdPartyBlock").is_none());
+    }
+    #[test]
+    fn editable_integrator_configurations_include_control_and_state_ports() {
+        let desc = find("Integrator").unwrap();
+        for reset in ["none", "rising", "falling", "either", "level", "level hold"] {
+            for external in [false, true] {
+                for limited in [false, true] {
+                    for saturation in [false, true] {
+                        let p = BTreeMap::from([
+                            ("ExternalReset".into(), reset.into()),
+                            (
+                                "InitialConditionSource".into(),
+                                if external { "external" } else { "internal" }.into(),
+                            ),
+                            (
+                                "LimitOutput".into(),
+                                if limited { "on" } else { "off" }.into(),
+                            ),
+                            (
+                                "ShowSaturationPort".into(),
+                                if saturation { "on" } else { "off" }.into(),
+                            ),
+                            ("ShowStatePort".into(), "on".into()),
+                        ]);
+                        assert_eq!(
+                            desc.resolve_ports(&p),
+                            PortResolution::Known(PortCounts {
+                                inputs: 1 + u32::from(reset != "none") + u32::from(external),
+                                outputs: 1 + u32::from(limited && saturation),
+                                state: 1,
+                                ..Default::default()
+                            })
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(ports("Scope", "Floating", "on"), known(0, 0));
+    }
+    #[test]
+    fn width_vectors_and_sign_errors_are_resolved_without_evaluation() {
+        for value in ["[1 -1]", "[1;-1]", "[2;3]"] {
+            assert_eq!(ports("Mux", "Inputs", value), known(2, 1));
+            assert_eq!(ports("Demux", "Outputs", value), known(1, 2));
+        }
+        for (ty, value) in [
+            ("Sum", "**"),
+            ("Product", "+-"),
+            ("Product", "*|/"),
+            ("Mux", "[1 2;3 4]"),
+        ] {
+            assert!(matches!(
+                ports(ty, "Inputs", value),
+                PortResolution::Invalid { .. }
+            ));
+        }
+    }
+    #[test]
+    fn check_edit_accepts_valid_but_not_simulatable_options() {
+        let empty = BTreeMap::new();
+        for mode in ["Matrix(u*K)", "Matrix(K*u) (u vector)"] {
+            assert!(find("Gain")
+                .unwrap()
+                .check_edit(&empty, "Multiplication", mode)
+                .is_ok());
+        }
+        assert!(find("Product")
+            .unwrap()
+            .check_edit(&empty, "Multiplication", "Matrix(*)")
+            .is_ok());
+        for value in ["0", "-3", "5000"] {
+            assert!(find("Scope")
+                .unwrap()
+                .check_edit(&empty, "NumInputPorts", value)
+                .is_err());
+        }
+        let edit = find("Mux")
+            .unwrap()
+            .check_edit(&empty, "Inputs", "3")
+            .unwrap();
+        assert!(edit.changes_ports);
+        assert_eq!(edit.ports, known(3, 1));
+        assert!(empty.is_empty());
     }
 }

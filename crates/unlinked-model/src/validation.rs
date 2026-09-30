@@ -1,6 +1,10 @@
 //! Bounded structural diagnostics. These do not execute expressions or certify
 //! simulation support. Targets use subsystem IDs, so renames do not move them.
-use crate::{BlockId, Endpoint, Model, Point, PortKind};
+//! InterfaceData for bus-element ports is not yet retained by the importer.
+//! Shared/missing interface numbers are therefore warnings, not proof of invalid
+//! numbering. Parent subsystem counts are not checked against child blocks until
+//! that metadata is available. Masked/linked blocks use declared ports.
+use crate::{catalog, BlockId, Endpoint, Model, Point, PortKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,7 +70,8 @@ fn finite(point: &Point) -> bool {
     point.x.is_finite() && point.y.is_finite()
 }
 
-/// Checks declared ports, not inferred ports. Missing schema entries and
+/// Checks catalog-resolved ports for native blocks, otherwise declared ports.
+/// Unresolved inference is reported as a warning. Missing schema entries and
 /// unsupported block types are deliberately not structural errors.
 /// Bounded to 500,000 visited objects/vertices, 128 subsystem levels and 1,000
 /// findings. Traversal is iterative, including branched lines.
@@ -87,6 +92,9 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
         spend!();
         let mut blocks = BTreeMap::new();
         let mut names = BTreeSet::new();
+        let mut effective_ports = BTreeMap::new();
+        let mut numbered = BTreeMap::<&str, BTreeSet<u32>>::new();
+        let mut unresolved_numbering = BTreeSet::new();
         for block in &system.blocks {
             spend!();
             let target = || DiagnosticTarget::Block {
@@ -110,6 +118,63 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
                     "block names must be nonempty and unique within a system",
                 );
             }
+            let parameter_target = |parameter: &str| DiagnosticTarget::Block {
+                system: path.clone(),
+                id: block.id.clone(),
+                parameter: Some(parameter.into()),
+            };
+            let native =
+                block.mask.is_none() && block.library_source.is_none() && block.subsystem.is_none();
+            if let Some(descriptor) = catalog::find(&block.block_type).filter(|_| native) {
+                for parameter in descriptor.parameters {
+                    spend!();
+                    if let Some(value) = block.param(parameter.name) {
+                        if let Err(message) = catalog::validate_parameter(parameter, value) {
+                            report.emit(
+                                Severity::Error,
+                                "invalid_parameter",
+                                parameter_target(parameter.name),
+                                &message,
+                            );
+                        }
+                    }
+                }
+                match descriptor.resolve_ports(&block.parameters) {
+                    catalog::PortResolution::Known(ports) => { effective_ports.insert(&block.id, ports); }
+                    catalog::PortResolution::Invalid { parameter, message } => report.emit(Severity::Error, "invalid_port_parameter", parameter_target(parameter), &message),
+                    catalog::PortResolution::Unresolved { parameter } => report.emit(Severity::Warning, "unresolved_ports", parameter_target(parameter), "port count requires semantic expression resolution; checking only declared endpoints"),
+                }
+            }
+            if native && matches!(block.block_type.as_str(), "Inport" | "Outport") {
+                if let Some(raw) = block.param("Port") {
+                    match catalog::port_number(raw) {
+                        Ok(n) => {
+                            if !numbered.entry(&block.block_type).or_default().insert(n) {
+                                report.emit(
+                                    Severity::Warning,
+                                    "duplicate_port_number",
+                                    parameter_target("Port"),
+                                    "port number is shared; bus-element metadata is required to determine whether this is valid",
+                                );
+                            }
+                        }
+                        Err(message) => report.emit(
+                            Severity::Error,
+                            "invalid_port_number",
+                            parameter_target("Port"),
+                            &message,
+                        ),
+                    }
+                } else {
+                    unresolved_numbering.insert(block.block_type.as_str());
+                    report.emit(
+                        Severity::Warning,
+                        "unresolved_interface_number",
+                        parameter_target("Port"),
+                        "interface number is not explicit; bus-element metadata may be required",
+                    );
+                }
+            }
             let p = block.position;
             if ![p.left, p.top, p.right, p.bottom]
                 .iter()
@@ -132,6 +197,25 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
                 let mut next = path.clone();
                 next.push(block.id.clone());
                 systems.push((child.as_ref(), next));
+            }
+        }
+        for (kind, numbers) in numbered {
+            if !unresolved_numbering.contains(kind)
+                && numbers.iter().copied().ne(1..=numbers.len() as u32)
+            {
+                // Point at an affected interface block rather than an unrelated model error.
+                if let Some(block) = system.blocks.iter().find(|b| b.block_type == kind) {
+                    report.emit(
+                        Severity::Error,
+                        "port_number_gap",
+                        DiagnosticTarget::Block {
+                            system: path.clone(),
+                            id: block.id.clone(),
+                            parameter: Some("Port".into()),
+                        },
+                        "interface port numbers must be contiguous starting at one",
+                    );
+                }
             }
         }
         let mut driven = BTreeSet::new();
@@ -208,13 +292,17 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
                     continue;
                 };
                 if endpoint.port.index == 0
-                    || endpoint.port.index > block.ports.count(endpoint.port.kind)
+                    || endpoint.port.index
+                        > effective_ports
+                            .get(&block.id)
+                            .unwrap_or(&block.ports)
+                            .count(endpoint.port.kind)
                 {
                     report.emit(
                         Severity::Error,
                         "invalid_endpoint_port",
                         target(Some(endpoint.clone())),
-                        "endpoint exceeds the block's declared port count",
+                        "endpoint exceeds the block's resolved or declared port count",
                     );
                 }
                 // Physical connector ports are intentionally not assigned an
@@ -356,5 +444,84 @@ mod tests {
         assert!(
             matches!(&r.diagnostics[0].target, DiagnosticTarget::Block { system, .. } if system == &vec![BlockId::from("a")])
         );
+    }
+    #[test]
+    fn parameter_edits_cannot_hide_removed_connected_ports() {
+        let mut m = model();
+        m.root.blocks[1].block_type = "Mux".into();
+        m.root.blocks[1].ports.inputs = 3;
+        m.root.blocks[1]
+            .parameters
+            .insert("Inputs".into(), "2".into());
+        m.root.lines.push(Line {
+            src: Some(ep("a", PortKind::Out, 1)),
+            dst: Some(ep("b", PortKind::In, 3)),
+            ..Default::default()
+        });
+        assert!(validate_structure(&m)
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "invalid_endpoint_port"));
+        m.root.blocks[1]
+            .parameters
+            .insert("Inputs".into(), "**".into());
+        // This Mux parameter needs expression resolution, not a guessed count.
+        assert!(validate_structure(&m)
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "unresolved_ports"));
+    }
+    #[test]
+    fn port_numbers_are_allocated_contextually_and_validated() {
+        let mut m = model();
+        m.root.blocks[0].block_type = "Inport".into();
+        m.root.blocks[0]
+            .parameters
+            .insert("Port".into(), "1".into());
+        m.root.blocks[1].block_type = "Inport".into();
+        m.root.blocks[1]
+            .parameters
+            .insert("Port".into(), "3".into());
+        let parameters = catalog::find("Inport")
+            .unwrap()
+            .creation_parameters_in(&m.root)
+            .unwrap();
+        assert_eq!(parameters["Port"], "2");
+        assert!(validate_structure(&m)
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "port_number_gap"));
+        m.root.blocks[1]
+            .parameters
+            .insert("Port".into(), "1".into());
+        assert!(validate_structure(&m)
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "duplicate_port_number"));
+        m.root.blocks[1]
+            .parameters
+            .insert("Port".into(), "n".into());
+        assert!(catalog::find("Inport")
+            .unwrap()
+            .creation_parameters_in(&m.root)
+            .is_err());
+    }
+    #[test]
+    fn schema_errors_target_the_parameter_but_unknown_parameters_survive() {
+        let mut m = model();
+        let block = &mut m.root.blocks[0];
+        block.block_type = "Gain".into();
+        block
+            .parameters
+            .insert("Multiplication".into(), "typo".into());
+        block
+            .parameters
+            .insert("FutureOption".into(), "preserve".into());
+        let r = validate_structure(&m);
+        assert!(r.diagnostics.iter().any(|d| matches!(&d.target, DiagnosticTarget::Block { parameter: Some(p), .. } if p == "Multiplication")));
+        assert!(!r
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("FutureOption")));
     }
 }
