@@ -222,6 +222,9 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
     s.close("g");
 
     s.close("svg");
+    if s.elements() > MAX_ELEMENTS {
+        return Err(RenderError::TooLarge);
+    }
     Ok(s.finish())
 }
 
@@ -736,6 +739,20 @@ mod tests {
         assert!(svg.contains("fill=\"#1a1b26\""));
         assert!(svg.contains("stroke=\"#c0caf5\""));
         assert!(!svg.contains("#ffffff"));
+    }
+
+    #[test]
+    fn annotation_tspans_count_toward_budget() {
+        let mut annotation = Annotation::default();
+        annotation.text = "x\n".repeat(MAX_ELEMENTS + 1);
+        let sys = System {
+            annotations: vec![annotation],
+            ..Default::default()
+        };
+        assert_eq!(
+            render_system_svg(&sys, &RenderOptions::default()),
+            Err(RenderError::TooLarge)
+        );
     }
 
     #[test]

@@ -54,12 +54,17 @@ impl Svg {
     }
 
     pub fn raw(&mut self, s: &str) {
-        self.out.push_str(s);
+        if self.elements <= crate::MAX_ELEMENTS {
+            self.out.push_str(s);
+        }
     }
 
     /// Open an element. `attrs` values are escaped.
     pub fn open(&mut self, tag: &str, attrs: &[(&str, String)]) {
-        self.elements += 1;
+        self.elements = self.elements.saturating_add(1);
+        if self.elements > crate::MAX_ELEMENTS {
+            return;
+        }
         self.out.push('<');
         self.out.push_str(tag);
         self.attrs(attrs);
@@ -67,12 +72,17 @@ impl Svg {
     }
 
     pub fn close(&mut self, tag: &str) {
-        let _ = write!(self.out, "</{tag}>");
+        if self.elements <= crate::MAX_ELEMENTS {
+            let _ = write!(self.out, "</{tag}>");
+        }
     }
 
     /// A self-closing element.
     pub fn leaf(&mut self, tag: &str, attrs: &[(&str, String)]) {
-        self.elements += 1;
+        self.elements = self.elements.saturating_add(1);
+        if self.elements > crate::MAX_ELEMENTS {
+            return;
+        }
         self.out.push('<');
         self.out.push_str(tag);
         self.attrs(attrs);
@@ -117,16 +127,15 @@ impl Svg {
         attrs.extend(extra.iter().cloned());
         self.open("text", &attrs);
         for (i, line) in lines.iter().enumerate() {
+            if self.elements > crate::MAX_ELEMENTS {
+                break;
+            }
             if i == 0 {
                 self.out.push_str(&escape(line));
             } else {
-                let _ = write!(
-                    self.out,
-                    "<tspan x=\"{}\" dy=\"{}\">{}</tspan>",
-                    num(x),
-                    num(lh),
-                    escape(line)
-                );
+                self.open("tspan", &[("x", num(x)), ("dy", num(lh))]);
+                self.raw(&escape(line));
+                self.close("tspan");
             }
         }
         self.close("text");
