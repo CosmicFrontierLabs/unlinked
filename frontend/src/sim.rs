@@ -596,18 +596,13 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     match result {
                         Ok(result) => {
                             if let Some(trace) = result.trace {
+                                let (signals, columns) =
+                                    stored_columns(trace.signals, &result.signals);
                                 let mut c = ctl.borrow_mut();
-                                c.signals = trace
-                                    .signals
-                                    .keys()
-                                    .map(|k| SimulationSignal {
-                                        id: k.clone(),
-                                        name: k.clone(),
-                                    })
-                                    .collect();
-                                c.plotted = default_plotted(&c.signals, &outports);
+                                c.plotted = default_plotted(&signals, &outports);
+                                c.signals = signals;
                                 c.time = trace.time;
-                                c.columns = trace.signals.into_values().collect();
+                                c.columns = columns;
                             }
                             rebind.dispatch(());
                             state.set(RunState::Finished(result.run.status, result.run.error));
