@@ -416,3 +416,113 @@ pre.source {
     font-size: 13px;
     white-space: pre;
 }
+
+/* Tabs and simulation */
+.tabs {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.4rem 1rem 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-alt);
+}
+
+.tab {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-bottom: none;
+}
+
+.tab.active {
+    background: var(--bg);
+    color: var(--blue);
+}
+
+.sim-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.sim-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.sim-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.sim-form input[type=number] {
+    width: 7rem;
+}
+
+.sim-form .grow {
+    flex: 1;
+    min-width: 16rem;
+}
+
+.sim-form textarea {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    resize: vertical;
+}
+
+.sim-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.running {
+    color: var(--orange);
+}
+
+.ok {
+    color: var(--green);
+}
+
+.sim-body {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+}
+
+.plot-host {
+    flex: 1;
+    min-width: 0;
+    padding: 0.75rem;
+    overflow: auto;
+}
+
+.signal-list {
+    width: 260px;
+    overflow: auto;
+    padding: 0.75rem 1rem;
+    border-left: 1px solid var(--border);
+    background: var(--bg-alt);
+}
+
+.signal-list h4 {
+    margin: 0.5rem 0;
+    color: var(--purple);
+}
+
+.signal {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    padding: 0.1rem 0;
+    word-break: break-all;
+}
+
+ul.runs li {
+    padding: 0.25rem 0;
+}

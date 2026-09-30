@@ -3,6 +3,7 @@
 use crate::api::{self, ApiError};
 use crate::diagram::DiagramView;
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
+use crate::sim::SimulationPanel;
 use crate::Route;
 use chrono::{DateTime, Utc};
 use shared::{
@@ -616,6 +617,12 @@ enum Content {
     Binary,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Diagram,
+    Simulate,
+}
+
 fn is_model(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     p.ends_with(".slx") || p.ends_with(".mdl")
@@ -626,6 +633,7 @@ pub fn file_page(props: &FileProps) -> Html {
     let (project_id, file_id, version_id) = (props.project_id, props.file_id, props.version_id);
     let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
+    let tab = use_state(|| Tab::Diagram);
     let project = use_fetch(project_id, api::project);
     let file = use_fetch((project_id, file_id, reload.0), move |(p, f, _)| {
         api::file(p, f)
@@ -723,11 +731,37 @@ pub fn file_page(props: &FileProps) -> Html {
         }
     };
 
+    let shown_version = match &*versions {
+        Fetch::Ready(vs) => vs
+            .iter()
+            .find(|v| Some(v.id) == version_id)
+            .or_else(|| vs.first())
+            .map(|v| v.version),
+        _ => None,
+    };
+    let tab_button = |t: Tab, label: &str| {
+        let tab = tab.clone();
+        html! {
+            <button class={classes!("tab", (*tab == t).then_some("active"))}
+                onclick={Callback::from(move |_: MouseEvent| tab.set(t))}>{ label }</button>
+        }
+    };
     let body = view(&content, |c: &Content| match c {
         // Keyed by model identity so a new version remounts the viewer with
         // fresh navigation state instead of keeping a stale subsystem path.
         Content::Model(m) => html! {
-            <DiagramView key={format!("{:p}", Rc::as_ptr(m))} model={m.clone()} />
+            <>
+                <div class="tabs">
+                    { tab_button(Tab::Diagram, "Diagram") }
+                    { tab_button(Tab::Simulate, "Simulate") }
+                </div>
+                if *tab == Tab::Diagram {
+                    <DiagramView key={format!("{:p}", Rc::as_ptr(m))} model={m.clone()} />
+                } else if let Some(version) = shown_version {
+                    <SimulationPanel key={version} {file_id} {version} config={m.config.clone()}
+                        outports={m.root.blocks.iter().filter(|b| b.block_type == "Outport").map(|b| b.name.clone()).collect::<Vec<_>>()} />
+                }
+            </>
         },
         Content::Text(t) => html! { <pre class="source">{ t }</pre> },
         Content::Binary => html! { <p class="muted">{ "Binary file; use Download." }</p> },

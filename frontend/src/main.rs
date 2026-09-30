@@ -4,6 +4,8 @@ mod diagram;
 mod fetch;
 mod local_viewer;
 mod pages;
+mod plot;
+mod sim;
 mod transpiler;
 
 use auth::{Login, Session, SessionProvider, UserMenu};
