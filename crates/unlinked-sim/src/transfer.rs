@@ -108,6 +108,7 @@ pub(super) fn lower(
     let id = &block.id.0;
     for key in ["AbsoluteTolerance", "InitialCondition"] {
         if let Some(value) = block.param(key) {
+            let value = value.trim();
             let allowed = if key == "AbsoluteTolerance" {
                 ["auto", "-1"].contains(&value)
             } else {

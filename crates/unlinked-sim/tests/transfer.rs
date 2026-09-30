@@ -239,3 +239,20 @@ fn order_64_is_bounded_and_discrete_extensions_reject() {
         );
     }
 }
+
+#[test]
+fn default_initial_condition_and_tolerance_allow_surrounding_whitespace() {
+    let mut m = model("[1]", "[1 1]");
+    m.root.blocks[1]
+        .parameters
+        .insert("InitialCondition".into(), " \t0\n".into());
+    m.root.blocks[1]
+        .parameters
+        .insert("AbsoluteTolerance".into(), " auto ".into());
+    let trace = simulate_model(&m, &options(Solver::Rk45)).unwrap();
+    assert!((trace.signals["tf"].last().unwrap() - (1.0 - (-2.0_f64).exp())).abs() < 1e-9);
+    m.root.blocks[1]
+        .parameters
+        .insert("InitialCondition".into(), " 1 ".into());
+    assert!(compile(&m, &Options::default()).is_err());
+}
