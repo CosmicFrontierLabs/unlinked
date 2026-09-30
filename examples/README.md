@@ -9,7 +9,7 @@ validation against physical hardware.
 
 | Model | What it shows | Run with |
 |---|---|---|
-| `inverted_pendulum_lqr.mdl` | Linearized cart-pole (M = 0.5 kg, m = 0.2 kg, l = 0.3 m) with LQR state feedback, built from vector signals and matrix gains. Starts tilted 0.2 rad and returns upright within about 3 s; the cart moves at most 0.15 m. | RK4, step 0.01 s, stop 5 s |
+| `inverted_pendulum_lqr.mdl` | Linearized cart-pole (M = 0.5 kg, m = 0.2 kg, l = 0.3 m, I = 0.006 kg m², b = 0.1 N s/m) with LQR state feedback, built from vector signals and matrix gains. Starts tilted 0.2 rad and returns upright within about 3 s; the cart moves up to about 0.153 m. | RK4, step 0.01 s, stop 5 s |
 | `inverted_pendulum_nonlinear_pd.mdl` | Nonlinear pendulum (sin term) balanced upright by a PD controller with a 3 N m torque limit, starting 0.8 rad from upright. | RK4, step 0.005 s, stop 4 s |
 | `mass_spring_damper_pid.mdl` | Position control with a PID controller (filtered derivative). Parameters come from `mass_spring_damper_params.m`, selected as the init script. | RK4, step 0.001 s, stop 3 s, init script |
 | `dc_motor_speed_pi.mdl` | DC motor speed loop, PI with a 24 V supply limit; about 7 % overshoot. | RK4, step 0.001 s, stop 3 s |
@@ -37,4 +37,4 @@ scripts/seed-demo.py --url http://localhost:3000
 ```
 
 It signs in with dev login, so the server must run with `--dev-mode`, or pass
-`--session` with a signed-in session cookie.
+`--session` with the value of a signed-in `unlinked_session` cookie.

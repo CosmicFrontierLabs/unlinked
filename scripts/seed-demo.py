@@ -7,7 +7,7 @@ solver settings, so the demo opens with results already in the run history.
 
 Uses only the public HTTP API. Sign-in is dev login, so the server must run
 with --dev-mode; against a production server pass --session with the value
-of a signed-in `session` cookie instead.
+of a signed-in `unlinked_session` cookie instead.
 
     scripts/seed-demo.py --url http://localhost:3000
 """
@@ -61,22 +61,18 @@ PROJECTS = {
 class Client:
     def __init__(self, url, session):
         self.url = url.rstrip("/")
-        jar = http.cookiejar.CookieJar()
-        if session:
-            host = urllib.parse.urlparse(self.url).hostname
-            jar.set_cookie(
-                http.cookiejar.Cookie(
-                    0, "session", session, None, False, host, False, False,
-                    "/", True, False, None, False, None, None, {},
-                )
-            )
+        # Sent as an explicit header: CookieJar will not attach a cookie
+        # set by hand to a bare "localhost" host.
+        self.session = session
         self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(jar)
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
         )
 
     def request(self, method, path, body=None, content_type="application/json"):
         data = None
         headers = {"Origin": self.url}
+        if self.session:
+            headers["Cookie"] = f"unlinked_session={self.session}"
         if body is not None:
             data = body if isinstance(body, bytes) else json.dumps(body).encode()
             headers["Content-Type"] = content_type

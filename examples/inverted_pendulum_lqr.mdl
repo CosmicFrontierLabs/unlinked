@@ -168,7 +168,7 @@ Model {
       DstPort 1
     }
     Annotation {
-      Name "Linearized cart-pole with LQR state feedback\nM = 0.5 kg, m = 0.2 kg, l = 0.3 m, b = 0.1 N/m/s\nStarts tilted 0.2 rad; K = lqr(A, B, diag([5000 0 100 0]), 1)"
+      Name "Linearized cart-pole with LQR state feedback\nM = 0.5 kg, m = 0.2 kg, l = 0.3 m, I = 0.006 kg m^2, b = 0.1 N s/m\nStarts tilted 0.2 rad; K = lqr(A, B, diag([5000 0 100 0]), 1)"
       Position [120, 20]
     }
   }
