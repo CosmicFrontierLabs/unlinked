@@ -17,3 +17,4 @@ unlinked-import = { path = "../unlinked-import" }
 unlinked-model = { path = "../unlinked-model" }
 unlinked-matlab = { path = "../unlinked-matlab" }
 unlinked-sim = { path = "../unlinked-sim" }
+unlinked-render = { path = "../unlinked-render" }

@@ -245,3 +245,35 @@ fn optional_corpus_analytic_fixture() {
         compare(name, expected, &actual["trace"]["signals"][&block.id.0]);
     }
 }
+
+#[test]
+fn svg_rendering_escapes_labels_and_selects_exact_subsystem_names() {
+    let source = include_bytes!("fixtures/nested.mdl");
+    let root = stdin(&["render", "-"], source);
+    success(&root);
+    let svg = String::from_utf8(root.stdout).unwrap();
+    assert!(svg.contains("<svg"));
+    assert!(svg.contains("#1a1b26"));
+    assert!(svg.contains("Outer/Slash"));
+    let nested = stdin(
+        &[
+            "render",
+            "-",
+            "--system",
+            "Outer/Slash",
+            "--system",
+            "Inner",
+        ],
+        source,
+    );
+    success(&nested);
+    let svg = String::from_utf8(nested.stdout).unwrap();
+    assert!(svg.contains("constant&lt;&amp;&gt;"));
+    assert!(!svg.contains("constant<&>"));
+    let missing = stdin(
+        &["render", "-", "--system", "Outer", "--system", "Slash"],
+        source,
+    );
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty());
+}
