@@ -719,12 +719,30 @@ fn prune(dst: &mut Option<Endpoint>, branches: &mut Vec<Branch>, hit: &dyn Fn(&E
 }
 
 /// Whether `dst` is a destination anywhere in `line`.
-fn drives(line: &Line, dst: &Endpoint) -> bool {
+pub fn drives(line: &Line, dst: &Endpoint) -> bool {
     fn branches(bs: &[Branch], dst: &Endpoint) -> bool {
         bs.iter()
             .any(|b| b.dst.as_ref() == Some(dst) || branches(&b.branches, dst))
     }
     line.dst.as_ref() == Some(dst) || branches(&line.branches, dst)
+}
+
+/// The line driving input `dst`, if exactly one does. Imported models may
+/// drive an input twice; then no line is identified by it.
+pub fn line_into<'a>(sys: &'a System, dst: &Endpoint) -> Option<&'a Line> {
+    unique(sys.lines.iter().filter(|l| drives(l, dst)))
+}
+
+/// The line from output `src`, if exactly one starts there.
+pub fn line_from<'a>(sys: &'a System, src: &Endpoint) -> Option<&'a Line> {
+    unique(sys.lines.iter().filter(|l| l.src.as_ref() == Some(src)))
+}
+
+fn unique<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
+    match (items.next(), items.next()) {
+        (Some(item), None) => Some(item),
+        _ => None,
+    }
 }
 
 fn check_rect(p: &Rect) -> Result<(), EditError> {
@@ -1286,6 +1304,43 @@ mod tests {
             inputs("**").apply(&mut m),
             Err(EditError::Invalid(_))
         ));
+    }
+
+    /// An input or output names a line only when exactly one line runs
+    /// there (from review: an imported duplicate driver picked the wrong line).
+    #[test]
+    fn lines_are_identified_only_by_unique_ends() {
+        let mut m = model();
+        let (a, b, c) = (
+            ep("1", PortKind::Out),
+            ep("2", PortKind::Out),
+            ep("3", PortKind::In),
+        );
+        assert!(std::ptr::eq(
+            line_from(&m.root, &a).unwrap(),
+            &m.root.lines[0]
+        ));
+        assert!(std::ptr::eq(
+            line_into(&m.root, &c).unwrap(),
+            &m.root.lines[0]
+        ));
+        // A second, imported driver of input 3 from block 2.
+        m.root.lines.push(Line {
+            src: Some(b.clone()),
+            dst: Some(c.clone()),
+            ..Default::default()
+        });
+        assert!(line_into(&m.root, &c).is_none());
+        assert!(std::ptr::eq(
+            line_from(&m.root, &b).unwrap(),
+            &m.root.lines[1]
+        ));
+        // A second line from output 1.
+        m.root.lines.push(Line {
+            src: Some(a.clone()),
+            ..Default::default()
+        });
+        assert!(line_from(&m.root, &a).is_none());
     }
 
     #[test]

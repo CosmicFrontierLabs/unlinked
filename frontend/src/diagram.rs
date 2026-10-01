@@ -66,11 +66,12 @@ enum Drag {
     /// across itself, from diagram point `start`; see
     /// [`geometry::drag_segment`].
     Segment {
-        dst: Endpoint,
+        target: RouteTarget,
         points: Vec<Point>,
         fixed: usize,
         segment: usize,
         start: Point,
+        /// The new stored vertices once the drag has moved anything.
         route: Option<Vec<Point>>,
     },
     /// Dragging a new connection out of port `from`.
@@ -87,6 +88,25 @@ enum Drag {
     },
     /// Released; kept so the following click knows whether it was a drag.
     Ended { moved: bool },
+}
+
+/// A wire whose route is being dragged.
+enum RouteTarget {
+    /// The final leg into input `0`, ending at the port's anchor and outline.
+    Leaf(Endpoint),
+    /// The trunk of the branched line from output `0`, ending at the
+    /// junction, which stays where it is.
+    Trunk(Endpoint),
+}
+
+impl RouteTarget {
+    /// Trailing drawn points that are not free to move.
+    fn fixed_end(&self) -> usize {
+        match self {
+            RouteTarget::Leaf(_) => 2,
+            RouteTarget::Trunk(_) => 1,
+        }
+    }
 }
 
 /// `dataTransfer` type carrying a palette block's catalog key.
@@ -417,6 +437,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let select_box = use_state(|| None::<(Point, Point)>);
     // A selected connection, by the input it drives.
     let selected_wire = use_state(|| None::<Endpoint>);
+    // A selected branched line, by the source of its trunk.
+    let selected_trunk = use_state(|| None::<Endpoint>);
     // A connection being dragged: from its first port to the pointer.
     let wire_preview = use_state(|| None::<(Point, Point)>);
     // The outline of a block being resized.
@@ -479,8 +501,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
 
     // A selected connection belongs to the level it was picked on.
     {
-        let selected_wire = selected_wire.clone();
-        use_effect_with((*path).clone(), move |_| selected_wire.set(None));
+        let (selected_wire, selected_trunk) = (selected_wire.clone(), selected_trunk.clone());
+        use_effect_with((*path).clone(), move |_| {
+            selected_wire.set(None);
+            selected_trunk.set(None);
+        });
     }
 
     // Wheel zoom around the cursor. Registered by hand so the listener is
@@ -582,8 +607,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             // Pressing on a wire may start dragging its nearest segment; a
             // press without movement still selects the wire on click.
             let segment = on_edit.as_ref().and_then(|_| {
-                let hit = closest(e.target(), "polyline.wire-hit")?;
-                let dst = endpoint_of(&hit, "dst-")?;
+                let hit = closest(e.target(), "polyline.wire-hit, polyline.trunk-hit")?;
+                let target = match endpoint_of(&hit, "dst-") {
+                    Some(dst) => RouteTarget::Leaf(dst),
+                    None => RouteTarget::Trunk(endpoint_of(&hit, "src-")?),
+                };
                 let fixed: usize = hit.get_attribute("data-fixed")?.parse().ok()?;
                 let points = polyline_points(&hit);
                 let start = (*rendered)
@@ -592,7 +620,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .and_then(|svg| to_diagram(&e, &container, &view, svg))?;
                 let segment = nearest_segment(&points, fixed.saturating_sub(1), start)?;
                 Some(Drag::Segment {
-                    dst,
+                    target,
                     points,
                     fixed,
                     segment,
@@ -741,12 +769,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     }
                 }
                 Some(Drag::Segment {
+                    target,
                     points,
                     fixed,
                     segment,
                     start,
                     route,
-                    ..
                 }) => {
                     let Some(to) = (*rendered)
                         .as_ref()
@@ -762,14 +790,25 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         to.x - start.x
                     };
                     let delta = (across / SNAP).round() * SNAP;
+                    let end = target.fixed_end();
                     *route = (delta != 0.0)
-                        .then(|| geometry::drag_segment(points, *fixed, *segment, delta))
-                        .flatten();
-                    // Preview as drawn: fixed start, new vertices, port end.
+                        .then(|| geometry::drag_segment(points, *fixed, end, *segment, delta))
+                        .flatten()
+                        .map(|mut r| {
+                            // A trunk's stored vertices end at its junction.
+                            if let RouteTarget::Trunk(_) = target {
+                                r.extend(points.last());
+                            }
+                            r
+                        });
+                    // Preview as drawn: the fixed start, then the new
+                    // vertices, then a leaf's port end.
                     route_preview.set(route.as_ref().map(|r| {
                         let mut drawn = points[..*fixed].to_vec();
                         drawn.extend(r);
-                        drawn.extend(&points[points.len() - 2..]);
+                        if let RouteTarget::Leaf(_) = target {
+                            drawn.extend(&points[points.len() - end..]);
+                        }
                         drawn
                     }));
                 }
@@ -790,8 +829,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_box.clone(),
             route_preview.clone(),
         );
-        let (selected, selected_wire, view) =
-            (selected.clone(), selected_wire.clone(), view.clone());
+        let (selected, selected_wire, selected_trunk, view) = (
+            selected.clone(),
+            selected_wire.clone(),
+            selected_trunk.clone(),
+            view.clone(),
+        );
         let blocks: Vec<(String, Rect)> = system
             .map(|s| {
                 s.blocks
@@ -840,14 +883,22 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     true
                 }
                 Some(Drag::Pan { moved, .. }) => moved,
-                Some(Drag::Segment { dst, route, .. }) => {
+                Some(Drag::Segment { target, route, .. }) => {
                     route_preview.set(None);
                     let moved = route.is_some();
                     if let (Some(points), Some(on_edit)) = (route, &on_edit) {
-                        on_edit.emit(Edit::SetRoute {
-                            system: system_ref.clone(),
-                            dst,
-                            points,
+                        let system = system_ref.clone();
+                        on_edit.emit(match target {
+                            RouteTarget::Leaf(dst) => Edit::SetRoute {
+                                system,
+                                dst,
+                                points,
+                            },
+                            RouteTarget::Trunk(src) => Edit::SetTrunkRoute {
+                                system,
+                                src,
+                                points,
+                            },
                         });
                     }
                     moved
@@ -907,6 +958,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         }
                         selected.set(ids);
                         selected_wire.set(None);
+                        selected_trunk.set(None);
                     }
                     dragged
                 }
@@ -918,7 +970,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onclick = {
         let drag = drag.clone();
-        let (selected, selected_wire) = (selected.clone(), selected_wire.clone());
+        let (selected, selected_wire, selected_trunk) = (
+            selected.clone(),
+            selected_wire.clone(),
+            selected_trunk.clone(),
+        );
         Callback::from(move |e: MouseEvent| {
             let moved = matches!(drag.borrow_mut().take(), Some(Drag::Ended { moved: true }));
             if moved {
@@ -926,8 +982,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
             let wire =
                 closest(e.target(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"));
+            let trunk =
+                closest(e.target(), "polyline.trunk-hit").and_then(|w| endpoint_of(&w, "src-"));
             let block = block_group(e.target()).and_then(|g| g.get_attribute("data-sid"));
-            selected.set(match (wire.is_some(), block) {
+            selected_trunk.set(trunk.clone());
+            selected.set(match (wire.is_some() || trunk.is_some(), block) {
                 (true, _) => Vec::new(),
                 // Shift-click adds or removes a block.
                 (false, Some(id)) if e.shift_key() => {
@@ -956,6 +1015,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
         let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
+        let selected_trunk = selected_trunk.clone();
         let (clipboard, model, on_error) = (
             clipboard.clone(),
             props.model.clone(),
@@ -1010,6 +1070,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         on_edits.emit(group);
                         selected.set(added);
                         selected_wire.set(None);
+                        selected_trunk.set(None);
                     }
                     Err(message) => {
                         if let Some(on_error) = &on_error {
@@ -1059,6 +1120,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 e.prevent_default();
                 selected.set(blocks.iter().map(|b| b.id.0.clone()).collect());
                 selected_wire.set(None);
+                selected_trunk.set(None);
                 return;
             }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
@@ -1144,6 +1206,15 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         [sid] => s.blocks.iter().find(|b| &b.id.0 == sid),
         _ => None,
     });
+    // Only an input driven by exactly one line identifies it; imported models
+    // may drive an input twice, and then which line was clicked is unknown.
+    // A line selected by the input it drives or the source of its trunk;
+    // ends shared by several lines (in imported models) select none.
+    let selected_line = system.and_then(|s| match (&*selected_wire, &*selected_trunk) {
+        (Some(dst), _) => unlinked_model::edit::line_into(s, dst),
+        (None, Some(src)) => unlinked_model::edit::line_from(s, src),
+        (None, None) => None,
+    });
     let selected_chart = selected_block.and_then(|b| {
         let mut p = refs.clone();
         p.push(&b.name);
@@ -1219,7 +1290,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 dst.port.index
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+        + &selected_trunk
+            .as_ref()
+            .map(|src| {
+                format!(
+                    ".diagram polyline.trunk-hit[data-src-sid=\"{}\"][data-src-kind=\"{}\"][data-src-index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
+                    css_string(&src.block.0),
+                    src.port.kind.token(),
+                    src.port.index
+                )
+            })
+            .unwrap_or_default();
     let highlight = match &props.diff {
         Some(d) => diff_css(d, &path, system) + &highlight + &wire_highlight,
         None => highlight + &wire_highlight,
@@ -1313,6 +1395,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
                 </div>
+                if let Some(line) = selected_line {
+                    <LineInspector line={Rc::new(line.clone())} system={system_ref.clone()}
+                        blocks={Rc::new(system.map(|s| s.blocks.clone()).unwrap_or_default())}
+                        on_edit={on_edit.clone()} />
+                }
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
                         system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
@@ -1414,6 +1501,76 @@ fn block_palette() -> Html {
             <p class="hint">{ "Drag onto the diagram. Drag from a port to another to connect; select a line and press Delete to remove it." }</p>
             { for groups }
         </div>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+struct LineInspectorProps {
+    line: Rc<Line>,
+    /// The system containing the line.
+    system: SystemRef,
+    /// Blocks of that system, to name the line's ends.
+    blocks: Rc<Vec<Block>>,
+    on_edit: Option<Callback<Edit>>,
+}
+
+/// The selected line: where it runs, and its signal name (editable).
+#[function_component(LineInspector)]
+fn line_inspector(props: &LineInspectorProps) -> Html {
+    let line = &props.line;
+    let describe = |ep: &Endpoint| {
+        let block = props
+            .blocks
+            .iter()
+            .find(|b| b.id == ep.block)
+            .map_or(ep.block.0.as_str(), |b| b.name.as_str());
+        format!(
+            "{} ({} {})",
+            block.replace('\n', " "),
+            ep.port.kind.token(),
+            ep.port.index
+        )
+    };
+    let mut ends = Vec::new();
+    let mut pending = vec![(line.dst.as_ref(), &line.branches)];
+    while let Some((dst, branches)) = pending.pop() {
+        ends.extend(dst);
+        pending.extend(branches.iter().map(|b| (b.dst.as_ref(), &b.branches)));
+    }
+    let name = line.name.clone().unwrap_or_default();
+    let name_field = match (&props.on_edit, &line.src) {
+        (Some(on_edit), Some(src)) => {
+            let (on_edit, system, src, current) = (
+                on_edit.clone(),
+                props.system.clone(),
+                src.clone(),
+                name.clone(),
+            );
+            // An empty name removes the label.
+            let onchange = Callback::from(move |e: Event| {
+                let name = e.target_unchecked_into::<HtmlInputElement>().value();
+                if name != current {
+                    on_edit.emit(Edit::SetSignalName {
+                        system: system.clone(),
+                        src: src.clone(),
+                        name,
+                    });
+                }
+            });
+            html! { <input class="param signal-name" value={name} placeholder="unnamed" {onchange} /> }
+        }
+        _ if name.is_empty() => html! { <span class="muted">{ "unnamed" }</span> },
+        _ => html! { <code>{ name }</code> },
+    };
+    html! {
+        <aside class="inspector">
+            <h3>{ "Line" }</h3>
+            <table>
+                <tr><th>{ "Signal name" }</th><td>{ name_field }</td></tr>
+                <tr><th>{ "From" }</th><td>{ line.src.as_ref().map(describe).unwrap_or_else(|| "(none)".into()) }</td></tr>
+                { for ends.iter().map(|ep| html! { <tr><th>{ "To" }</th><td>{ describe(ep) }</td></tr> }) }
+            </table>
+        </aside>
     }
 }
 

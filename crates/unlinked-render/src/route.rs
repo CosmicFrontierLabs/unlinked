@@ -22,6 +22,8 @@ pub struct Wire {
     /// Leading points fixed by the line's source or junction rather than
     /// stored as vertices.
     pub fixed: usize,
+    /// The line's source, if this wire is the trunk of a branched line.
+    pub src: Option<Endpoint>,
 }
 
 pub struct RoutedLine {
@@ -104,6 +106,7 @@ pub fn route_line(sys: &System, line: &Line) -> RoutedLine {
 
     // The trunk starts at the source port's outline point and anchor.
     let fixed = if src_anchor.is_some() { 2 } else { 1 };
+    let wires = out.wires.len();
     emit(
         sys,
         trunk,
@@ -113,6 +116,13 @@ pub fn route_line(sys: &System, line: &Line) -> RoutedLine {
         incomplete,
         &mut out,
     );
+    // The root's own wire is pushed after its branches'; when it ends at a
+    // junction it is the trunk, named by the line's source.
+    if line.dst.is_none() && !line.branches.is_empty() && out.wires.len() > wires {
+        if let Some(trunk) = out.wires.last_mut() {
+            trunk.src = line.src.clone();
+        }
+    }
     out
 }
 
@@ -182,6 +192,7 @@ fn emit(
             arrow,
             dst: dst.clone(),
             fixed,
+            src: None,
         });
     }
 }
@@ -359,7 +370,8 @@ mod tests {
         );
     }
 
-    /// Each leaf wire names its own destination; shared trunks name none.
+    /// Each leaf wire names its own destination; only the root trunk names
+    /// the line's source.
     #[test]
     fn wires_carry_their_own_destination() {
         let dst = |id: &str| {
@@ -389,14 +401,34 @@ mod tests {
                     branches: vec![],
                 },
             ],
+            src: Some(Endpoint {
+                block: "s".into(),
+                port: unlinked_model::PortRef {
+                    kind: PortKind::Out,
+                    index: 1,
+                },
+            }),
             ..Default::default()
         };
         let routed = route_line(&System::default(), &line);
-        let dsts: Vec<_> = routed
+        let ends: Vec<_> = routed
             .wires
             .iter()
-            .map(|w| w.dst.as_ref().map(|d| d.block.0.as_str()))
+            .map(|w| {
+                (
+                    w.dst.as_ref().map(|d| d.block.0.as_str()),
+                    w.src.as_ref().map(|s| s.block.0.as_str()),
+                )
+            })
             .collect();
-        assert_eq!(dsts, [Some("b"), Some("a"), Some("c"), None]);
+        assert_eq!(
+            ends,
+            [
+                (Some("b"), None),
+                (Some("a"), None),
+                (Some("c"), None),
+                (None, Some("s"))
+            ]
+        );
     }
 }
