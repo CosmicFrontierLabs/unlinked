@@ -41,7 +41,11 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StructuralReport {
     pub diagnostics: Vec<Diagnostic>,
-    /// Work or report budget reached; absence of errors is inconclusive.
+    /// Warning display limit reached; error validation still completed unless
+    /// `truncated` is also set.
+    #[serde(default)]
+    pub warnings_omitted: bool,
+    /// Work or error-report budget reached; absence of errors is inconclusive.
     pub truncated: bool,
 }
 impl StructuralReport {
@@ -53,6 +57,22 @@ impl StructuralReport {
                 .any(|d| d.severity == Severity::Error)
     }
     fn emit(&mut self, severity: Severity, code: &str, target: DiagnosticTarget, message: &str) {
+        if severity == Severity::Warning {
+            if self.warnings_omitted {
+                return;
+            }
+            if self.diagnostics.len() >= 1000
+                || self
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == Severity::Warning)
+                    .count()
+                    >= 100
+            {
+                self.warnings_omitted = true;
+                return;
+            }
+        }
         if self.diagnostics.len() >= 1000 {
             self.truncated = true;
             return;
@@ -74,7 +94,8 @@ fn finite(point: &Point) -> bool {
 /// Unresolved inference is reported as a warning. Missing schema entries and
 /// unsupported block types are deliberately not structural errors.
 /// Bounded to 500,000 visited objects/vertices, 128 subsystem levels and 1,000
-/// findings. Traversal is iterative, including branched lines.
+/// findings, including at most 100 warnings. Omitted warnings do not stop error
+/// validation. Traversal is iterative, including branched lines.
 pub fn validate_structure(model: &Model) -> StructuralReport {
     let mut report = StructuralReport::default();
     let mut budget = 500_000usize;
@@ -425,7 +446,13 @@ mod tests {
             blocks: vec![block("x"), block("x")],
             ..Default::default()
         };
-        child.lines = vec![Line::default(); 1500];
+        child.lines = vec![
+            Line {
+                src: Some(ep("missing", PortKind::Out, 1)),
+                ..Default::default()
+            };
+            1500
+        ];
         m.root.blocks[0].subsystem = Some(Box::new(child));
         let r = validate_structure(&m);
         assert!(r.truncated && !r.is_valid());
@@ -433,6 +460,34 @@ mod tests {
         assert!(
             matches!(&r.diagnostics[0].target, DiagnosticTarget::Block { system, .. } if system == &vec![BlockId::from("a")])
         );
+    }
+    #[test]
+    fn omitted_warnings_do_not_hide_later_errors() {
+        let mut m = model();
+        m.root.lines = vec![Line::default(); 1500];
+        let r = validate_structure(&m);
+        assert!(r.warnings_omitted && !r.truncated && r.is_valid());
+        assert_eq!(r.diagnostics.len(), 100);
+        m.root.lines.push(Line {
+            src: Some(ep("missing", PortKind::Out, 1)),
+            ..Default::default()
+        });
+        let r = validate_structure(&m);
+        assert!(r.warnings_omitted && !r.truncated && !r.is_valid());
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "missing_endpoint_block"));
+    }
+    #[test]
+    fn warning_only_models_still_obey_work_budget() {
+        let mut m = model();
+        m.root.lines.push(Line {
+            points: vec![Point { x: 0.0, y: 0.0 }; 500_001],
+            ..Default::default()
+        });
+        let r = validate_structure(&m);
+        assert!(r.truncated && !r.is_valid());
     }
     #[test]
     fn parameter_edits_cannot_hide_removed_connected_ports() {
