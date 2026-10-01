@@ -47,3 +47,17 @@ matrices; `String` accepts only ASCII character rows. `assign` changes its targe
 only if the complete assignment succeeds. Errors use the public `Error` enum
 (`UndefinedVariable`, `UnsupportedRank`, `Shape`, or `Semantic`); private legacy
 kernel diagnostics are preserved honestly as `Semantic` messages.
+
+### Integer formatting subset
+
+`fprintf`/`sprintf` bare `%d` and `%i` print integral doubles in decimal.
+Finite fractional doubles use MATLAB's scientific fallback: `%d` with `1.5`
+prints `1.500000e+00` (six decimal places, signed exponent with at least two
+digits). This intentionally differs from Octave, which prints `1.5`.
+See MathWorks' [conversion override rule](https://www.mathworks.com/help/matlab/ref/string.compose.html).
+
+Fractional `%d`/`%i` with explicit width or precision return a diagnostic to
+use an explicit `%e`: MATLAB's modifier behavior during automatic override
+has not been verified. Inputs must still be finite and in `[-2^63, 2^63)`;
+nonfinite and out-of-range values return errors instead of saturating an integer
+conversion. Remaining formatting compatibility is tracked in issue #25.
