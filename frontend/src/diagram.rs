@@ -156,6 +156,56 @@ fn nearest_segment(points: &[Point], first: usize, at: Point) -> Option<usize> {
     })
 }
 
+/// Blocks copied with Ctrl+C, as they were then: later edits to (or the
+/// deletion of) the originals do not change what pastes.
+struct Clipboard {
+    model: Rc<Model>,
+    system: SystemRef,
+    ids: Vec<BlockId>,
+    /// Pastes so far; each lands further down and right.
+    pastes: u32,
+}
+
+/// The edits pasting `clip` into `model`, the diagram as it is now: the
+/// copies get SIDs and names free in `model`, not just in the snapshot.
+fn paste(clip: &Clipboard, model: &Model) -> Result<Vec<Edit>, String> {
+    let next = |m: &Model| unlinked_model::edit::next_sid(m).ok_or("no block IDs left");
+    let first_sid = next(model)?.max(next(&clip.model)?);
+    let step = 20.0 * f64::from(clip.pastes + 1);
+    let mut edits = unlinked_model::edit::duplicate(
+        &clip.model,
+        &clip.system,
+        &clip.ids,
+        Point::new(step, step),
+        first_sid,
+    )
+    .map_err(|e| e.to_string())?;
+    let names = unlinked_model::edit::system_names(model, &clip.system)
+        .ok_or("the copied blocks' system no longer exists")?;
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let sys = model
+        .system_at(&refs)
+        .ok_or("the copied blocks' system no longer exists")?;
+    let mut taken: std::collections::HashSet<String> =
+        sys.blocks.iter().map(|b| b.name.clone()).collect();
+    for edit in &mut edits {
+        if let Edit::AddBlock { name, .. } = edit {
+            if !taken.insert(name.clone()) {
+                // Taken since the copy: take the next free "… copyN".
+                let base = match name.rsplit_once(" copy") {
+                    Some((base, n)) if n.chars().all(|c| c.is_ascii_digit()) => base.to_string(),
+                    _ => name.clone(),
+                };
+                *name = (1..)
+                    .map(|i| format!("{base} copy{i}"))
+                    .find(|n| taken.insert(n.clone()))
+                    .expect("some suffix is free");
+            }
+        }
+    }
+    Ok(edits)
+}
+
 /// Smallest block side a resize leaves.
 const MIN_SIDE: f64 = 10.0;
 
@@ -420,9 +470,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         y: 0.0,
     });
     let drag = use_mut_ref(|| None::<Drag>);
-    // Blocks copied with Ctrl+C: their system, IDs, and how many times they
-    // have been pasted (each paste lands further down and right).
-    let clipboard = use_mut_ref(|| None::<(SystemRef, Vec<BlockId>, u32)>);
+    // Blocks copied with Ctrl+C.
+    let clipboard = use_mut_ref(|| None::<Clipboard>);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -962,34 +1011,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             // them with their internal lines, offset from the originals.
             if command && key == "c" && !selected.is_empty() {
                 e.prevent_default();
-                let ids = selected.iter().cloned().map(BlockId).collect();
-                *clipboard.borrow_mut() = Some((system_ref.clone(), ids, 0));
+                *clipboard.borrow_mut() = Some(Clipboard {
+                    model: model.clone(),
+                    system: system_ref.clone(),
+                    ids: selected.iter().cloned().map(BlockId).collect(),
+                    pastes: 0,
+                });
                 return;
             }
             if command && key == "v" {
                 let mut clip = clipboard.borrow_mut();
-                let Some((from, ids, pastes)) =
-                    clip.as_mut().filter(|(from, ..)| *from == system_ref)
-                else {
+                let Some(clip) = clip.as_mut() else {
                     return;
                 };
                 e.prevent_default();
-                let step = 20.0 * f64::from(*pastes + 1);
-                let pasted = unlinked_model::edit::next_sid(&model)
-                    .ok_or_else(|| "no block IDs left".to_string())
-                    .and_then(|sid| {
-                        unlinked_model::edit::duplicate(
-                            &model,
-                            from,
-                            ids,
-                            Point::new(step, step),
-                            sid,
-                        )
-                        .map_err(|e| e.to_string())
-                    });
+                let pasted = if clip.system == system_ref {
+                    paste(clip, &model)
+                } else {
+                    Err("blocks paste only into the system they were copied from".into())
+                };
                 match pasted {
                     Ok(group) => {
-                        *pastes += 1;
+                        clip.pastes += 1;
                         let added = group
                             .iter()
                             .filter_map(|edit| match edit {
