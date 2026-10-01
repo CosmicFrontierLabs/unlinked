@@ -55,6 +55,11 @@ fn nested_leaf_and_trunk_routes_roundtrip_without_moving_other_vertices() {
             original.root.lines[0].branches[1].points
         );
         let bytes = unlinked_import::patch::apply_edits(name, &bytes, &edits).unwrap();
+        if name.ends_with(".mdl") {
+            let text = std::str::from_utf8(&bytes).unwrap();
+            assert!(text.contains("Points\t["));
+            assert!(!text.contains("Points\t\""));
+        }
         let actual = unlinked_import::import(name, &bytes).unwrap();
         assert_eq!(actual, expected, "{name}");
         let clear = [Edit::SetTrunkRoute {
@@ -120,5 +125,59 @@ fn route_edits_fail_atomically_for_ambiguous_or_invalid_targets() {
         points: vec![]
     }
     .apply(&mut detached)
+    .is_err());
+}
+
+#[test]
+fn signal_name_roundtrip_preserves_entire_route_and_clears_label() {
+    for (file, bytes) in fixtures() {
+        let original = unlinked_import::import(file, &bytes).unwrap();
+        let mut bytes = bytes;
+        for name in [
+            "velocity <target> & \"actual\"\nsecond line",
+            "",
+            "new name",
+        ] {
+            let edit = Edit::SetSignalName {
+                system: vec![],
+                src: ep("1", PortKind::Out),
+                name: name.into(),
+            };
+            let mut expected = unlinked_import::import(file, &bytes).unwrap();
+            apply_batch(&mut expected, std::slice::from_ref(&edit)).unwrap();
+            bytes = unlinked_import::patch::apply_edits(file, &bytes, &[edit]).unwrap();
+            let actual = unlinked_import::import(file, &bytes).unwrap();
+            assert_eq!(actual, expected);
+            let mut line = actual.root.lines[0].clone();
+            line.name = None;
+            assert_eq!(line, original.root.lines[0]);
+        }
+    }
+}
+#[test]
+fn signal_names_reject_invalid_text_and_ambiguous_sources() {
+    let (file, bytes) = fixtures().remove(0);
+    let original = unlinked_import::import(file, &bytes).unwrap();
+    for name in ["\0".into(), "\u{FFFF}".into(), "x".repeat(4097)] {
+        let mut model = original.clone();
+        assert!(apply_batch(
+            &mut model,
+            &[Edit::SetSignalName {
+                system: vec![],
+                src: ep("1", PortKind::Out),
+                name
+            }]
+        )
+        .is_err());
+        assert_eq!(model, original);
+    }
+    let mut model = original.clone();
+    model.root.lines.push(model.root.lines[0].clone());
+    assert!(Edit::SetSignalName {
+        system: vec![],
+        src: ep("1", PortKind::Out),
+        name: "ambiguous".into()
+    }
+    .apply(&mut model)
     .is_err());
 }

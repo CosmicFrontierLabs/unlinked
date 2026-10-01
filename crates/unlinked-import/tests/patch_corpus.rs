@@ -166,6 +166,11 @@ fn structural_edits(model: &Model, edits: &mut Vec<Edit>) {
         src: port(&ids[0], PortKind::Out),
         points: vec![unlinked_model::Point::new(right + 155.0, 75.0)],
     });
+    edits.push(Edit::SetSignalName {
+        system: vec![],
+        src: port(&ids[0], PortKind::Out),
+        name: "Copied signal <x> & y".into(),
+    });
     if let Some(dst) = cut {
         edits.push(Edit::Disconnect {
             system: vec![],

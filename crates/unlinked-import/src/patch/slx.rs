@@ -287,6 +287,22 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
             });
             return Ok(());
         }
+        Edit::SetSignalName { src, name, .. } => {
+            let i = only_child(parent, "signal source", |l| {
+                l.name == "Line"
+                    && l.prop("Src")
+                        .is_some_and(|v| is_endpoint(&v, src, PortKind::Out))
+            })?;
+            let line = element_mut(parent, i);
+            if name.is_empty() {
+                line.children.retain(|c|!matches!(c,XNode::Element(p) if p.name=="P" && p.attr("Name").as_deref()==Some("Name")));
+            } else if let Some(p) = line.prop_mut("Name") {
+                p.set_text(name);
+            } else {
+                line.push_prop("Name", name);
+            }
+            return Ok(());
+        }
         Edit::SetRoute { .. } | Edit::SetTrunkRoute { .. } => {
             let update = resolved
                 .route
@@ -390,7 +406,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         | Edit::Connect { .. }
         | Edit::Disconnect { .. }
         | Edit::SetRoute { .. }
-        | Edit::SetTrunkRoute { .. } => {
+        | Edit::SetTrunkRoute { .. }
+        | Edit::SetSignalName { .. } => {
             unreachable!("applied above")
         }
     }
