@@ -8,6 +8,7 @@
 //! is left to consumers that need numbers.
 
 pub mod catalog;
+pub mod clipboard;
 pub mod diff;
 pub mod duplicate;
 pub mod edit;
