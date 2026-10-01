@@ -628,6 +628,15 @@ a.compare {
     cursor: pointer;
 }
 
+.diagram.editing rect.annotation-hit {
+    cursor: move;
+}
+
+.inspector textarea.annotation-text {
+    width: 100%;
+    font-family: inherit;
+}
+
 .diagram.editing :is(polyline.wire-hit, polyline.trunk-hit):hover {
     stroke: rgba(122, 162, 247, 0.3);
 }

@@ -153,11 +153,14 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
         .map(|l| route::route_line(sys, l))
         .collect();
     let names: Vec<Option<TextBox>> = sys.blocks.iter().map(name_layout).collect();
-    let annotations: Vec<TextBox> = sys
+    // Laid out annotations and their indices in the system (empty ones are
+    // skipped, so the two differ).
+    let (annotation_index, annotations): (Vec<usize>, Vec<TextBox>) = sys
         .annotations
         .iter()
-        .filter_map(annotation_layout)
-        .collect();
+        .enumerate()
+        .filter_map(|(i, a)| Some((i, annotation_layout(a)?)))
+        .unzip();
     let labels: Vec<Option<TextBox>> = routed.iter().map(label_layout).collect();
 
     let bounds = diagram_bounds(sys, &routed, &names, &annotations, &labels);
@@ -196,11 +199,41 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
         ],
     );
 
-    for a in &annotations {
+    for (a, i) in annotations.iter().zip(&annotation_index) {
         a.draw(
             &mut s,
-            &[("fill", pal.text.into()), ("class", "annotation".into())],
+            &[
+                ("fill", pal.text.into()),
+                ("class", "annotation".into()),
+                ("data-annotation", i.to_string()),
+            ],
         );
+    }
+    if opts.hit_targets {
+        // Annotation text is hard to hit glyph by glyph: cover each box, in
+        // the annotations' own layer so blocks drawn later stay on top.
+        s.open(
+            "g",
+            &[
+                ("class", "annotation-hits".into()),
+                ("fill", "transparent".into()),
+            ],
+        );
+        for (a, i) in annotations.iter().zip(&annotation_index) {
+            let r = a.bounds();
+            s.leaf(
+                "rect",
+                &[
+                    ("class", "annotation-hit".into()),
+                    ("x", num(r.left)),
+                    ("y", num(r.top)),
+                    ("width", num(r.width())),
+                    ("height", num(r.height())),
+                    ("data-annotation", i.to_string()),
+                ],
+            );
+        }
+        s.close("g");
     }
 
     let connected = connected_ports(sys);

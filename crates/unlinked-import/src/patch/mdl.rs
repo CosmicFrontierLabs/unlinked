@@ -422,6 +422,22 @@ fn format_rect(p: &Rect) -> String {
     )
 }
 
+/// Preserve legacy point anchoring instead of replacing it with a zero-size box.
+fn annotation_position(position: &Rect, existing: Option<&str>) -> String {
+    let was_point = existing.is_none_or(|value| {
+        value
+            .split(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | ',' | ';'))
+            .filter(|part| !part.is_empty())
+            .count()
+            == 2
+    });
+    if was_point && position.left == position.right && position.top == position.bottom {
+        format!("[{}, {}]", position.left, position.top)
+    } else {
+        format_rect(position)
+    }
+}
+
 fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError> {
     let (edit, path) = (&resolved.edit, &resolved.system);
     let sys = file
@@ -434,7 +450,7 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         let mut a = new_section("Annotation", &child_indent(sys), sys.eol());
         a.set_prop("SID", id, false);
         a.set_prop("Name", text, false);
-        a.set_prop("Position", &format_rect(position), true);
+        a.set_prop("Position", &annotation_position(position, None), true);
         insert_after(sys, &["Annotation"], a);
         let root = file
             .system_mut(&[])
@@ -463,7 +479,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         } else if let Item::Section(a) = &mut sys.items[at] {
             match edit {
                 Edit::MoveAnnotation { position, .. } => {
-                    a.set_prop("Position", &format_rect(position), true)
+                    let value = annotation_position(position, a.prop("Position").as_deref());
+                    a.set_prop("Position", &value, true)
                 }
                 Edit::SetAnnotationText { text, .. } => {
                     let key = if a.prop("Text").is_some() {
