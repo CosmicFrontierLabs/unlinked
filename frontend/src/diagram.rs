@@ -829,8 +829,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_box.clone(),
             route_preview.clone(),
         );
-        let (selected, selected_wire, view) =
-            (selected.clone(), selected_wire.clone(), view.clone());
+        let (selected, selected_wire, selected_trunk, view) = (
+            selected.clone(),
+            selected_wire.clone(),
+            selected_trunk.clone(),
+            view.clone(),
+        );
         let blocks: Vec<(String, Rect)> = system
             .map(|s| {
                 s.blocks
@@ -954,6 +958,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         }
                         selected.set(ids);
                         selected_wire.set(None);
+                        selected_trunk.set(None);
                     }
                     dragged
                 }
@@ -1010,6 +1015,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
         let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
+        let selected_trunk = selected_trunk.clone();
         let (clipboard, model, on_error) = (
             clipboard.clone(),
             props.model.clone(),
@@ -1064,6 +1070,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         on_edits.emit(group);
                         selected.set(added);
                         selected_wire.set(None);
+                        selected_trunk.set(None);
                     }
                     Err(message) => {
                         if let Some(on_error) = &on_error {
@@ -1113,6 +1120,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 e.prevent_default();
                 selected.set(blocks.iter().map(|b| b.id.0.clone()).collect());
                 selected_wire.set(None);
+                selected_trunk.set(None);
                 return;
             }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
