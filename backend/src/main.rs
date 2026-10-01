@@ -20,7 +20,7 @@ use crate::db::DbPool;
 use crate::error::{ApiError, ApiResult};
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{middleware, Router};
 use clap::Parser;
 use diesel::PgConnection;
@@ -63,6 +63,10 @@ impl AppState {
         .await
         .map_err(|e| ApiError::Internal(format!("database task failed: {e}")))?
     }
+}
+
+async fn api_not_found() -> error::ApiError {
+    error::ApiError::NotFound
 }
 
 /// All `/api` routes except health. Every handler authenticates through
@@ -162,6 +166,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             shared::SimulationSocket::PATH,
             get(handlers::simulation_socket::handler),
         )
+        // Unknown API paths are errors, not client-side routes.
+        .route("/api", any(api_not_found))
+        .route("/api/*rest", any(api_not_found))
         .with_state(state.clone())
         .route(
             shared::AppSocket::PATH,
@@ -351,6 +358,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unknown_api_paths_are_json_404s() {
+        for (method, path) in [
+            ("GET", "/api"),
+            ("GET", "/api/nope"),
+            ("POST", "/api/auth/zzz-nonexistent"),
+            ("GET", "/api/orgs/x/y/z"),
+        ] {
+            let resp = build_app(test_state())
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::ORIGIN, crate::test_support::TEST_PUBLIC_URL)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            let ct = resp.headers().get(header::CONTENT_TYPE).unwrap();
+            assert!(ct.to_str().unwrap().contains("json"), "{method} {path}");
+        }
     }
 
     #[tokio::test]
