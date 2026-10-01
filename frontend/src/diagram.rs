@@ -538,6 +538,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let drag = use_mut_ref(|| None::<Drag>);
     // Blocks copied with Ctrl+C.
     let clipboard = use_mut_ref(|| None::<Clipboard>);
+    // A block an action asked to create, selected once the model has it; a
+    // refused action leaves the selection as it was.
+    let select_created = use_mut_ref(|| None::<BlockId>);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -587,6 +590,29 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     {
         let selection = selection.clone();
         use_effect_with((*path).clone(), move |_| selection.set(Selection::Nothing));
+    }
+    // Select a block an action created, once it is in the shown system.
+    {
+        let (selection, select_created, model, path) = (
+            selection.clone(),
+            select_created.clone(),
+            props.model.clone(),
+            (*path).clone(),
+        );
+        // Every render: success and refusal both re-render, so the request
+        // never outlives its action (and a later block reusing its SID is
+        // not selected by mistake).
+        use_effect(move || {
+            let created = select_created.borrow_mut().take();
+            let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+            if let Some(id) = created.filter(|id| {
+                model
+                    .system_at(&refs)
+                    .is_some_and(|s| s.block(id).is_some())
+            }) {
+                selection.set(Selection::Blocks(vec![id.0]));
+            }
+        });
     }
 
     // Wheel zoom around the cursor. Registered by hand so the listener is
@@ -1187,10 +1213,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
         let annotations: Vec<Annotation> =
             system.map(|s| s.annotations.clone()).unwrap_or_default();
-        let (clipboard, model, on_error) = (
+        let (clipboard, model, on_error, select_created) = (
             clipboard.clone(),
             props.model.clone(),
             props.on_error.clone(),
+            select_created.clone(),
         );
         Callback::from(move |e: KeyboardEvent| {
             let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
@@ -1290,6 +1317,41 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 selection.set(Selection::Blocks(
                     blocks.iter().map(|b| b.id.0.clone()).collect(),
                 ));
+                return;
+            }
+            // Expand a lone selected subsystem into its parent (Ctrl+Shift+G).
+            if command && key == "g" && e.shift_key() {
+                if let [id] = selection.blocks() {
+                    e.prevent_default();
+                    on_edit.emit(Edit::ExpandSubsystem {
+                        system: system_ref.clone(),
+                        id: BlockId(id.clone()),
+                    });
+                    selection.set(Selection::Nothing);
+                }
+                return;
+            }
+            // Group the selected blocks into a new subsystem (Ctrl+G), named
+            // as Simulink names one, and select it.
+            if command && key == "g" && !selection.blocks().is_empty() {
+                e.prevent_default();
+                let Some(sid) = unlinked_model::edit::next_sid(&model) else {
+                    return;
+                };
+                let names: std::collections::HashSet<&str> =
+                    blocks.iter().map(|b| b.name.as_str()).collect();
+                let name = std::iter::once("Subsystem".to_string())
+                    .chain((1..).map(|i| format!("Subsystem{i}")))
+                    .find(|n| !names.contains(n.as_str()))
+                    .expect("some suffix is free");
+                let id = BlockId(sid.to_string());
+                *select_created.borrow_mut() = Some(id.clone());
+                on_edit.emit(Edit::CreateSubsystem {
+                    system: system_ref.clone(),
+                    ids: selection.blocks().iter().cloned().map(BlockId).collect(),
+                    id,
+                    name,
+                });
                 return;
             }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
@@ -1911,6 +1973,22 @@ fn inspector(props: &InspectorProps) -> Html {
         };
         html! { <button onclick={Callback::from(move |_: MouseEvent| on_open.emit(name.clone()))}>{ label }</button> }
     });
+    // Expanding is offered for any subsystem; the edit refuses ones it
+    // cannot flatten faithfully and says why.
+    let expand = props
+        .on_edit
+        .clone()
+        .filter(|_| b.subsystem.is_some() && props.chart.is_none())
+        .map(|on_edit| {
+            let (system, id) = (props.system.clone(), b.id.clone());
+            let onclick = Callback::from(move |_: MouseEvent| {
+                on_edit.emit(Edit::ExpandSubsystem {
+                    system: system.clone(),
+                    id: id.clone(),
+                })
+            });
+            html! { <button {onclick} title="Ctrl+Shift+G">{ "Expand subsystem" }</button> }
+        });
     let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
     let script = props.chart.as_ref().and_then(|c| c.script.clone());
     // A value cell: editable input when editing, code otherwise. Changes
@@ -1984,6 +2062,7 @@ fn inspector(props: &InspectorProps) -> Html {
             { title }
             <div class="muted">{ format!("{kind} · SID {}", b.id) }</div>
             { for open }
+            { for expand }
             { for delete }
             if let Some(script) = script {
                 <h4>{ "MATLAB code" }</h4>

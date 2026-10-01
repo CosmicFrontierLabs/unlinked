@@ -94,13 +94,31 @@ pub fn model_editor(props: &EditorProps) -> Html {
     }
 
     let on_edit = {
-        let (pending, redo_stack, working, error) = (
+        let (pending, redo_stack, working, error, base) = (
             pending.clone(),
             redo_stack.clone(),
             working.clone(),
             error.clone(),
+            base.clone(),
         );
         Callback::from(move |group: Vec<Edit>| {
+            // Grouping and expanding move raw file records the IR does not
+            // model, so the file may refuse what the preview accepts: try
+            // saving first, so a refusal shows now rather than at Save.
+            let hierarchy = group.iter().any(|e| {
+                matches!(
+                    e,
+                    Edit::CreateSubsystem { .. } | Edit::ExpandSubsystem { .. }
+                )
+            });
+            if hierarchy {
+                let mut all = pending.concat();
+                all.extend(group.iter().cloned());
+                if let Err(e) = unlinked_import::patch::apply_edits(&base.path, &base.bytes, &all) {
+                    error.set(Some(e.to_string()));
+                    return;
+                }
+            }
             let mut next = (**working).clone();
             match apply_batch(&mut next, &group) {
                 Ok(()) => {
@@ -342,8 +360,16 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     Err(e) => return error.set(Some(e)),
                 };
                 // The edits keep their IDs from the old base; they only
-                // carry over if every one still applies to the new version.
-                match replay(&latest.model, &pending.concat()) {
+                // carry over if every one still applies to the new version,
+                // in its file as well as its IR (the file can refuse what
+                // the IR accepts, e.g. when grouping or expanding).
+                let edits = pending.concat();
+                let replayed = replay(&latest.model, &edits).and_then(|model| {
+                    unlinked_import::patch::apply_edits(&latest.path, &latest.bytes, &edits)
+                        .map(|_| model)
+                        .map_err(|e| e.to_string())
+                });
+                match replayed {
                     Ok(model) => {
                         error.set(Some(format!(
                             "Your {} edit{} now apply on top of v{}. Review, then save.",
@@ -383,7 +409,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
         html! {
             <div class="edit-bar editing">
                 <strong>{ format!("Editing v{}", base.version) }</strong>
-                <span class="muted">{ "Drag on empty space or Shift-click to select; Ctrl+C/Ctrl+V copies, Ctrl+R rotates, Ctrl+I flips, Delete removes; middle-drag pans." }</span>
+                <span class="muted">{ "Drag on empty space or Shift-click to select; Ctrl+C/Ctrl+V copies, Ctrl+G groups into a subsystem (Ctrl+Shift+G expands), Ctrl+R rotates, Ctrl+I flips, Delete removes; middle-drag pans." }</span>
                 <span class="spacer" />
                 <span>{ format!("{count} change{}", if count == 1 { "" } else { "s" }) }</span>
                 <button onclick={undo.reform(|_: MouseEvent| ())} disabled={count == 0 || *busy} title="Ctrl+Z">{ "Undo" }</button>
