@@ -17,6 +17,8 @@ pub struct Wire {
     pub arrow: Option<(Point, (f64, f64))>,
     /// Missing source or destination (drawn as a dashed, red line).
     pub dangling: bool,
+    /// The port this wire ends at, if it is a leaf of the line.
+    pub dst: Option<Endpoint>,
 }
 
 pub struct RoutedLine {
@@ -160,6 +162,7 @@ fn emit(
             points: path,
             dangling: incomplete || (geometry.is_none() && branches.is_empty()),
             arrow,
+            dst: dst.clone(),
         });
     }
 }

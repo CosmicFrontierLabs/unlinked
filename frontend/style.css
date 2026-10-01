@@ -616,6 +616,68 @@ a.compare {
     cursor: move;
 }
 
+.diagram.editing circle.port-hit {
+    cursor: crosshair;
+}
+
+.diagram.editing circle.port-hit:hover {
+    fill: rgba(122, 162, 247, 0.45);
+}
+
+.diagram.editing polyline.wire-hit {
+    cursor: pointer;
+}
+
+.diagram.editing polyline.wire-hit:hover {
+    stroke: rgba(122, 162, 247, 0.3);
+}
+
+.diagram .canvas svg.wire-preview {
+    position: absolute;
+    left: 0;
+    top: 0;
+    pointer-events: none;
+    overflow: visible;
+}
+
+.wire-preview line {
+    stroke: var(--orange);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 3;
+}
+
+.palette h3 {
+    margin: 1rem 0 0.25rem;
+}
+
+.palette h4 {
+    margin: 0.6rem 0 0.2rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-transform: uppercase;
+}
+
+.palette .hint {
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+
+.palette ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.palette-block {
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    cursor: grab;
+}
+
+.palette-block:hover {
+    background: var(--bg);
+}
+
 .diagram:focus {
     outline: none;
 }

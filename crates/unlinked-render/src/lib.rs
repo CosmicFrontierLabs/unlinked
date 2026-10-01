@@ -37,6 +37,10 @@ pub struct RenderOptions {
     pub font_family: String,
     /// Largest font used for icon text.
     pub max_icon_font: f64,
+    /// Add invisible pointer targets for editing: `circle.port-hit` on every
+    /// signal port (`data-sid`, `data-kind`, `data-index`) and a wide
+    /// `polyline.wire-hit` over each wire ending at a port (`data-dst-*`).
+    pub hit_targets: bool,
 }
 
 impl Default for RenderOptions {
@@ -46,6 +50,7 @@ impl Default for RenderOptions {
             margin: 30.0,
             font_family: "Helvetica, Arial, sans-serif".into(),
             max_icon_font: 12.0,
+            hit_targets: false,
         }
     }
 }
@@ -225,6 +230,13 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
         }
     }
     s.close("g");
+
+    if opts.hit_targets {
+        draw_hit_targets(&mut s, sys, &routed);
+        if s.elements() > MAX_ELEMENTS {
+            return Err(RenderError::TooLarge);
+        }
+    }
 
     s.close("svg");
     if s.elements() > MAX_ELEMENTS {
@@ -533,6 +545,85 @@ fn label_layout(r: &route::RoutedLine) -> Option<TextBox> {
     })
 }
 
+/// Signal port kinds that can be wired in the editor.
+const WIRABLE: [PortKind; 7] = [
+    PortKind::In,
+    PortKind::Out,
+    PortKind::Enable,
+    PortKind::Trigger,
+    PortKind::State,
+    PortKind::IfAction,
+    PortKind::Reset,
+];
+
+/// Transparent pointer targets drawn above everything else; see
+/// [`RenderOptions::hit_targets`].
+fn draw_hit_targets(s: &mut Svg, sys: &System, routed: &[route::RoutedLine]) {
+    let endpoint_attrs = |prefix: &str, ep: &unlinked_model::Endpoint| {
+        [
+            (format!("data-{prefix}sid"), ep.block.0.clone()),
+            (
+                format!("data-{prefix}kind"),
+                ep.port.kind.token().to_string(),
+            ),
+            (format!("data-{prefix}index"), ep.port.index.to_string()),
+        ]
+    };
+    s.open(
+        "g",
+        &[
+            ("class", "wire-hits".into()),
+            ("fill", "none".into()),
+            ("stroke", "transparent".into()),
+            ("stroke-width", "9".into()),
+        ],
+    );
+    for w in routed.iter().flat_map(|r| &r.wires) {
+        let Some(dst) = &w.dst else {
+            continue;
+        };
+        let pts: Vec<(f64, f64)> = w.points.iter().map(|p| (p.x, p.y)).collect();
+        let data = endpoint_attrs("dst-", dst);
+        let mut attrs = vec![
+            ("class", "wire-hit".to_string()),
+            ("points", points_attr(&pts)),
+        ];
+        attrs.extend(data.iter().map(|(k, v)| (k.as_str(), v.clone())));
+        s.leaf("polyline", &attrs);
+    }
+    s.close("g");
+
+    s.open(
+        "g",
+        &[
+            ("class", "port-hits".into()),
+            ("fill", "transparent".into()),
+        ],
+    );
+    for b in &sys.blocks {
+        for kind in WIRABLE {
+            for index in 1..=b.ports.count(kind).min(MAX_PORT_MARKERS) {
+                let port = PortRef { kind, index };
+                let at = unlinked_model::geometry::port_anchor(b, port);
+                let ep = unlinked_model::Endpoint {
+                    block: b.id.clone(),
+                    port,
+                };
+                let data = endpoint_attrs("", &ep);
+                let mut attrs = vec![
+                    ("class", "port-hit".to_string()),
+                    ("cx", num(at.x)),
+                    ("cy", num(at.y)),
+                    ("r", "5".to_string()),
+                ];
+                attrs.extend(data.iter().map(|(k, v)| (k.as_str(), v.clone())));
+                s.leaf("circle", &attrs);
+            }
+        }
+    }
+    s.close("g");
+}
+
 fn draw_line(s: &mut Svg, r: &route::RoutedLine, label: Option<&TextBox>, pal: &Palette) {
     for w in &r.wires {
         let pts: Vec<(f64, f64)> = w.points.iter().map(|p| (p.x, p.y)).collect();
@@ -730,6 +821,40 @@ mod tests {
             .unwrap();
         let width: f64 = view.split(' ').nth(2).unwrap().parse().unwrap();
         assert!(width > 100.0 * NAME_FONT * 0.6, "viewBox {view}");
+    }
+
+    #[test]
+    fn hit_targets_name_ports_and_wire_destinations() {
+        let mut b = block("b", Rect::new(100.0, 0.0, 140.0, 40.0));
+        b.id = "2".into();
+        let ep = |id: &str, kind| unlinked_model::Endpoint {
+            block: id.into(),
+            port: PortRef { kind, index: 1 },
+        };
+        let sys = System {
+            blocks: vec![block("a", Rect::new(0.0, 0.0, 40.0, 40.0)), b],
+            lines: vec![unlinked_model::Line {
+                src: Some(ep("1", PortKind::Out)),
+                dst: Some(ep("2", PortKind::In)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let plain = render_system_svg(&sys, &RenderOptions::default()).unwrap();
+        assert!(!plain.contains("port-hit") && !plain.contains("wire-hit"));
+        let opts = RenderOptions {
+            hit_targets: true,
+            ..Default::default()
+        };
+        let svg = render_system_svg(&sys, &opts).unwrap();
+        assert_eq!(svg.matches("class=\"port-hit\"").count(), 4, "{svg}");
+        assert!(svg.contains(
+            "class=\"port-hit\" cx=\"145\" cy=\"20\" r=\"5\" data-sid=\"2\" data-kind=\"out\" data-index=\"1\""
+        ), "{svg}");
+        assert!(
+            svg.contains("data-dst-sid=\"2\" data-dst-kind=\"in\" data-dst-index=\"1\""),
+            "{svg}"
+        );
     }
 
     #[test]

@@ -7,13 +7,18 @@
 
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
+use unlinked_model::catalog;
 use unlinked_model::diff::{BlockChange, ModelDiff};
 use unlinked_model::edit::{system_ids, touches, DisconnectPolicy, Edit, SystemRef};
 use unlinked_model::scope::ScopeConfig;
-use unlinked_model::{Block, BlockId, Chart, Line, Model, Rect, System};
+use unlinked_model::{
+    Block, BlockId, Chart, Endpoint, Line, Model, Point, PortKind, PortRef, Rect, System,
+};
 use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
-use web_sys::{Element, HtmlElement, HtmlInputElement, KeyboardEvent, MouseEvent, WheelEvent};
+use web_sys::{
+    DragEvent, Element, HtmlElement, HtmlInputElement, KeyboardEvent, MouseEvent, WheelEvent,
+};
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq)]
@@ -52,8 +57,78 @@ enum Drag {
         offset: (f64, f64),
         moved: bool,
     },
+    /// Dragging a new connection out of port `from`.
+    Wire { from: Endpoint },
     /// Released; kept so the following click knows whether it was a drag.
     Ended { moved: bool },
+}
+
+/// `dataTransfer` type carrying a palette block's catalog key.
+const PALETTE_DRAG: &str = "application/x-unlinked-block";
+
+/// Whether a line may start at a port of this kind.
+fn is_source(kind: PortKind) -> bool {
+    matches!(kind, PortKind::Out | PortKind::State)
+}
+
+/// The endpoint an element's `data-{prefix}sid/kind/index` attributes name.
+fn endpoint_of(el: &Element, prefix: &str) -> Option<Endpoint> {
+    let attr = |name: &str| el.get_attribute(&format!("data-{prefix}{name}"));
+    Some(Endpoint {
+        block: BlockId(attr("sid")?),
+        port: PortRef {
+            kind: PortKind::from_token(&attr("kind")?)?,
+            index: attr("index")?.parse().ok()?,
+        },
+    })
+}
+
+/// The `viewBox` of a rendered SVG: origin and size in diagram units.
+fn view_box(svg: &str) -> Option<[f64; 4]> {
+    let vb = svg.split("viewBox=\"").nth(1)?.split('"').next()?;
+    let v: Vec<f64> = vb.split(' ').filter_map(|s| s.parse().ok()).collect();
+    v.try_into().ok()
+}
+
+/// Diagram coordinates of a pointer event over the container.
+fn to_diagram(e: &MouseEvent, container: &NodeRef, view: &View, svg: &str) -> Option<Point> {
+    let rect = container.cast::<HtmlElement>()?.get_bounding_client_rect();
+    let [vx, vy, ..] = view_box(svg)?;
+    Some(Point::new(
+        (e.client_x() as f64 - rect.left() - view.x) / view.scale + vx,
+        (e.client_y() as f64 - rect.top() - view.y) / view.scale + vy,
+    ))
+}
+
+/// `base`, or `base` with the smallest number appended that no block in
+/// `sys` is named, as Simulink names copies.
+fn unique_name(sys: &System, base: &str) -> String {
+    let taken = |n: &str| sys.blocks.iter().any(|b| b.name == n);
+    if !taken(base) {
+        return base.to_string();
+    }
+    (1..)
+        .map(|i| format!("{base}{i}"))
+        .find(|n| !taken(n))
+        .expect("some suffix is free")
+}
+
+/// The edit adding palette block `type_key` centered at `at`.
+fn add_block_at(model: &Model, system: &SystemRef, type_key: &str, at: Point) -> Option<Edit> {
+    let descriptor = catalog::find(type_key)?;
+    let names = unlinked_model::edit::system_names(model, system)?;
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let sys = model.system_at(&refs)?;
+    let snap = |v: f64| (v / SNAP).round() * SNAP;
+    let [w, h] = descriptor.default_size;
+    let (left, top) = (snap(at.x - w / 2.0), snap(at.y - h / 2.0));
+    Some(Edit::AddBlock {
+        system: system.clone(),
+        id: BlockId(unlinked_model::edit::next_sid(model)?.to_string()),
+        block_type: type_key.into(),
+        name: unique_name(sys, descriptor.label),
+        position: Rect::new(left, top, left + w, top + h),
+    })
 }
 
 /// CSS outlining changed blocks in the system at `path`: added green,
@@ -130,9 +205,7 @@ impl Reducible for View {
 
 /// Width and height from the `viewBox` of a rendered SVG.
 fn svg_size(svg: &str) -> Option<(f64, f64)> {
-    let vb = svg.split("viewBox=\"").nth(1)?.split('"').next()?;
-    let v: Vec<f64> = vb.split(' ').filter_map(|s| s.parse().ok()).collect();
-    (v.len() == 4).then(|| (v[2], v[3]))
+    view_box(svg).map(|[_, _, w, h]| (w, h))
 }
 
 /// Fit the diagram inside the container, enlarging small diagrams at most
@@ -237,6 +310,10 @@ fn css_string(s: &str) -> String {
 pub fn diagram_view(props: &DiagramProps) -> Html {
     let path = use_state(Vec::<String>::new);
     let selected = use_state(|| None::<String>);
+    // A selected connection, by the input it drives.
+    let selected_wire = use_state(|| None::<Endpoint>);
+    // A connection being dragged: from its first port to the pointer.
+    let wire_preview = use_state(|| None::<(Point, Point)>);
     let theme = use_state(|| Theme::Dark);
     let view = use_reducer(|| View {
         scale: 1.0,
@@ -251,12 +328,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         .unwrap_or_else(|| AttrValue::from(format!("{:p}", Rc::as_ptr(&props.model))));
 
     let model = props.model.clone();
+    let editable = props.on_edit.is_some();
     let rendered = use_memo(
-        (Rc::as_ptr(&props.model) as usize, (*path).clone(), *theme),
-        move |(_, path, theme)| {
+        (
+            Rc::as_ptr(&props.model) as usize,
+            (*path).clone(),
+            *theme,
+            editable,
+        ),
+        move |(_, path, theme, editable)| {
             let refs: Vec<&str> = path.iter().map(String::as_str).collect();
             let opts = RenderOptions {
                 theme: *theme,
+                hit_targets: *editable,
                 ..Default::default()
             };
             render(&model, &refs, &opts)
@@ -275,6 +359,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
             }
         });
+    }
+
+    // A selected connection belongs to the level it was picked on.
+    {
+        let selected_wire = selected_wire.clone();
+        use_effect_with((*path).clone(), move |_| selected_wire.set(None));
     }
 
     // Wheel zoom around the cursor. Registered by hand so the listener is
@@ -320,11 +410,25 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .collect()
             })
             .unwrap_or_default();
+        let (container, rendered, wire_preview) =
+            (container.clone(), rendered.clone(), wire_preview.clone());
         Callback::from(move |e: MouseEvent| {
             if e.button() != 0 {
                 return;
             }
             let (sx, sy) = (e.client_x() as f64, e.client_y() as f64);
+            let port = on_edit
+                .as_ref()
+                .and_then(|_| endpoint_of(&closest(e.target(), "circle.port-hit")?, ""));
+            if let Some(from) = port {
+                let start = (*rendered)
+                    .as_ref()
+                    .ok()
+                    .and_then(|svg| to_diagram(&e, &container, &view, svg));
+                wire_preview.set(start.map(|p| (p, p)));
+                *drag.borrow_mut() = Some(Drag::Wire { from });
+                return;
+            }
             let grabbed = on_edit.as_ref().and_then(|_| {
                 let group = block_group(e.target())?;
                 let id = group.get_attribute("data-sid")?;
@@ -352,9 +456,20 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onmousemove = {
         let (drag, view) = (drag.clone(), view.clone());
+        let (container, rendered, wire_preview) =
+            (container.clone(), rendered.clone(), wire_preview.clone());
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
             match drag.borrow_mut().as_mut() {
+                Some(Drag::Wire { .. }) => {
+                    let to = (*rendered)
+                        .as_ref()
+                        .ok()
+                        .and_then(|svg| to_diagram(&e, &container, &view, svg));
+                    if let (Some((from, _)), Some(to)) = (*wire_preview, to) {
+                        wire_preview.set(Some((from, to)));
+                    }
+                }
                 Some(Drag::Pan {
                     sx,
                     sy,
@@ -398,9 +513,34 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let end_drag = {
         let (drag, on_edit, system_ref) = (drag.clone(), props.on_edit.clone(), system_ref.clone());
-        Callback::from(move |_: MouseEvent| {
+        let wire_preview = wire_preview.clone();
+        Callback::from(move |e: MouseEvent| {
             let mut d = drag.borrow_mut();
             let moved = match d.take() {
+                // Dropped on a port of the opposite direction: connect,
+                // whichever end the drag started from.
+                Some(Drag::Wire { from }) => {
+                    wire_preview.set(None);
+                    let to =
+                        closest(e.target(), "circle.port-hit").and_then(|c| endpoint_of(&c, ""));
+                    let pair = match to {
+                        Some(to) if is_source(from.port.kind) && !is_source(to.port.kind) => {
+                            Some((from, to))
+                        }
+                        Some(to) if !is_source(from.port.kind) && is_source(to.port.kind) => {
+                            Some((to, from))
+                        }
+                        _ => None,
+                    };
+                    if let (Some((src, dst)), Some(on_edit)) = (pair, &on_edit) {
+                        on_edit.emit(Edit::Connect {
+                            system: system_ref.clone(),
+                            src,
+                            dst,
+                        });
+                    }
+                    true
+                }
                 Some(Drag::Pan { moved, .. }) => moved,
                 Some(Drag::Block {
                     id,
@@ -431,29 +571,88 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onclick = {
         let drag = drag.clone();
-        let selected = selected.clone();
+        let (selected, selected_wire) = (selected.clone(), selected_wire.clone());
         Callback::from(move |e: MouseEvent| {
             let moved = matches!(drag.borrow_mut().take(), Some(Drag::Ended { moved: true }));
             if moved {
                 return;
             }
-            selected.set(block_group(e.target()).and_then(|g| g.get_attribute("data-sid")));
+            let wire =
+                closest(e.target(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"));
+            selected.set(match wire {
+                Some(_) => None,
+                None => block_group(e.target()).and_then(|g| g.get_attribute("data-sid")),
+            });
+            selected_wire.set(wire);
         })
     };
     let onkeydown = {
-        let (selected, on_edit, system_ref) =
-            (selected.clone(), props.on_edit.clone(), system_ref.clone());
+        let (selected, selected_wire, on_edit, system_ref) = (
+            selected.clone(),
+            selected_wire.clone(),
+            props.on_edit.clone(),
+            system_ref.clone(),
+        );
         let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
         Callback::from(move |e: KeyboardEvent| {
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
                 return;
             }
-            if let (Some(on_edit), Some(sid)) = (&on_edit, (*selected).clone()) {
+            let Some(on_edit) = &on_edit else {
+                return;
+            };
+            if let Some(dst) = (*selected_wire).clone() {
+                e.prevent_default();
+                on_edit.emit(Edit::Disconnect {
+                    system: system_ref.clone(),
+                    dst,
+                });
+                selected_wire.set(None);
+            } else if let Some(sid) = (*selected).clone() {
                 e.prevent_default();
                 if let Some(edit) = confirm_delete(&system_ref, BlockId(sid), &lines) {
                     on_edit.emit(edit);
                     selected.set(None);
                 }
+            }
+        })
+    };
+    // Palette blocks are dragged in with HTML drag and drop.
+    let ondragover = {
+        let editable = props.on_edit.is_some();
+        Callback::from(move |e: DragEvent| {
+            let palette = e
+                .data_transfer()
+                .is_some_and(|d| d.types().includes(&PALETTE_DRAG.into(), 0));
+            if editable && palette {
+                e.prevent_default();
+            }
+        })
+    };
+    let ondrop = {
+        let (on_edit, system_ref, model) = (
+            props.on_edit.clone(),
+            system_ref.clone(),
+            props.model.clone(),
+        );
+        let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
+        Callback::from(move |e: DragEvent| {
+            let Some(on_edit) = &on_edit else {
+                return;
+            };
+            let Some(type_key) = e
+                .data_transfer()
+                .and_then(|d| d.get_data(PALETTE_DRAG).ok())
+            else {
+                return;
+            };
+            e.prevent_default();
+            let at = (*rendered)
+                .as_ref()
+                .ok()
+                .and_then(|svg| to_diagram(&e, &container, &view, svg));
+            if let Some(edit) = at.and_then(|at| add_block_at(&model, &system_ref, &type_key, at)) {
+                on_edit.emit(edit);
             }
         })
     };
@@ -549,14 +748,38 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             )
         })
         .unwrap_or_default();
+    let wire_highlight = selected_wire
+        .as_ref()
+        .map(|dst| {
+            format!(
+                ".diagram polyline.wire-hit[data-dst-sid=\"{}\"][data-dst-kind=\"{}\"][data-dst-index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
+                css_string(&dst.block.0),
+                dst.port.kind.token(),
+                dst.port.index
+            )
+        })
+        .unwrap_or_default();
     let highlight = match &props.diff {
-        Some(d) => diff_css(d, &path, system) + &highlight,
-        None => highlight,
+        Some(d) => diff_css(d, &path, system) + &highlight + &wire_highlight,
+        None => highlight + &wire_highlight,
     };
 
     let canvas = match rendered.as_ref() {
         Ok(svg) => Html::from_html_unchecked(AttrValue::from(svg.clone())),
         Err(e) => html! { <div class="error">{ e }</div> },
+    };
+    // The connection being dragged, drawn over the diagram in its units.
+    let preview = match (
+        *wire_preview,
+        (*rendered).as_ref().ok().and_then(|s| view_box(s)),
+    ) {
+        (Some((a, b)), Some([vx, vy, vw, vh])) => html! {
+            <svg class="wire-preview" viewBox={format!("{vx} {vy} {vw} {vh}")}
+                width={vw.to_string()} height={vh.to_string()}>
+                <line x1={a.x.to_string()} y1={a.y.to_string()} x2={b.x.to_string()} y2={b.y.to_string()} />
+            </svg>
+        },
+        _ => html! {},
     };
     let v = *view;
     let transform = format!(
@@ -580,13 +803,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         let selected = selected.clone();
                         move |p: Vec<String>| { path.set(p); selected.set(None); }
                     })} />
+                    if props.on_edit.is_some() {
+                        <BlockPalette />
+                    }
                 </aside>
                 <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"))}
                     ref={container} tabindex="0"
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={end_drag}
-                    {onclick} {ondblclick} {onkeydown}>
+                    {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop}>
                     <style>{ highlight }</style>
-                    <div class="canvas" style={transform}>{ canvas }</div>
+                    <div class="canvas" style={transform}>{ canvas }{ preview }</div>
                 </div>
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
@@ -654,6 +880,40 @@ fn system_tree(props: &TreeProps) -> Html {
                 { &props.model.name }
             </a>
             { level(&props.model.root, &[], props) }
+        </div>
+    }
+}
+
+/// Native blocks that can be dragged onto the diagram, by category.
+#[function_component(BlockPalette)]
+fn block_palette() -> Html {
+    let groups = catalog::PALETTE_CATEGORIES.iter().map(|category| {
+        let items = catalog::blocks_in_category(category).map(|b| {
+            let type_key = b.type_key;
+            let ondragstart = Callback::from(move |e: DragEvent| {
+                if let Some(d) = e.data_transfer() {
+                    let _ = d.set_data(PALETTE_DRAG, type_key);
+                    d.set_effect_allowed("copy");
+                }
+            });
+            html! {
+                <li class="palette-block" draggable="true" {ondragstart} title={b.type_key}>
+                    { b.label }
+                </li>
+            }
+        });
+        html! {
+            <>
+                <h4>{ *category }</h4>
+                <ul>{ for items }</ul>
+            </>
+        }
+    });
+    html! {
+        <div class="palette">
+            <h3>{ "Blocks" }</h3>
+            <p class="hint">{ "Drag onto the diagram. Drag from a port to another to connect; select a line and press Delete to remove it." }</p>
+            { for groups }
         </div>
     }
 }
