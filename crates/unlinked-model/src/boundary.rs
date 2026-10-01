@@ -90,20 +90,45 @@ fn numbered_ports(sys: &System, block_type: &str) -> Result<u32, EditError> {
 
 /// The block `system` is the inside of, checked to be a plain subsystem.
 fn parent_block<'a>(model: &'a Model, system: &[BlockId]) -> Result<&'a Block, EditError> {
-    let (id, outer) = system.split_last().expect("nested system");
-    let block = system_at(model, outer)
-        .and_then(|s| s.block(id))
-        .ok_or_else(|| EditError::NoSystem(system.to_vec()))?;
-    let flag = |name: &str| block.param(name) == Some("on");
-    if block.block_type != "SubSystem"
-        || block.mask.is_some()
-        || block.library_source.is_some()
-        || flag("TreatAsAtomicUnit")
-        || flag("Variant")
-        || block.stateflow_type().is_some()
-    {
+    // Every subsystem down to the edited one must be ordinary: content inside
+    // masked, linked, variant or chart blocks is not the file's to change.
+    let mut sys = &model.root;
+    let mut block = None;
+    for id in system {
+        let b = sys
+            .block(id)
+            .ok_or_else(|| EditError::NoSystem(system.to_vec()))?;
+        if b.block_type != "SubSystem"
+            || b.mask.is_some()
+            || b.library_source.is_some()
+            || b.param("Variant") == Some("on")
+            || b.stateflow_type().is_some()
+        {
+            return Err(refuse(
+                "only port blocks of plain subsystems (unmasked, unlinked, non-variant, outside charts) can change",
+            ));
+        }
+        sys = b
+            .subsystem
+            .as_deref()
+            .ok_or_else(|| EditError::NoSystem(system.to_vec()))?;
+        block = Some(b);
+    }
+    let block = block.expect("nested system");
+    // The subsystem itself must also be virtual and unconditional, with no
+    // sample time of its own.
+    let ports = &block.ports;
+    let conditional = ports.enable + ports.trigger + ports.ifaction + ports.reset + ports.state > 0
+        || sys
+            .blocks
+            .iter()
+            .any(|b| OTHER_PORT_BLOCKS.contains(&b.block_type.as_str()));
+    let sample_time = block
+        .param("SystemSampleTime")
+        .is_some_and(|t| t.trim() != "-1");
+    if block.param("TreatAsAtomicUnit") == Some("on") || conditional || sample_time {
         return Err(refuse(
-            "only plain (unmasked, unlinked, non-atomic, non-variant) subsystems can change ports",
+            "only virtual, unconditional subsystems without their own sample time can change ports",
         ));
     }
     let names = system_names(model, system).ok_or_else(|| EditError::NoSystem(system.to_vec()))?;
@@ -318,29 +343,29 @@ pub(crate) fn apply_remap(model: &mut Model, remap: &BoundaryRemap) -> Result<()
     if cut && remap.disconnect == DisconnectPolicy::Reject {
         return Err(EditError::Connected(remap.parent.clone()));
     }
-    let renumber = |ep: &mut Option<Endpoint>| {
+    // Renumber an endpoint on the subsystem, or cut it if its port goes;
+    // true when cut.
+    let renumber = |ep: &mut Option<Endpoint>| -> bool {
         if let Some(e) = ep.as_mut().filter(|e| on_parent(e) && e.port.index >= 1) {
             match new_index(e) {
                 Some(i) => e.port.index = i,
-                None => *ep = None,
-            }
-        }
-    };
-    sys.lines.retain_mut(|line| {
-        match remap.kind {
-            PortKind::Out => {
-                renumber(&mut line.src);
-                if line.src.is_none() {
-                    return false;
+                None => {
+                    *ep = None;
+                    return true;
                 }
             }
-            _ => {
-                renumber(&mut line.dst);
-                renumber_branches(&mut line.branches, &renumber);
-                prune_empty(&mut line.branches);
-            }
         }
-        line.src.is_none() || line.dst.is_some() || !line.branches.is_empty()
+        false
+    };
+    // Only what this edit cuts is removed: unrelated wiring, including lines
+    // that were already dangling, stays as it was.
+    sys.lines.retain_mut(|line| match remap.kind {
+        PortKind::Out => !renumber(&mut line.src),
+        _ => {
+            let own = renumber(&mut line.dst);
+            let below = cut_branches(&mut line.branches, &renumber);
+            !((own || below) && line.dst.is_none() && line.branches.is_empty())
+        }
     });
     let parent = sys
         .blocks
@@ -365,18 +390,17 @@ fn each_destination(
     }
 }
 
-fn renumber_branches(branches: &mut [Branch], f: &dyn Fn(&mut Option<Endpoint>)) {
-    for b in branches {
-        f(&mut b.dst);
-        renumber_branches(&mut b.branches, f);
-    }
-}
-
-fn prune_empty(branches: &mut Vec<Branch>) {
-    for b in branches.iter_mut() {
-        prune_empty(&mut b.branches);
-    }
-    branches.retain(|b| b.dst.is_some() || !b.branches.is_empty());
+/// Renumber or cut the destinations below with `f`, dropping only branches
+/// that a cut leaves leading nowhere. Returns whether anything was cut.
+fn cut_branches(branches: &mut Vec<Branch>, f: &dyn Fn(&mut Option<Endpoint>) -> bool) -> bool {
+    let mut cut = false;
+    branches.retain_mut(|b| {
+        let own = f(&mut b.dst);
+        let below = cut_branches(&mut b.branches, f);
+        cut |= own || below;
+        !((own || below) && b.dst.is_none() && b.branches.is_empty())
+    });
+    cut
 }
 
 #[cfg(test)]
@@ -536,6 +560,78 @@ mod tests {
         assert!(cuts_outside(&m, &remap(&m)));
         m.root.lines.remove(0);
         assert!(!cuts_outside(&m, &remap(&m)));
+    }
+
+    /// Only the connections an edit cuts are removed (from review).
+    #[test]
+    fn unrelated_dangling_lines_are_preserved() {
+        let mut m = model();
+        m.root.lines.push(Line {
+            dst: Some(ep("3", PortKind::In, 1)),
+            ..Default::default()
+        });
+        m.root.lines.push(Line {
+            src: Some(ep("1", PortKind::Out, 1)),
+            branches: vec![crate::Branch::default()],
+            ..Default::default()
+        });
+        let before = m.root.lines.clone();
+        let sid = crate::edit::next_sid(&m).unwrap().to_string();
+        let add = Edit::AddBlock {
+            system: vec!["10".into()],
+            id: sid.as_str().into(),
+            block_type: "Outport".into(),
+            name: "Out2".into(),
+            position: Rect::new(0.0, 100.0, 30.0, 130.0),
+        };
+        apply_batch(&mut m, &[add]).unwrap();
+        assert_eq!(m.root.lines, before);
+        // Cutting input 1 leaves the dangling lines alone too.
+        apply_batch(&mut m, &[delete("11", DisconnectPolicy::Disconnect)]).unwrap();
+        assert_eq!(&m.root.lines[2..], &before[3..]);
+    }
+
+    /// Conditional, sample-timed and nested-in-unsafe subsystems are refused
+    /// (from review).
+    #[test]
+    fn only_plain_subsystems_and_ancestors_qualify() {
+        let mut conditional = model();
+        conditional.root.blocks[2].ports.enable = 1;
+        conditional.root.blocks[2]
+            .subsystem
+            .as_mut()
+            .unwrap()
+            .blocks
+            .push(block("20", "EnablePort", "en", None, [0, 0]));
+        assert!(boundary_remap(&conditional, &delete("11", DisconnectPolicy::Disconnect)).is_err());
+        let mut timed = model();
+        timed.root.blocks[2]
+            .parameters
+            .insert("SystemSampleTime".into(), "0.1".into());
+        assert!(boundary_remap(&timed, &delete("11", DisconnectPolicy::Disconnect)).is_err());
+        timed.root.blocks[2]
+            .parameters
+            .insert("SystemSampleTime".into(), "-1".into());
+        assert!(boundary_remap(&timed, &delete("11", DisconnectPolicy::Disconnect)).is_ok());
+        // s inside a masked outer subsystem.
+        let inner = model().root.blocks[2].clone();
+        let mut outer = block("30", "SubSystem", "outer", None, [0, 0]);
+        outer.mask = Some(Mask::default());
+        outer.subsystem = Some(Box::new(System {
+            blocks: vec![inner],
+            ..Default::default()
+        }));
+        let mut nested = model();
+        nested.root.blocks.push(outer);
+        let edit = Edit::DeleteBlock {
+            system: vec!["30".into(), "10".into()],
+            id: "11".into(),
+            disconnect: DisconnectPolicy::Disconnect,
+        };
+        assert!(matches!(
+            boundary_remap(&nested, &edit),
+            Err(EditError::SubsystemPorts(_))
+        ));
     }
 
     #[test]

@@ -760,13 +760,39 @@ fn apply_boundary(file: &mut MdlFile, boundary: &Boundary) -> Result<(), ImportE
         (port.kind == remap.kind).then_some(port.index)
     };
     let new_index = |old: u32| remap.map.get(old as usize - 1).copied().flatten();
-    let gone = |s: &Section, _: bool| index_of(s).is_some_and(|i| i >= 1 && new_index(i).is_none());
+    let gone = |s: &Section| index_of(s).is_some_and(|i| i >= 1 && new_index(i).is_none());
     // Connections on removed ports go (the IR already refused them unless
-    // disconnecting); the rest move to their new numbers.
+    // disconnecting) and the rest move to their new numbers. As in the IR,
+    // only what this cuts is removed; other dangling wiring stays.
+    let leads_nowhere = |s: &Section| {
+        DST_FORMS[..2].iter().all(|k| s.prop(k).is_none())
+            && !s.sections().any(|b| b.tag == "Branch")
+    };
+    fn cut(
+        s: &mut Section,
+        gone: &dyn Fn(&Section) -> bool,
+        leads_nowhere: &dyn Fn(&Section) -> bool,
+    ) -> bool {
+        let mut cut_any = gone(s);
+        if cut_any {
+            for key in DST_FORMS {
+                s.remove_prop(key);
+            }
+        }
+        s.items.retain_mut(|item| match item {
+            Item::Section(b) if b.tag == "Branch" => {
+                let below = cut(b, gone, leads_nowhere);
+                cut_any |= below;
+                !(below && leads_nowhere(b))
+            }
+            _ => true,
+        });
+        cut_any
+    }
     sys.items.retain_mut(|item| match item {
         Item::Section(l) if l.tag == "Line" => match remap.kind {
-            PortKind::Out => !gone(l, true),
-            _ => !reaches(l, &gone, true) || prune(l, &gone, true),
+            PortKind::Out => !gone(l),
+            _ => !(cut(l, &gone, &leads_nowhere) && leads_nowhere(l)),
         },
         _ => true,
     });

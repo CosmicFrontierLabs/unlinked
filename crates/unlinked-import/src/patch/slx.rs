@@ -500,11 +500,32 @@ fn apply_boundary(sys: &mut XElem, boundary: &Boundary) -> Result<(), ImportErro
     let new_index = |old: u32| remap.map.get(old as usize - 1).copied().flatten();
     let gone = |v: &str| index_of(v).is_some_and(|i| new_index(i).is_none());
     // Connections on removed ports go (the IR already refused them unless
-    // disconnecting); the rest move to their new numbers.
+    // disconnecting) and the rest move to their new numbers. As in the IR,
+    // only what this cuts is removed; other dangling wiring stays.
+    fn leads_nowhere(e: &XElem) -> bool {
+        e.prop("Dst").is_none() && !e.elements().any(|b| b.name == "Branch")
+    }
+    fn cut(e: &mut XElem, gone: &dyn Fn(&str) -> bool) -> bool {
+        let mut cut_any = false;
+        e.children.retain_mut(|c| match c {
+            XNode::Element(p) if p.name == "P" && p.attr("Name").as_deref() == Some("Dst") => {
+                let hit = gone(&p.text());
+                cut_any |= hit;
+                !hit
+            }
+            XNode::Element(b) if b.name == "Branch" => {
+                let below = cut(b, gone);
+                cut_any |= below;
+                !(below && leads_nowhere(b))
+            }
+            _ => true,
+        });
+        cut_any
+    }
     sys.children.retain_mut(|c| match c {
         XNode::Element(l) if l.name == "Line" => match remap.kind {
             PortKind::Out => !l.prop("Src").is_some_and(|v| gone(&v)),
-            _ => !reaches(l, &gone, true) || prune(l, &gone, true),
+            _ => !(cut(l, &gone) && leads_nowhere(l)),
         },
         _ => true,
     });

@@ -251,6 +251,38 @@ fn deleting_a_wired_port_block_needs_consent_and_updates_the_subsystem() {
     }
 }
 
+/// Cutting a boundary connection removes only what it cuts: a dangling
+/// branch on the same line and an unrelated dangling line stay, in the IR
+/// and in the file alike (from review).
+#[test]
+fn cutting_a_port_leaves_other_dangling_wiring() {
+    let with_dangling = MDL
+        .replace(
+            "      DstBlock \"s\"\n      DstPort 1\n    }",
+            "      DstBlock \"s\"\n      DstPort 1\n      Branch {\n        Points [0, 40]\n      }\n    }",
+        )
+        .replace(
+            "  }\n}\n",
+            "    Line {\n      SrcBlock \"b\"\n      SrcPort 1\n      Points [20, 0]\n    }\n  }\n}\n",
+        );
+    assert_ne!(with_dangling, MDL);
+    let delete = Edit::DeleteBlock {
+        system: vec!["3".into()],
+        id: "4".into(),
+        disconnect: DisconnectPolicy::Disconnect,
+    };
+    let m = roundtrip("m.mdl", with_dangling.as_bytes(), &[delete]);
+    // a's line lost its destination but keeps the dangling branch.
+    let a = m
+        .root
+        .lines
+        .iter()
+        .find(|l| l.src == Some(ep("1", PortKind::Out, 1)))
+        .expect("a's line stays");
+    assert!(a.dst.is_none() && a.branches.len() == 1);
+    assert_eq!(m.root.lines.len(), 4);
+}
+
 #[test]
 fn adding_a_port_block_adds_a_subsystem_port() {
     for (name, bytes) in files() {
