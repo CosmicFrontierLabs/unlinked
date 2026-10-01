@@ -264,7 +264,67 @@ fn set_parameter(block: &mut XElem, name: &str, value: &str) {
 /// Apply an edit to the system element `parent`.
 fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError> {
     let edit = &resolved.edit;
+    if let Edit::AddAnnotation {
+        id, text, position, ..
+    } = edit
+    {
+        let indent = indent_in(parent);
+        let mut a = new_element("Annotation", &indent);
+        a.set_attr("SID", id);
+        a.push_prop("Name", text);
+        a.push_prop("Position", &format_rect(position));
+        let at = after_last(parent, &["Annotation", "Block", "Line", "P"]);
+        insert_child(parent, at, a, &indent);
+        return Ok(());
+    }
+    let annotation = match edit {
+        Edit::MoveAnnotation { target, .. }
+        | Edit::SetAnnotationText { target, .. }
+        | Edit::DeleteAnnotation { target, .. } => Some(target.index),
+        _ => None,
+    };
+    if let Some(index) = annotation {
+        let at = parent
+            .children
+            .iter()
+            .enumerate()
+            .filter_map(|(i, node)| {
+                matches!(node, XNode::Element(a) if a.name == "Annotation").then_some(i)
+            })
+            .nth(index)
+            .ok_or_else(|| ImportError::Edit("serialized annotation missing".into()))?;
+        if matches!(edit, Edit::DeleteAnnotation { .. }) {
+            parent.children.remove(at);
+        } else {
+            let a = element_mut(parent, at);
+            let (key, value) = match edit {
+                Edit::MoveAnnotation { position, .. } => ("Position", format_rect(position)),
+                Edit::SetAnnotationText { text, .. } => (
+                    if a.attr("Text").is_some() || a.prop("Text").is_some() {
+                        "Text"
+                    } else {
+                        "Name"
+                    },
+                    text.clone(),
+                ),
+                _ => unreachable!(),
+            };
+            if a.attr(key).is_some() {
+                a.set_attr(key, &value);
+            } else {
+                match a.prop_mut(key) {
+                    Some(p) => p.set_text(&value),
+                    None => a.push_prop(key, &value),
+                }
+            }
+        }
+        return Ok(());
+    }
     let sid = match edit {
+        Edit::AddAnnotation { .. }
+        | Edit::MoveAnnotation { .. }
+        | Edit::SetAnnotationText { .. }
+        | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
         Edit::AddBlock { .. } => {
             let block = resolved
                 .added
@@ -402,7 +462,11 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
                 }
             }
         }
-        Edit::AddBlock { .. }
+        Edit::AddAnnotation { .. }
+        | Edit::MoveAnnotation { .. }
+        | Edit::SetAnnotationText { .. }
+        | Edit::DeleteAnnotation { .. }
+        | Edit::AddBlock { .. }
         | Edit::Connect { .. }
         | Edit::Disconnect { .. }
         | Edit::SetRoute { .. }
@@ -620,17 +684,21 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
         system_at(&mut parts, &at)
             .map(|sys| apply_edit(sys, resolved))
             .ok_or_else(|| ImportError::Xml("empty document".into()))??;
-        if let Some(block) = &resolved.added {
+        let allocated = match &resolved.edit {
+            Edit::AddAnnotation { id, .. } => Some(id.as_str()),
+            _ => resolved.added.as_ref().map(|block| block.id.0.as_str()),
+        };
+        if let Some(sid) = allocated {
             let at = locate(&parts, &[])?;
             let root = system_at(&mut parts, &at)
                 .ok_or_else(|| ImportError::Xml("empty document".into()))?;
             match root.prop_mut(SID_WATERMARK) {
-                Some(watermark) => watermark.set_text(&block.id.0),
+                Some(watermark) => watermark.set_text(sid),
                 // With the system's other properties, ahead of its blocks.
                 None => {
                     let mut p = XElem::new("P");
                     p.set_attr("Name", SID_WATERMARK);
-                    p.set_text(&block.id.0);
+                    p.set_text(sid);
                     let (at, indent) = (after_last(root, &["P"]), indent_in(root));
                     insert_child(root, at, p, &indent);
                 }

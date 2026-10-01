@@ -12,8 +12,8 @@ use crate::catalog::{self, PortResolution};
 pub use crate::duplicate::duplicate;
 use crate::validation::{validate_structure, DiagnosticTarget, Severity};
 use crate::{
-    Block, BlockId, BlockStyle, Branch, Chart, Endpoint, Line, Model, Orientation, PortKind, Rect,
-    System,
+    Annotation, Block, BlockId, BlockStyle, Branch, Chart, Endpoint, Line, Model, Orientation,
+    PortKind, Rect, System,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,6 +29,14 @@ pub enum DisconnectPolicy {
     Reject,
     /// Delete attached lines and branches along with the block.
     Disconnect,
+}
+
+/// A guarded annotation index in the model immediately before this edit.
+/// Replay against another version fails if the index now holds another value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationTarget {
+    pub index: usize,
+    pub expected: Annotation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,6 +113,29 @@ pub enum Edit {
         src: Endpoint,
         name: String,
     },
+    /// Append a plain annotation with an explicitly allocated numeric SID.
+    AddAnnotation {
+        system: SystemRef,
+        id: String,
+        text: String,
+        position: Rect,
+    },
+    /// Move or resize while preserving text and every imported property.
+    MoveAnnotation {
+        system: SystemRef,
+        target: AnnotationTarget,
+        position: Rect,
+    },
+    /// Replace plain annotation text; rich-text records are refused.
+    SetAnnotationText {
+        system: SystemRef,
+        target: AnnotationTarget,
+        text: String,
+    },
+    DeleteAnnotation {
+        system: SystemRef,
+        target: AnnotationTarget,
+    },
 }
 
 /// An edit that could not be applied, and its position in the batch.
@@ -177,7 +208,7 @@ pub fn structural_regression(before: &Model, after: &Model) -> Result<(), EditEr
     Ok(())
 }
 
-/// The lowest SID a new block may take: above every numeric block SID and
+/// The lowest SID a new block or annotation may take: above all their numeric SIDs and
 /// the file's `SIDHighWatermark`, so SIDs of deleted blocks are not reused.
 /// `None` once SIDs are exhausted.
 pub fn next_sid(model: &Model) -> Option<u64> {
@@ -188,6 +219,11 @@ pub fn next_sid(model: &Model) -> Option<u64> {
                 let own = b.id.0.parse().unwrap_or(0);
                 own.max(b.subsystem.as_deref().map_or(0, highest))
             })
+            .chain(
+                sys.annotations
+                    .iter()
+                    .filter_map(|a| a.properties.get("SID")?.trim().parse().ok()),
+            )
             .max()
             .unwrap_or(0)
     }
@@ -319,7 +355,11 @@ impl Edit {
             | Edit::SetRoute { system, .. }
             | Edit::SetTrunkRoute { system, .. }
             | Edit::SetOrientation { system, .. }
-            | Edit::SetSignalName { system, .. } => system,
+            | Edit::SetSignalName { system, .. }
+            | Edit::AddAnnotation { system, .. }
+            | Edit::MoveAnnotation { system, .. }
+            | Edit::SetAnnotationText { system, .. }
+            | Edit::DeleteAnnotation { system, .. } => system,
         }
     }
 
@@ -336,13 +376,27 @@ impl Edit {
             | Edit::Disconnect { .. }
             | Edit::SetRoute { .. }
             | Edit::SetTrunkRoute { .. }
-            | Edit::SetSignalName { .. } => None,
+            | Edit::SetSignalName { .. }
+            | Edit::AddAnnotation { .. }
+            | Edit::MoveAnnotation { .. }
+            | Edit::SetAnnotationText { .. }
+            | Edit::DeleteAnnotation { .. } => None,
         }
     }
 
     /// Check an edit's values before applying it anywhere.
     pub fn validate(&self) -> Result<(), EditError> {
         match self {
+            Edit::AddAnnotation {
+                id, text, position, ..
+            } => {
+                parse_annotation_sid(id)?;
+                check_annotation_text(text)?;
+                check_annotation_rect(position)?;
+            }
+            Edit::MoveAnnotation { position, .. } => check_annotation_rect(position)?,
+            Edit::SetAnnotationText { text, .. } => check_annotation_text(text)?,
+            Edit::DeleteAnnotation { .. } => {}
             Edit::MoveBlock { position, .. } => check_rect(position)?,
             Edit::SetSignalName { name, .. } => {
                 if name.len() > 4096
@@ -391,6 +445,71 @@ impl Edit {
 
     fn apply_to_diagram(&self, model: &mut Model, charts: &[Chart]) -> Result<(), EditError> {
         let id = match self {
+            Edit::AddAnnotation {
+                system,
+                id,
+                text,
+                position,
+            } => {
+                let sid = parse_annotation_sid(id)?;
+                let next =
+                    next_sid(model).ok_or_else(|| EditError::Invalid("no SIDs left".into()))?;
+                if sid < next {
+                    return Err(EditError::Invalid(format!(
+                        "new annotation SID must be at least {next}"
+                    )));
+                }
+                let sys = system_mut(model, system)?;
+                if sys.annotations.len() >= 10_000 {
+                    return Err(EditError::Invalid(
+                        "at most 10000 annotations per system".into(),
+                    ));
+                }
+                sys.annotations.push(Annotation {
+                    text: text.clone(),
+                    position: *position,
+                    rich_text: false,
+                    properties: BTreeMap::from([("SID".into(), id.clone())]),
+                });
+                model
+                    .root
+                    .properties
+                    .insert(SID_WATERMARK.into(), id.clone());
+                return Ok(());
+            }
+            Edit::MoveAnnotation {
+                system,
+                target,
+                position,
+            } => {
+                annotation_mut(system_mut(model, system)?, target)?.position = *position;
+                return Ok(());
+            }
+            Edit::SetAnnotationText {
+                system,
+                target,
+                text,
+            } => {
+                let annotation = annotation_mut(system_mut(model, system)?, target)?;
+                if annotation.rich_text
+                    || annotation
+                        .properties
+                        .get("Interpreter")
+                        .is_some_and(|v| v == "rich")
+                {
+                    return Err(EditError::Invalid(
+                        "editing rich annotation text is not supported".into(),
+                    ));
+                }
+                annotation.text = text.clone();
+                return Ok(());
+            }
+            Edit::DeleteAnnotation { system, target } => {
+                let sys = system_mut(model, system)?;
+                annotation_mut(sys, target)?;
+                sys.annotations.remove(target.index);
+                return Ok(());
+            }
             Edit::SetSignalName { system, src, name } => {
                 let sys = system_mut(model, system)?;
                 let (root, _) = crate::route_edit::route_location(sys, src, true)?;
@@ -403,14 +522,19 @@ impl Edit {
                 dst,
                 points,
             } => {
-                return crate::route_edit::set_route(system_mut(model, system)?, dst, false, points)
+                return crate::route_edit::set_route(
+                    system_mut(model, system)?,
+                    dst,
+                    false,
+                    points,
+                );
             }
             Edit::SetTrunkRoute {
                 system,
                 src,
                 points,
             } => {
-                return crate::route_edit::set_route(system_mut(model, system)?, src, true, points)
+                return crate::route_edit::set_route(system_mut(model, system)?, src, true, points);
             }
             Edit::AddBlock {
                 system,
@@ -420,7 +544,7 @@ impl Edit {
                 position,
             } => return add_block(model, system, id, block_type, name, *position),
             Edit::Connect { system, src, dst } => {
-                return connect(system_mut(model, system)?, src, dst)
+                return connect(system_mut(model, system)?, src, dst);
             }
             Edit::Disconnect { system, dst } => return disconnect(system_mut(model, system)?, dst),
             Edit::MoveBlock { id, .. }
@@ -521,7 +645,11 @@ impl Edit {
             | Edit::Disconnect { .. }
             | Edit::SetRoute { .. }
             | Edit::SetTrunkRoute { .. }
-            | Edit::SetSignalName { .. } => {
+            | Edit::SetSignalName { .. }
+            | Edit::AddAnnotation { .. }
+            | Edit::MoveAnnotation { .. }
+            | Edit::SetAnnotationText { .. }
+            | Edit::DeleteAnnotation { .. } => {
                 unreachable!("applied above")
             }
         }
@@ -715,7 +843,7 @@ fn check_port(sys: &System, ep: &Endpoint, source: bool) -> Result<(), EditError
             return Err(EditError::Invalid(format!(
                 "the ports of {:?} depend on {parameter}, which must be a literal to connect",
                 block.name
-            )))
+            )));
         }
         None => block.ports,
     };
@@ -1175,5 +1303,244 @@ mod tests {
             disconnect: DisconnectPolicy::Disconnect,
         };
         assert!(matches!(missing.apply(&mut m), Err(EditError::NoSystem(_))));
+    }
+}
+
+fn parse_annotation_sid(id: &str) -> Result<u64, EditError> {
+    id.parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0 && n.to_string() == id)
+        .ok_or_else(|| {
+            EditError::Invalid("annotation SID must be a canonical positive integer".into())
+        })
+}
+
+fn check_annotation_text(text: &str) -> Result<(), EditError> {
+    if text.len() > 64 * 1024
+        || text.chars().any(|c| {
+            (c < ' ' && !matches!(c, '\n' | '\r' | '\t')) || matches!(c, '\u{FFFE}' | '\u{FFFF}')
+        })
+    {
+        return Err(EditError::Invalid(
+            "annotation text exceeds 64 KiB or contains characters forbidden in XML".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn check_annotation_rect(position: &Rect) -> Result<(), EditError> {
+    if [position.left, position.top, position.right, position.bottom]
+        .iter()
+        .any(|n| !n.is_finite() || n.abs() > 1e9)
+        || position.right < position.left
+        || position.bottom < position.top
+    {
+        return Err(EditError::Invalid(
+            "annotation position must be a noninverted rectangle or point within +/-1e9".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn annotation_mut<'a>(
+    system: &'a mut System,
+    target: &AnnotationTarget,
+) -> Result<&'a mut Annotation, EditError> {
+    let annotation = system
+        .annotations
+        .get_mut(target.index)
+        .filter(|annotation| **annotation == target.expected)
+        .ok_or_else(|| {
+            EditError::Invalid(format!(
+                "annotation {} is missing or changed; reload before editing",
+                target.index
+            ))
+        })?;
+    Ok(annotation)
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use super::*;
+    use crate::{SimConfig, SourceFormat};
+
+    fn model() -> Model {
+        Model {
+            name: "annotations".into(),
+            source: SourceFormat::Slx,
+            simulink_version: None,
+            config: SimConfig::default(),
+            root: System::default(),
+            workspace: BTreeMap::new(),
+            charts: vec![],
+        }
+    }
+    fn add(id: &str, text: &str) -> Edit {
+        Edit::AddAnnotation {
+            system: vec![],
+            id: id.into(),
+            text: text.into(),
+            position: Rect::new(1., 2., 1., 2.),
+        }
+    }
+    fn target(model: &Model, index: usize) -> AnnotationTarget {
+        AnnotationTarget {
+            index,
+            expected: model.root.annotations[index].clone(),
+        }
+    }
+    #[test]
+    fn add_move_text_delete_preserve_properties_and_reserve_sids() {
+        let mut model = model();
+        add("8", "plain\ntext").apply(&mut model).unwrap();
+        assert_eq!(next_sid(&model), Some(9));
+        assert!(!model.root.annotations[0].rich_text);
+        model.root.annotations[0]
+            .properties
+            .insert("FutureProperty".into(), "keep".into());
+        let original_properties = model.root.annotations[0].properties.clone();
+        let movement = Edit::MoveAnnotation {
+            system: vec![],
+            target: target(&model, 0),
+            position: Rect::new(10., 20., 30., 40.),
+        };
+        movement.apply(&mut model).unwrap();
+        assert_eq!(model.root.annotations[0].properties, original_properties);
+        let edit = Edit::SetAnnotationText {
+            system: vec![],
+            target: target(&model, 0),
+            text: "new text".into(),
+        };
+        edit.apply(&mut model).unwrap();
+        assert_eq!(model.root.annotations[0].properties, original_properties);
+        let delete = Edit::DeleteAnnotation {
+            system: vec![],
+            target: target(&model, 0),
+        };
+        delete.apply(&mut model).unwrap();
+        assert!(model.root.annotations.is_empty());
+        assert_eq!(next_sid(&model), Some(9));
+        assert!(add("8", "collision").apply(&mut model).is_err());
+    }
+    #[test]
+    fn stale_targets_fail_and_batch_rolls_back() {
+        let mut model = model();
+        add("1", "first").apply(&mut model).unwrap();
+        add("2", "second").apply(&mut model).unwrap();
+        let first = target(&model, 0);
+        let second = target(&model, 1);
+        let original = model.clone();
+        let edits = [
+            Edit::DeleteAnnotation {
+                system: vec![],
+                target: first,
+            },
+            Edit::MoveAnnotation {
+                system: vec![],
+                target: second.clone(),
+                position: Rect::new(0., 0., 2., 2.),
+            },
+        ];
+        assert!(apply_batch(&mut model, &edits).is_err());
+        assert_eq!(model, original);
+        edits[0].apply(&mut model).unwrap();
+        let mut shifted = second;
+        shifted.index = 0;
+        Edit::MoveAnnotation {
+            system: vec![],
+            target: shifted,
+            position: Rect::new(0., 0., 2., 2.),
+        }
+        .apply(&mut model)
+        .unwrap();
+        let stale = target(&model, 0);
+        model.root.annotations[0].text = "changed externally".into();
+        assert!(Edit::DeleteAnnotation {
+            system: vec![],
+            target: stale
+        }
+        .apply(&mut model)
+        .is_err());
+    }
+    #[test]
+    fn rich_text_may_move_and_delete_but_not_change_text() {
+        let mut model = model();
+        add("1", "<html><b>bold</b></html>")
+            .apply(&mut model)
+            .unwrap();
+        model.root.annotations[0].rich_text = true;
+        model.root.annotations[0]
+            .properties
+            .insert("Interpreter".into(), "rich".into());
+        let edit = Edit::SetAnnotationText {
+            system: vec![],
+            target: target(&model, 0),
+            text: "plain".into(),
+        };
+        assert!(edit.apply(&mut model).is_err());
+        let edit = Edit::MoveAnnotation {
+            system: vec![],
+            target: target(&model, 0),
+            position: Rect::new(0., 0., 5., 5.),
+        };
+        edit.apply(&mut model).unwrap();
+        assert!(model.root.annotations[0].text.contains("<html>"));
+        Edit::DeleteAnnotation {
+            system: vec![],
+            target: target(&model, 0),
+        }
+        .apply(&mut model)
+        .unwrap();
+        // Literal markup in a plain annotation is just text.
+        add("2", "<b>literal</b>").apply(&mut model).unwrap();
+        Edit::SetAnnotationText {
+            system: vec![],
+            target: target(&model, 0),
+            text: "<i>also literal</i>".into(),
+        }
+        .apply(&mut model)
+        .unwrap();
+    }
+    #[test]
+    fn sid_allocation_considers_annotations_without_watermark() {
+        let mut model = model();
+        add("90", "highest").apply(&mut model).unwrap();
+        model.root.properties.remove(SID_WATERMARK);
+        assert_eq!(next_sid(&model), Some(91));
+        assert!(add("90", "collision").apply(&mut model).is_err());
+        assert!(add("091", "noncanonical").apply(&mut model).is_err());
+        add(&u64::MAX.to_string(), "last")
+            .apply(&mut model)
+            .unwrap();
+        assert_eq!(next_sid(&model), None);
+        assert!(add("1", "overflow").apply(&mut model).is_err());
+    }
+    #[test]
+    fn bounds_and_xml_character_validation() {
+        for text in ["\0".into(), "\u{fffe}".into(), "x".repeat(64 * 1024 + 1)] {
+            assert!(add("1", &text).validate().is_err());
+        }
+        assert!(add("1", &"x".repeat(64 * 1024)).validate().is_ok());
+        for position in [
+            Rect::new(0., 0., -1., 1.),
+            Rect::new(0., 0., f64::NAN, 1.),
+            Rect::new(0., 0., 1e10, 1.),
+        ] {
+            assert!(Edit::AddAnnotation {
+                system: vec![],
+                id: "1".into(),
+                text: "".into(),
+                position
+            }
+            .validate()
+            .is_err());
+        }
+        let mut model = model();
+        add("1", "a").apply(&mut model).unwrap();
+        model
+            .root
+            .annotations
+            .resize(10_000, model.root.annotations[0].clone());
+        assert!(add("2", "too many").apply(&mut model).is_err());
     }
 }

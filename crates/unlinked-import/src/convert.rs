@@ -623,12 +623,15 @@ fn annotation(node: &Node) -> Annotation {
         .map(str::to_string)
         .unwrap_or_else(|| node.text.trim().to_string());
     let rich_text = node.get("Interpreter") == Some("rich");
-    let properties = node
+    let mut properties: BTreeMap<String, String> = node
         .props
         .iter()
         .filter(|(k, _)| !matches!(k.as_str(), "Position" | "Text" | "Name"))
         .cloned()
         .collect();
+    if let Some(sid) = node.get("SID") {
+        properties.insert("SID".into(), sid.into());
+    }
     Annotation {
         text,
         position,

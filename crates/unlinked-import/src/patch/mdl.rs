@@ -427,7 +427,62 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
     let sys = file
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
+    if let Edit::AddAnnotation {
+        id, text, position, ..
+    } = edit
+    {
+        let mut a = new_section("Annotation", &child_indent(sys), sys.eol());
+        a.set_prop("SID", id, false);
+        a.set_prop("Name", text, false);
+        a.set_prop("Position", &format_rect(position), true);
+        insert_after(sys, &["Annotation"], a);
+        let root = file
+            .system_mut(&[])
+            .ok_or_else(|| ImportError::Mdl("no root system".into()))?;
+        root.set_prop(SID_WATERMARK, id, false);
+        return Ok(());
+    }
+    let annotation = match edit {
+        Edit::MoveAnnotation { target, .. }
+        | Edit::SetAnnotationText { target, .. }
+        | Edit::DeleteAnnotation { target, .. } => Some(target.index),
+        _ => None,
+    };
+    if let Some(index) = annotation {
+        let at = sys
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| {
+                matches!(item, Item::Section(s) if s.tag == "Annotation").then_some(i)
+            })
+            .nth(index)
+            .ok_or_else(|| ImportError::Edit("serialized annotation missing".into()))?;
+        if matches!(edit, Edit::DeleteAnnotation { .. }) {
+            sys.items.remove(at);
+        } else if let Item::Section(a) = &mut sys.items[at] {
+            match edit {
+                Edit::MoveAnnotation { position, .. } => {
+                    a.set_prop("Position", &format_rect(position), true)
+                }
+                Edit::SetAnnotationText { text, .. } => {
+                    let key = if a.prop("Text").is_some() {
+                        "Text"
+                    } else {
+                        "Name"
+                    };
+                    a.set_prop(key, text, false);
+                }
+                _ => unreachable!(),
+            }
+        }
+        return Ok(());
+    }
     let id = match edit {
+        Edit::AddAnnotation { .. }
+        | Edit::MoveAnnotation { .. }
+        | Edit::SetAnnotationText { .. }
+        | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
         Edit::AddBlock { .. } => {
             let block = resolved
                 .added
@@ -637,7 +692,11 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
                 }
             }
         }
-        Edit::AddBlock { .. }
+        Edit::AddAnnotation { .. }
+        | Edit::MoveAnnotation { .. }
+        | Edit::SetAnnotationText { .. }
+        | Edit::DeleteAnnotation { .. }
+        | Edit::AddBlock { .. }
         | Edit::Connect { .. }
         | Edit::Disconnect { .. }
         | Edit::SetRoute { .. }
