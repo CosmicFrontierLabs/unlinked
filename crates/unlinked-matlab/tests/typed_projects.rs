@@ -171,6 +171,7 @@ fn typed_projects_match_interpreter_and_octave() {
     typed_first_multioutput_assignments(&projects);
     typed_vector_indexed_assignments(&projects);
     typed_integer_format_validation(&projects);
+    typed_scientific_formatting(&projects);
     typed_library_exports_arrays_and_multiple_outputs_without_dynamic_environment(&projects);
     optional_typed_corpus(&projects);
     typed_codegen_edge_regressions(&projects);
@@ -807,8 +808,7 @@ fn typed_integer_format_validation(projects: &Projects) {
             expected.bytes().map(f64::from).collect::<Vec<_>>()
         );
     }
-    // Explicit alternatives accept fractional values. %e currently uses Rust's
-    // exponent spelling, so compare numeric values rather than claim text parity.
+    // Explicit alternatives accept fractional values.
     for (i, (format, n)) in [("%g", 1.5), ("%.2e", -1.5)].into_iter().enumerate() {
         let expression = format!("sprintf('{format}',{n})");
         let text = sprintf(format, vec![Value::scalar(n)]).unwrap();
@@ -826,5 +826,48 @@ fn typed_integer_format_validation(projects: &Projects) {
         if let Some(reference) = octave(&format!("printf('%s',{expression});")) {
             assert_eq!(reference, vec![output.parse::<f64>().unwrap()]);
         }
+    }
+}
+
+fn typed_scientific_formatting(projects: &Projects) {
+    let mut source = String::new();
+    let mut expected = String::new();
+    for format in [
+        "%e", "%E", "%.0e", "%20.3e", "%20.3E", "%g", "%.0g", "%20.3g",
+    ] {
+        for n in [
+            1.5_f64, -1.5, 1.5e-9, -1.5e-9, 1.5e20, -1.5e20, 1.5e-100, 1.5e100, 0.0, -0.0,
+        ] {
+            // %g currently normalizes signed zero. That separate behavior is
+            // outside this exponent-spelling fix; don't assert Octave parity.
+            if format.ends_with('g') && n == 0.0 && n.is_sign_negative() {
+                continue;
+            }
+            let text = unlinked_matlab::array_runtime::builtin(
+                "sprintf",
+                vec![Value::string(format).unwrap(), Value::scalar(n)],
+                1,
+            )
+            .unwrap()[0]
+                .text()
+                .unwrap();
+            expected.push('<');
+            expected.push_str(&text);
+            expected.push('>');
+            source.push_str(&format!("fprintf('<{format}>',{n:.17e});\n"));
+        }
+    }
+    let output = projects.run("scientific-formats", &source, false, None);
+    assert_eq!(output, expected);
+    if let Some(reference) = octave(&format!(
+        "s='';{}fprintf('%d ',double(s));",
+        source
+            .replace("fprintf(", "s=[s sprintf(")
+            .replace(");", ")];")
+    )) {
+        assert_eq!(
+            reference,
+            expected.bytes().map(f64::from).collect::<Vec<_>>()
+        );
     }
 }

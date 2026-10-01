@@ -207,3 +207,7 @@ use an explicit `%e`: MATLAB's modifier behavior during automatic override
 has not been verified. Inputs must still be finite and in `[-2^63, 2^63)`;
 nonfinite and out-of-range values return errors instead of saturating an integer
 conversion. Remaining formatting compatibility is tracked in issue #25.
+
+Explicit `%e` and `%E`, and the exponential form of `%g`, print an exponent
+sign and at least two exponent digits (`e+00`, `E-09`, `e+100`). Field width
+includes those characters. `%G` remains outside the supported formatter subset.
