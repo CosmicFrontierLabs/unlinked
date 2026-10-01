@@ -5,6 +5,7 @@
 //! instead of the generated plumbing inside it; path entries past the chart
 //! block name subcharted states.
 
+use crate::dialog::ParameterDialog;
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
@@ -2361,6 +2362,18 @@ fn inspector(props: &InspectorProps) -> Html {
         });
     let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
     let script = props.chart.as_ref().and_then(|c| c.script.clone());
+    // Native catalog blocks get their dialog; any other stored parameters,
+    // and every parameter of other blocks, are listed raw.
+    let descriptor = catalog::find(&b.block_type)
+        .filter(|_| b.mask.is_none() && b.library_source.is_none() && b.subsystem.is_none());
+    let others: Vec<(&String, &String)> = b
+        .parameters
+        .iter()
+        .filter(|(k, _)| !HIDDEN_PARAMETERS.contains(&k.as_str()))
+        .filter(|(k, _)| {
+            descriptor.is_none_or(|d| d.parameters.iter().all(|p| p.name != k.as_str()))
+        })
+        .collect();
     // A value cell: editable input when editing, code otherwise. Changes
     // are committed on blur or Enter.
     let value_cell = |name: &str, value: &str| -> Html {
@@ -2469,12 +2482,20 @@ fn inspector(props: &InspectorProps) -> Html {
                 </table>
             }
             { for ScopeConfig::from_block(b).map(scope_section) }
-            <h4>{ "Parameters" }</h4>
-            <table>
-                { for b.parameters.iter().filter(|(k, _)| !HIDDEN_PARAMETERS.contains(&k.as_str())).map(|(k, v)| html! {
-                    <tr><td>{ k }</td><td>{ value_cell(k, v) }</td></tr>
-                }) }
-            </table>
+            if descriptor.is_some() {
+                <ParameterDialog block={props.block.clone()} system={props.system.clone()}
+                    problems={props.problems.clone()} on_edit={props.on_edit.clone()} />
+            }
+            if !others.is_empty() {
+                <details class="raw" open={descriptor.is_none()}>
+                    <summary>{ if descriptor.is_some() { "Other parameters" } else { "Parameters" } }</summary>
+                    <table>
+                        { for others.iter().map(|(k, v)| html! {
+                            <tr><td>{ k }</td><td>{ value_cell(k, v) }</td></tr>
+                        }) }
+                    </table>
+                </details>
+            }
             if let Some(spec) = b.param("ScopeSpecificationString") {
                 <details class="raw">
                     <summary>{ "Raw scope specification" }</summary>

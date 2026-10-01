@@ -693,6 +693,35 @@ button.active {
     opacity: 0.6;
 }
 
+/* Block parameter dialog */
+.parameter-dialog fieldset {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin: 0.6rem 0;
+    padding: 0.3rem 0.6rem 0.6rem;
+}
+
+.parameter-dialog legend {
+    color: var(--purple);
+    font-size: 0.8rem;
+    padding: 0 0.3rem;
+}
+
+.dialog-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    margin-top: 0.4rem;
+}
+
+.dialog-field input[type="checkbox"] {
+    align-self: flex-start;
+}
+
+.dialog-label {
+    font-size: 0.85rem;
+}
+
 /* Problems */
 .problem {
     font-size: 0.8rem;
