@@ -93,7 +93,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
         let (pending, working, error) = (pending.clone(), working.clone(), error.clone());
         Callback::from(move |edit: Edit| {
             let mut next = (**working).clone();
-            match edit.apply(&mut next) {
+            match apply_batch(&mut next, std::slice::from_ref(&edit)) {
                 Ok(()) => {
                     let mut p = (*pending).clone();
                     p.push(edit);

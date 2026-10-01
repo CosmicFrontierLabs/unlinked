@@ -17,6 +17,8 @@ pub struct Wire {
     pub arrow: Option<(Point, (f64, f64))>,
     /// Missing source or destination (drawn as a dashed, red line).
     pub dangling: bool,
+    /// The port this wire ends at, if it is a leaf of the line.
+    pub dst: Option<Endpoint>,
 }
 
 pub struct RoutedLine {
@@ -160,6 +162,7 @@ fn emit(
             points: path,
             dangling: incomplete || (geometry.is_none() && branches.is_empty()),
             arrow,
+            dst: dst.clone(),
         });
     }
 }
@@ -335,5 +338,46 @@ mod tests {
                 Point::new(20.0, 20.0)
             ]
         );
+    }
+
+    /// Each leaf wire names its own destination; shared trunks name none.
+    #[test]
+    fn wires_carry_their_own_destination() {
+        let dst = |id: &str| {
+            Some(Endpoint {
+                block: id.into(),
+                port: unlinked_model::PortRef {
+                    kind: PortKind::In,
+                    index: 1,
+                },
+            })
+        };
+        let line = Line {
+            points: vec![Point::new(0.0, 0.0), Point::new(10.0, 0.0)],
+            branches: vec![
+                Branch {
+                    points: vec![Point::new(20.0, 0.0)],
+                    dst: dst("a"),
+                    branches: vec![Branch {
+                        points: vec![Point::new(20.0, 10.0)],
+                        dst: dst("b"),
+                        branches: vec![],
+                    }],
+                },
+                Branch {
+                    points: vec![Point::new(30.0, 0.0)],
+                    dst: dst("c"),
+                    branches: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        let routed = route_line(&System::default(), &line);
+        let dsts: Vec<_> = routed
+            .wires
+            .iter()
+            .map(|w| w.dst.as_ref().map(|d| d.block.0.as_str()))
+            .collect();
+        assert_eq!(dsts, [Some("b"), Some("a"), Some("c"), None]);
     }
 }
