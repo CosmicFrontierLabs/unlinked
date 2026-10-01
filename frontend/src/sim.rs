@@ -7,6 +7,7 @@
 //! generation, so a stale stream or response can never overwrite newer data.
 
 use crate::api;
+use crate::diagram::fmt_num;
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
 use crate::plot::{self, PlotSession};
 use futures_util::future::{AbortHandle, Abortable};
@@ -19,6 +20,7 @@ use shared::{
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use unlinked_model::config::solver_descriptor;
 use unlinked_model::SimConfig;
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
@@ -260,37 +262,90 @@ fn csv_field(s: &str) -> String {
     }
 }
 
-fn parse_time(s: &Option<String>, default: f64) -> f64 {
-    s.as_deref()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| v.is_finite())
-        .unwrap_or(default)
+/// The simulator solver matching the model's, if it implements that one.
+fn model_solver(config: &SimConfig) -> Option<Solver> {
+    let descriptor = config.solver.as_deref().and_then(solver_descriptor)?;
+    match descriptor.simulation_solver? {
+        "euler" => Some(Solver::Euler),
+        "rk4" => Some(Solver::Rk4),
+        "rk45" => Some(Solver::Rk45),
+        _ => None,
+    }
 }
 
-/// Initial options from the model's solver configuration.
-fn defaults(config: &SimConfig) -> SimulationOptions {
-    let start = parse_time(&config.start_time, 0.0);
-    let stop = parse_time(&config.stop_time, 10.0).max(start + 1e-9);
-    let solver = match config.solver.as_deref().map(str::trim) {
-        Some("ode1") => Solver::Euler,
-        Some(
-            "ode2" | "ode3" | "ode4" | "ode5" | "ode8" | "ode14x" | "FixedStepAuto"
-            | "FixedStepDiscrete",
-        ) => Solver::Rk4,
-        _ => Solver::Rk45,
+/// Initial run options from the model's solver settings, and a note for
+/// each option that does not come from them: settings the model lacks or
+/// does not give as plain numbers, invalid ones, and solvers the simulator
+/// does not implement.
+fn initial_options(config: &SimConfig) -> (SimulationOptions, Vec<String>) {
+    let mut notes = Vec::new();
+    let mut o = SimulationOptions::default();
+    let number = |v: Option<&String>| {
+        v.and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
     };
-    let step = parse_time(&config.fixed_step, (stop - start) / 1000.0);
-    SimulationOptions {
-        start,
-        stop,
-        step: if step > 0.0 {
-            step
-        } else {
-            (stop - start) / 1000.0
-        },
-        solver,
-        ..SimulationOptions::default()
+    let shown = |v: Option<&String>| v.map_or("unset".to_string(), |v| format!("\"{}\"", v.trim()));
+    let mut take =
+        |label: &str, stored: Option<&String>, valid: &dyn Fn(f64) -> bool, fallback: f64| {
+            match number(stored).filter(|v| valid(*v)) {
+                Some(v) => v,
+                None => {
+                    notes.push(format!(
+                        "{label}: the model's {} → {}.",
+                        shown(stored),
+                        fmt_num(fallback)
+                    ));
+                    fallback
+                }
+            }
+        };
+    o.start = take("Start", config.start_time.as_ref(), &|_| true, 0.0);
+    let start = o.start;
+    o.stop = take(
+        "Stop",
+        config.stop_time.as_ref(),
+        &|v| v > start,
+        start + 10.0,
+    );
+    o.solver = model_solver(config).unwrap_or(Solver::Rk45);
+    let span = o.stop - o.start;
+    match o.solver {
+        Solver::Euler | Solver::Rk4 => {
+            o.step = take(
+                "Output step",
+                config.fixed_step.as_ref(),
+                &|v| v > 0.0,
+                span / 1000.0,
+            );
+        }
+        Solver::Rk45 => {
+            o.step = span / 1000.0;
+            o.relative_tolerance = take(
+                "Rel tol",
+                config.raw.get("RelTol"),
+                &|v| v > 0.0 && v <= 1.0,
+                o.relative_tolerance,
+            );
+            o.absolute_tolerance = take(
+                "Abs tol",
+                config.raw.get("AbsTol"),
+                &|v| v > 0.0,
+                o.absolute_tolerance,
+            );
+        }
     }
+    if model_solver(config).is_none() {
+        notes.insert(
+            0,
+            match &config.solver {
+                Some(s) => {
+                    format!("Solver: the simulator does not implement the model's {s} → rk45.")
+                }
+                None => "Solver: the model stores none → rk45.".to_string(),
+            },
+        );
+    }
+    (o, notes)
 }
 
 fn solver_name(s: Solver) -> &'static str {
@@ -399,7 +454,8 @@ async fn stream(
 
 #[function_component(SimulationPanel)]
 pub fn simulation_panel(props: &SimProps) -> Html {
-    let options = use_state(|| defaults(&props.config));
+    let options = use_state(|| initial_options(&props.config).0);
+    let differences = initial_options(&props.config).1;
     let workspace = use_state(String::new);
     let inputs = use_state(BTreeMap::<String, String>::new);
     let state = use_state(|| RunState::Idle);
@@ -723,6 +779,12 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         <div class="sim-panel">
             if props.has_random_sources {
                 <p class="sim-notice">{ "Random sources are reproducible in Unlinked, but use a different random sequence from Simulink." }</p>
+            }
+            if !differences.is_empty() {
+                <div class="sim-notice">
+                    { "These run settings start from other values than the model's; check them, as they are what the run uses:" }
+                    <ul>{ for differences.iter().map(|d| html! { <li>{ d }</li> }) }</ul>
+                </div>
             }
             <div class="sim-form">
                 <label>{ "Start" }<input type="number" step="any" value={o.start.to_string()} oninput={set_num(|o, v| o.start = v)} /></label>

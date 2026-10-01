@@ -9,6 +9,7 @@
 
 use crate::api;
 use crate::diagram::DiagramView;
+use crate::settings::ModelSettings;
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::edit::{apply_batch, Edit};
@@ -85,6 +86,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
     let stale = use_state(|| None::<String>);
     let message = use_state(String::new);
     let busy = use_state(|| false);
+    let settings = use_state(|| false);
     // Cleared on unmount so a request finishing afterwards neither updates
     // state nor navigates.
     let mounted = use_mut_ref(|| true);
@@ -102,16 +104,19 @@ pub fn model_editor(props: &EditorProps) -> Html {
             base.clone(),
         );
         Callback::from(move |group: Vec<Edit>| {
-            // Grouping and expanding move raw file records the IR does not
-            // model, so the file may refuse what the preview accepts: try
-            // saving first, so a refusal shows now rather than at Save.
-            let hierarchy = group.iter().any(|e| {
+            // Grouping, expanding and solver settings depend on raw file
+            // records the IR does not model, so the file may refuse what
+            // the preview accepts: try saving first, so a refusal shows now
+            // rather than at Save.
+            let raw = group.iter().any(|e| {
                 matches!(
                     e,
-                    Edit::CreateSubsystem { .. } | Edit::ExpandSubsystem { .. }
+                    Edit::CreateSubsystem { .. }
+                        | Edit::ExpandSubsystem { .. }
+                        | Edit::SetConfig { .. }
                 )
             });
-            if hierarchy {
+            if raw {
                 let mut all = pending.concat();
                 all.extend(group.iter().cloned());
                 if let Err(e) = unlinked_import::patch::apply_edits(&base.path, &base.bytes, &all) {
@@ -397,12 +402,22 @@ pub fn model_editor(props: &EditorProps) -> Html {
     };
 
     let count = pending.len();
-    let toolbar = if !props.can_edit {
-        html! {}
-    } else if !*editing {
+    let settings_button = {
+        let settings = settings.clone();
+        html! {
+            <button class={classes!((*settings).then_some("active"))}
+                onclick={Callback::from(move |_: MouseEvent| settings.set(!*settings))}>
+                { "Model settings" }
+            </button>
+        }
+    };
+    let toolbar = if !*editing {
         html! {
             <div class="edit-bar">
-                <button onclick={start}>{ "Edit" }</button>
+                { settings_button }
+                if props.can_edit {
+                    <button onclick={start}>{ "Edit" }</button>
+                }
             </div>
         }
     } else {
@@ -411,6 +426,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 <strong>{ format!("Editing v{}", base.version) }</strong>
                 <span class="muted">{ "Drag on empty space or Shift-click to select; Ctrl+C/Ctrl+V copies, Ctrl+G groups into a subsystem (Ctrl+Shift+G expands), Ctrl+R rotates, Ctrl+I flips, Delete removes; middle-drag pans." }</span>
                 <span class="spacer" />
+                { settings_button }
                 <span>{ format!("{count} change{}", if count == 1 { "" } else { "s" }) }</span>
                 <button onclick={undo.reform(|_: MouseEvent| ())} disabled={count == 0 || *busy} title="Ctrl+Z">{ "Undo" }</button>
                 <button onclick={redo.reform(|_: MouseEvent| ())} disabled={redo_stack.is_empty() || *busy} title="Ctrl+Shift+Z">{ "Redo" }</button>
@@ -428,6 +444,15 @@ pub fn model_editor(props: &EditorProps) -> Html {
     } else {
         base.model.clone()
     };
+    // Static checks only: cheap enough to rerun after every edit.
+    let report = {
+        let model = model.clone();
+        use_memo(Rc::as_ptr(&model) as usize, move |_| {
+            unlinked_sim::diagnose::diagnose(&model, &Default::default())
+        })
+    };
+    let problems = Rc::new(report.diagnostics.clone());
+    let problems_truncated = report.truncated || report.warnings_omitted;
     html! {
         <>
             { toolbar }
@@ -440,7 +465,15 @@ pub fn model_editor(props: &EditorProps) -> Html {
             if let Some(e) = &*error {
                 <div class="edit-bar error">{ e }</div>
             }
-            <DiagramView {model} fit_key={props.fit_key.clone()}
+            if *settings {
+                <ModelSettings config={model.config.clone()}
+                    on_edit={(*editing && !*busy).then(|| on_edit.clone())} />
+            }
+            <DiagramView {model} fit_key={props.fit_key.clone()} {problems} {problems_truncated}
+                on_settings={Callback::from({
+                    let settings = settings.clone();
+                    move |()| settings.set(true)
+                })}
                 on_edit={(*editing && !*busy).then(|| on_edit.clone())}
                 on_error={Callback::from({
                     let error = error.clone();

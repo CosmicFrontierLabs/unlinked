@@ -841,17 +841,18 @@ fn set_config(file: &mut MdlFile, key: &str, value: &str) -> Result<(), ImportEr
         let model = &*model;
         config_places(
             key,
+            value,
             in_component.as_ref().map(|f| f as &dyn Fn(&str) -> usize),
             &|k| count(model, k),
         )?
     };
-    for (k, place) in places {
+    for (k, value, place) in places {
         let target = match (place, &component) {
             (ConfigPlace::Component, Some(path)) => at_mut(model, path),
             _ => &mut *model,
         };
         let bare = target.was_quoted(k) == Some(false);
-        target.set_prop(k, value, bare && is_bare_token(value));
+        target.set_prop(k, &value, bare && is_bare_token(&value));
     }
     Ok(())
 }

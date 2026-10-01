@@ -9,9 +9,10 @@ use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
 use unlinked_model::edit::{
-    system_ids, touches, AnnotationTarget, DisconnectPolicy, Edit, SystemRef,
+    system_ids, system_names, touches, AnnotationTarget, DisconnectPolicy, Edit, SystemRef,
 };
 use unlinked_model::scope::ScopeConfig;
+use unlinked_model::validation::{Diagnostic, DiagnosticTarget, Severity};
 use unlinked_model::{catalog, geometry};
 use unlinked_model::{
     Annotation, Block, BlockId, Chart, Endpoint, Line, Model, Point, PortKind, PortRef, Rect,
@@ -43,6 +44,16 @@ pub struct DiagramProps {
     /// changes. Editors pass a stable key so edits keep the current view.
     #[prop_or_default]
     pub fit_key: Option<AttrValue>,
+    /// Problems found in the model: outlined on the diagram, listed by the
+    /// toolbar's problems button and shown in the block inspector.
+    #[prop_or_default]
+    pub problems: Rc<Vec<Diagnostic>>,
+    /// The check stopped listing problems at its limits, or did not finish.
+    #[prop_or_default]
+    pub problems_truncated: bool,
+    /// Opens the model settings, for problems with them.
+    #[prop_or_default]
+    pub on_settings: Option<Callback<()>>,
 }
 
 /// Grid block positions snap to when dragged.
@@ -438,6 +449,78 @@ fn diff_css(diff: &ModelDiff, path: &[String], system: Option<&System>) -> Strin
     css
 }
 
+/// Outline the shown system's blocks that have problems, and the subsystems
+/// holding blocks that do; errors win over warnings.
+fn problems_css(problems: &[Diagnostic], system: &[BlockId]) -> String {
+    let mut worst: std::collections::BTreeMap<&str, (Severity, bool)> = Default::default();
+    for d in problems {
+        let DiagnosticTarget::Block { system: at, id, .. } = &d.target else {
+            continue;
+        };
+        let (sid, inside) = match at.strip_prefix(system) {
+            Some([]) => (id.0.as_str(), false),
+            Some([sub, ..]) => (sub.0.as_str(), true),
+            None => continue,
+        };
+        let entry = worst.entry(sid).or_insert((d.severity, inside));
+        if d.severity == Severity::Error {
+            entry.0 = Severity::Error;
+        }
+    }
+    worst
+        .into_iter()
+        .map(|(sid, (severity, inside))| {
+            format!(
+                ".diagram g.block[data-sid=\"{}\"] > :is(rect, polygon, ellipse) {{ stroke: {}; stroke-width: 2.5px;{} }}\n",
+                css_string(sid),
+                match severity {
+                    Severity::Error => "#f7768e",
+                    Severity::Warning => "#e0af68",
+                },
+                if inside { " stroke-dasharray: 6 3;" } else { "" }
+            )
+        })
+        .collect()
+}
+
+/// Where a problem is, in words.
+fn problem_place(model: &Model, target: &DiagnosticTarget) -> String {
+    match target {
+        DiagnosticTarget::Model => "Model".into(),
+        DiagnosticTarget::Config { parameter } => format!("Model settings · {parameter}"),
+        DiagnosticTarget::Block {
+            system,
+            id,
+            parameter,
+        } => {
+            let mut place = system_names(model, system).unwrap_or_default();
+            let path: Vec<&str> = place.iter().map(String::as_str).collect();
+            let name = model
+                .system_at(&path)
+                .and_then(|s| s.block(id))
+                .map_or_else(|| format!("SID {id}"), |b| b.name.clone());
+            place.push(name);
+            let mut text = place.join(" / ").replace('\n', " ");
+            if let Some(p) = parameter {
+                text.push_str(&format!(" · {p}"));
+            }
+            text
+        }
+        DiagnosticTarget::Line { system, .. } => {
+            let mut place = system_names(model, system).unwrap_or_default();
+            place.push("line".into());
+            place.join(" / ").replace('\n', " ")
+        }
+    }
+}
+
+fn problem_class(d: &Diagnostic) -> &'static str {
+    match d.severity {
+        Severity::Error => "problem error",
+        Severity::Warning => "problem warning",
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct View {
     scale: f64,
@@ -655,6 +738,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let select_created = use_mut_ref(|| None::<BlockId>);
     // The open context menu's client position.
     let menu = use_state(|| None::<(i32, i32)>);
+    let show_problems = use_state(|| false);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -700,10 +784,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         });
     }
 
-    // A selection belongs to the level it was made on.
+    // A selection belongs to the level it was made on, except a block that
+    // was opened to be shown, such as a problem's.
+    let select_on_open = use_mut_ref(|| None::<String>);
     {
-        let selection = selection.clone();
-        use_effect_with((*path).clone(), move |_| selection.set(Selection::Nothing));
+        let (selection, select_on_open) = (selection.clone(), select_on_open.clone());
+        use_effect_with((*path).clone(), move |_| {
+            selection.set(match select_on_open.borrow_mut().take() {
+                Some(id) => Selection::Blocks(vec![id]),
+                None => Selection::Nothing,
+            })
+        });
     }
     // Select a block an action created, once it is in the shown system.
     {
@@ -1770,6 +1861,89 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         Some(d) => diff_css(d, &path, system) + &highlight,
         None => highlight,
     };
+    // Inside a chart there are no blocks to outline.
+    let highlight = match system.and(system_ids(&props.model, &path)) {
+        Some(ids) => problems_css(&props.problems, &ids) + &highlight,
+        None => highlight,
+    };
+    let block_problems: Vec<Diagnostic> = selected_block
+        .map(|b| {
+            props
+                .problems
+                .iter()
+                .filter(|d| {
+                    matches!(&d.target, DiagnosticTarget::Block { system, id, .. }
+                        if *system == system_ref && *id == b.id)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let errors = props
+        .problems
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    let warnings = props.problems.len() - errors;
+    let toggle_problems = {
+        let show_problems = show_problems.clone();
+        Callback::from(move |_: MouseEvent| show_problems.set(!*show_problems))
+    };
+    // Show where a problem is: open its system and select its block.
+    let go_to = |d: &Diagnostic| {
+        let (path, selection, model, on_settings, select_on_open) = (
+            path.clone(),
+            selection.clone(),
+            props.model.clone(),
+            props.on_settings.clone(),
+            select_on_open.clone(),
+        );
+        let target = d.target.clone();
+        Callback::from(move |_: MouseEvent| match &target {
+            DiagnosticTarget::Model => {}
+            DiagnosticTarget::Config { .. } => {
+                if let Some(on_settings) = &on_settings {
+                    on_settings.emit(());
+                }
+            }
+            DiagnosticTarget::Block { system, id, .. } => {
+                if let Some(names) = system_names(&model, system) {
+                    // Another level selects the block once it is shown.
+                    if names == *path {
+                        selection.set(Selection::Blocks(vec![id.0.clone()]));
+                    } else {
+                        *select_on_open.borrow_mut() = Some(id.0.clone());
+                        path.set(names);
+                    }
+                }
+            }
+            DiagnosticTarget::Line { system, .. } => {
+                if let Some(names) = system_names(&model, system) {
+                    path.set(names);
+                    selection.set(Selection::Nothing);
+                }
+            }
+        })
+    };
+    let problem_list = (*show_problems).then(|| {
+        html! {
+            <div class="problems-panel">
+                if props.problems.is_empty() {
+                    <div class="muted">{ "No problems found by the static check." }</div>
+                }
+                { for props.problems.iter().map(|d| html! {
+                    <button class={classes!("problem-row", problem_class(d))} onclick={go_to(d)}>
+                        <span class="problem-place">{ problem_place(&props.model, &d.target) }</span>
+                        <span>{ &d.message }</span>
+                    </button>
+                }) }
+                if props.problems_truncated {
+                    <div class="problem warning">{ "The check stopped at its limits: there may be more problems than listed." }</div>
+                }
+                <div class="muted">{ "Static check: structure, settings and simulator support. No simulation was run." }</div>
+            </div>
+        }
+    });
 
     let canvas = match rendered.as_ref() {
         Ok(svg) => Html::from_html_unchecked(AttrValue::from(svg.clone())),
@@ -1842,6 +2016,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     </span>
                 }
                 <span class="spacer" />
+                <button class={classes!("problems-button", (errors > 0).then_some("has-errors"),
+                    (*show_problems).then_some("active"))} onclick={toggle_problems}
+                    title="Problems found by the static check">
+                    { format!("{errors} error{} · {warnings} warning{}{}",
+                        if errors == 1 { "" } else { "s" }, if warnings == 1 { "" } else { "s" },
+                        if props.problems_truncated { " (incomplete)" } else { "" }) }
+                </button>
                 <span class="zoom">{ format!("{:.0}%", v.scale * 100.0) }</span>
                 <button onclick={fit_view}>{ "Fit" }</button>
                 <button onclick={toggle_theme}>{ if *theme == Theme::Dark { "Light" } else { "Dark" } }</button>
@@ -1911,7 +2092,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
                         system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
-                        model={props.model.clone()}
+                        model={props.model.clone()} problems={Rc::new(block_problems)}
                         on_edit={on_edit.clone()} on_open={Callback::from({
                         let path = path.clone();
                         move |name: String| {
@@ -1922,6 +2103,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     })} />
                 }
             </div>
+            { for problem_list }
         </div>
     }
 }
@@ -2162,6 +2344,8 @@ struct InspectorProps {
     /// The whole model, to tell whether deleting a subsystem's port block
     /// cuts a connection outside it.
     model: Rc<Model>,
+    /// Problems found with the block.
+    problems: Rc<Vec<Diagnostic>>,
     on_open: Callback<String>,
     on_edit: Option<Callback<Edit>>,
 }
@@ -2267,6 +2451,13 @@ fn inspector(props: &InspectorProps) -> Html {
         <aside class="inspector">
             { title }
             <div class="muted">{ format!("{kind} · SID {}", b.id) }</div>
+            { for props.problems.iter().map(|d| {
+                let about = match &d.target {
+                    DiagnosticTarget::Block { parameter: Some(p), .. } => format!("{p}: "),
+                    _ => String::new(),
+                };
+                html! { <div class={problem_class(d)}>{ about }{ &d.message }</div> }
+            }) }
             { for open }
             { for expand }
             { for delete }
@@ -2318,7 +2509,7 @@ fn inspector(props: &InspectorProps) -> Html {
 /// the scope specification, which is shown structured instead.
 const HIDDEN_PARAMETERS: &[&str] = &["ZOrder", "ScopeSpecificationString"];
 
-fn fmt_num(v: f64) -> String {
+pub(crate) fn fmt_num(v: f64) -> String {
     if v != 0.0 && (v.abs() < 1e-3 || v.abs() >= 1e6) {
         format!("{v:e}")
     } else {

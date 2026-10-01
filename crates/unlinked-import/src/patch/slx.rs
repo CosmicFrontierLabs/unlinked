@@ -107,11 +107,12 @@ fn set_config(
             .map(|p| |k: &str| count(at(holder_root, p), k));
         super::config_places(
             key,
+            value,
             in_component.as_ref().map(|f| f as &dyn Fn(&str) -> usize),
             &|k| count(model, k),
         )?
     };
-    for (k, place) in places {
+    for (k, value, place) in places {
         let (part, path) = match (place, &component) {
             (ConfigPlace::Component, Some(path)) => (holder, path),
             _ => (diagram, &model_path),
@@ -123,8 +124,8 @@ fn set_config(
             .ok_or_else(|| ImportError::Xml("empty document".into()))?;
         let target = at_mut(root, path);
         match target.prop_mut(k) {
-            Some(p) => p.set_text(value),
-            None => target.push_prop(k, value),
+            Some(p) => p.set_text(&value),
+            None => target.push_prop(k, &value),
         }
     }
     Ok(())

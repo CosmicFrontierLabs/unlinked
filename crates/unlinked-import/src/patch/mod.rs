@@ -216,21 +216,22 @@ enum ConfigPlace {
     Model,
 }
 
-/// Where to write each property that setting `key` changes, so it lands
-/// where the importer reads it: the solver component wins, and model-level
-/// properties fill in what it lacks. `component` and `model` count each
-/// property's occurrences there; `component` is `None` without a solver
-/// component. Duplicated properties are refused, as their effective value
-/// is ambiguous.
+/// The properties setting `key` to `value` writes, their values, and where
+/// to write each so it lands where the importer reads it: the solver
+/// component wins, and model-level properties fill in what it lacks.
+/// `component` and `model` count each property's occurrences there;
+/// `component` is `None` without a solver component. Duplicated properties
+/// are refused, as their effective value is ambiguous.
 fn config_places(
     key: &str,
+    value: &str,
     component: Option<&dyn Fn(&str) -> usize>,
     model: &dyn Fn(&str) -> usize,
-) -> Result<Vec<(&'static str, ConfigPlace)>, ImportError> {
+) -> Result<Vec<(&'static str, String, ConfigPlace)>, ImportError> {
     let in_component = |k: &str| component.map_or(0, |c| c(k));
-    unlinked_model::edit::config_writes(key, |k| in_component(k) + model(k) > 0)
+    unlinked_model::edit::config_writes(key, value, |k| in_component(k) + model(k) > 0)
         .into_iter()
-        .map(|k| {
+        .map(|(k, value)| {
             let (c, m) = (in_component(k), model(k));
             if c > 1 || m > 1 {
                 return Err(ImportError::Edit(format!(
@@ -242,7 +243,7 @@ fn config_places(
             } else {
                 ConfigPlace::Model
             };
-            Ok((k, place))
+            Ok((k, value, place))
         })
         .collect()
 }
