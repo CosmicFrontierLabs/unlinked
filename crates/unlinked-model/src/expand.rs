@@ -106,7 +106,9 @@ fn scoped(block: &Block) -> bool {
             let v = v.trim();
             (k.ends_with("Fcn") && !v.is_empty())
                 || (k == "Commented" && !matches!(v, "" | "off"))
-                || ((k.starts_with("Variant") || k.starts_with("Mask") || k == "LinkStatus")
+                || ((crate::hierarchy::variant_key(k)
+                    || k.starts_with("Mask")
+                    || k == "LinkStatus")
                     && !matches!(v, "" | "off" | "none"))
         })
 }

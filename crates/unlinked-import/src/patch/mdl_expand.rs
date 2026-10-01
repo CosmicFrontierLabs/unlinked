@@ -121,6 +121,7 @@ pub(super) fn expand(
     if child.items.iter().any(|i| {
         !matches!(i,Item::Section(s) if s.tag=="Block" || s.tag=="Line")
             && !matches!(i,Item::Raw(s) if s.trim().is_empty())
+            && !matches!(i,Item::Prop{key,..} if key=="Name")
     }) {
         return Err(fail("expansion would discard child system metadata"));
     }
