@@ -75,7 +75,11 @@ CI. Per-model import, render and simulation coverage is tracked in
   reserialize attribute quoting.
   - Blocks: add from a palette of native catalog blocks, move, resize, rotate
     and flip, rename, re-parameterize (port counts follow the parameters) and
-    delete. Deleting an Inport/Outport renumbers its siblings.
+    delete. Deleting an Inport/Outport renumbers its siblings. Native
+    blocks edit through their parameter dialog: typed fields in sections,
+    showing only the fields the block's settings use; values outside a
+    field's choices are shown and kept, and other stored parameters are
+    listed raw.
   - Subsystem ports: adding, deleting or renumbering a plain Inport/Outport
     inside a plain subsystem updates the subsystem block's ports and moves the
     connections outside it with their signals (a wired port is only removed
@@ -102,8 +106,10 @@ CI. Per-model import, render and simulation coverage is tracked in
     is a reference, ambiguous or duplicated are refused.
   - Problems: a static check (structure, settings, simulator support)
     reruns after every edit; problems are listed, outlined on the diagram,
-    and shown in the block inspector and next to settings. It runs no
-    simulation and says nothing about numerical results.
+    and shown in the block inspector and next to settings. On request, a
+    compile check runs the simulator's compiler in a disposable web worker
+    with the run settings it lists; an edit cancels and forgets it. Neither
+    runs a simulation or says anything about numerical results.
   - Every batch is refused if it adds a structural error, both in the
     preview and when saving.
   - Not yet: copying masked, linked, styled or subsystem blocks; editing
