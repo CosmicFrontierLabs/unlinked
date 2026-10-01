@@ -562,6 +562,21 @@ pub fn apply_expand(model: &mut Model, path: &SystemRef, id: &BlockId) -> Result
         .as_deref()
         .unwrap();
     let lines = materialize_lines(parent, child, &plan);
+    // Each original tree may fit individually while their grafted ancestry
+    // exceeds the accepted serialization depth. Check before any mutation.
+    for line in &lines {
+        let mut pending: Vec<_> = line
+            .branches
+            .iter()
+            .map(|branch| (branch, 1usize))
+            .collect();
+        while let Some((branch, depth)) = pending.pop() {
+            if depth > 64 {
+                return Err(invalid("expanded branch depth exceeds 64"));
+            }
+            pending.extend(branch.branches.iter().map(|branch| (branch, depth + 1)));
+        }
+    }
     parent
         .blocks
         .splice(plan.wrapper_index..=plan.wrapper_index, plan.moved_blocks);
@@ -845,6 +860,64 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("depth"));
+        assert_eq!(model, before);
+    }
+    #[test]
+    fn combined_graft_depth_is_checked_before_mutation() {
+        fn deepen(line: &mut Line) {
+            let mut branch = Branch {
+                dst: line.dst.take(),
+                branches: std::mem::take(&mut line.branches),
+                ..Default::default()
+            };
+            for _ in 0..39 {
+                branch = Branch {
+                    branches: vec![branch],
+                    ..Default::default()
+                };
+            }
+            line.branches = vec![branch];
+        }
+        let mut model = fixture();
+        group(&mut model);
+        deepen(
+            model
+                .root
+                .lines
+                .iter_mut()
+                .find(|l| l.src.as_ref().unwrap().block.0 == "1")
+                .unwrap(),
+        );
+        let child = model
+            .root
+            .blocks
+            .iter_mut()
+            .find(|b| b.id.0 == "10")
+            .unwrap()
+            .subsystem
+            .as_deref_mut()
+            .unwrap();
+        let input = child
+            .blocks
+            .iter()
+            .find(|b| b.block_type == "Inport")
+            .unwrap()
+            .id
+            .clone();
+        deepen(
+            child
+                .lines
+                .iter_mut()
+                .find(|l| l.src.as_ref().unwrap().block == input)
+                .unwrap(),
+        );
+        // Both original trees fit. Only the composed ancestry exceeds the cap.
+        assert!(plan_expand(&model, &vec![], &"10".into()).is_ok());
+        let before = model.clone();
+        assert!(expand(&mut model)
+            .unwrap_err()
+            .to_string()
+            .contains("expanded branch depth"));
         assert_eq!(model, before);
     }
     #[test]
