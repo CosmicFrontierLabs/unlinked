@@ -4,6 +4,9 @@
 //! within that system only. Only parts that change are rewritten; every
 //! other zip entry is copied raw.
 
+#[path = "slx_hierarchy.rs"]
+mod hierarchy;
+
 use super::dom::{self, Document, XElem, XNode};
 use super::{format_ports, parse_endpoint};
 use super::{Boundary, Resolved};
@@ -264,6 +267,13 @@ fn set_parameter(block: &mut XElem, name: &str, value: &str) {
 /// Apply an edit to the system element `parent`.
 fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError> {
     let edit = &resolved.edit;
+    if let Edit::CreateSubsystem { .. } = edit {
+        let plan = resolved
+            .hierarchy
+            .as_ref()
+            .ok_or_else(|| ImportError::Edit("missing hierarchy plan".into()))?;
+        return hierarchy::create(parent, resolved, plan);
+    }
     if let Edit::AddAnnotation {
         id, text, position, ..
     } = edit
@@ -321,7 +331,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         return Ok(());
     }
     let sid = match edit {
-        Edit::AddAnnotation { .. }
+        Edit::CreateSubsystem { .. }
+        | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
         | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
@@ -444,7 +455,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
                 _ => true,
             });
         }
-        Edit::AddAnnotation { .. }
+        Edit::CreateSubsystem { .. }
+        | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
         | Edit::DeleteAnnotation { .. }
@@ -776,20 +788,24 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
                 .ok_or_else(|| ImportError::Xml("empty document".into()))??;
         }
         let allocated = match &resolved.edit {
-            Edit::AddAnnotation { id, .. } => Some(id.as_str()),
-            _ => resolved.added.as_ref().map(|block| block.id.0.as_str()),
+            Edit::CreateSubsystem { .. } => resolved
+                .hierarchy
+                .as_ref()
+                .map(|plan| plan.watermark.to_string()),
+            Edit::AddAnnotation { id, .. } => Some(id.clone()),
+            _ => resolved.added.as_ref().map(|block| block.id.0.clone()),
         };
         if let Some(sid) = allocated {
             let at = locate(&parts, &[])?;
             let root = system_at(&mut parts, &at)
                 .ok_or_else(|| ImportError::Xml("empty document".into()))?;
             match root.prop_mut(SID_WATERMARK) {
-                Some(watermark) => watermark.set_text(sid),
+                Some(watermark) => watermark.set_text(&sid),
                 // With the system's other properties, ahead of its blocks.
                 None => {
                     let mut p = XElem::new("P");
                     p.set_attr("Name", SID_WATERMARK);
-                    p.set_text(sid);
+                    p.set_text(&sid);
                     let (at, indent) = (after_last(root, &["P"]), indent_in(root));
                     insert_child(root, at, p, &indent);
                 }
@@ -872,6 +888,8 @@ mod tests {
             names: Default::default(),
             added: None,
             route: None,
+            hierarchy: None,
+            source_line_count: 0,
             ports: None,
             renumbered: Vec::new(),
             boundary: None,
@@ -937,6 +955,8 @@ mod tests {
             names: Default::default(),
             added: None,
             route: None,
+            hierarchy: None,
+            source_line_count: 0,
             ports: None,
             renumbered: Vec::new(),
             boundary: None,

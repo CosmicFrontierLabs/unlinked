@@ -42,6 +42,9 @@ pub struct Model {
     /// Stateflow charts and MATLAB Function blocks.
     #[serde(default)]
     pub charts: Vec<Chart>,
+    /// Document parameter defaults, excluding properties represented by dedicated block fields.
+    #[serde(default)]
+    pub type_defaults: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -653,6 +656,7 @@ mod tests {
                 ..Default::default()
             },
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: vec![],
         };
         let paths: Vec<_> = model.walk().into_iter().map(|(p, _)| p).collect();
@@ -679,6 +683,7 @@ mod tests {
             config: SimConfig::default(),
             root: System::default(),
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: vec![Chart {
                 id: "5".into(),
                 name: "Sub/a//b".into(),
@@ -738,6 +743,7 @@ mod tests {
                 ..Default::default()
             },
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: vec![],
         };
         let json = serde_json::to_string(&model).unwrap();

@@ -44,6 +44,7 @@ fn model(blocks: Vec<Block>, lines: Vec<Line>) -> Model {
     Model {
         name: "vectors".into(),
         source: SourceFormat::Mdl,
+        type_defaults: Default::default(),
         charts: vec![],
         simulink_version: None,
         config: SimConfig::default(),

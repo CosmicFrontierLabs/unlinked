@@ -276,6 +276,7 @@ mod tests {
             config: SimConfig::default(),
             root: System::default(),
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: vec![],
         };
         for (id, kind, name) in [

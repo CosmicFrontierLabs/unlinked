@@ -845,6 +845,7 @@ mod tests {
             config: Default::default(),
             root: System::default(),
             workspace: Default::default(),
+            type_defaults: Default::default(),
             charts: Vec::new(),
         };
         assert!(render_svg(&model, &[], &RenderOptions::default()).is_ok());

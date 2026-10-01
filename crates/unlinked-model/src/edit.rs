@@ -992,6 +992,7 @@ mod tests {
                 ..Default::default()
             },
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: Vec::new(),
         }
     }
@@ -1443,6 +1444,7 @@ mod annotation_tests {
             config: SimConfig::default(),
             root: System::default(),
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: vec![],
         }
     }

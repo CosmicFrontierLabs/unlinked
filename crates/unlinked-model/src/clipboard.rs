@@ -73,6 +73,7 @@ mod tests {
             config: SimConfig::default(),
             root: System::default(),
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: vec![],
         };
         let add = |id: &str, ty: &str, name: &str, x: f64| Edit::AddBlock {

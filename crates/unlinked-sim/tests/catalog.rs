@@ -59,6 +59,7 @@ fn model(key: &str) -> Model {
         simulink_version: None,
         config: Default::default(),
         workspace: Default::default(),
+        type_defaults: Default::default(),
         charts: vec![],
         root: System {
             blocks: vec![source, subject],

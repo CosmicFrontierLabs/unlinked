@@ -42,6 +42,7 @@ fn line(source: &str, output: u32, target: &str, input: u32) -> Line {
 }
 fn model(blocks: Vec<Block>, lines: Vec<Line>) -> Model {
     Model {
+        type_defaults: Default::default(),
         charts: Vec::new(),
         name: "vectors".into(),
         source: SourceFormat::Mdl,

@@ -61,6 +61,7 @@ fn model(blocks: Vec<Block>, lines: Vec<Line>) -> Model {
         config: Default::default(),
         workspace: Default::default(),
         charts: vec![],
+        type_defaults: Default::default(),
         root: System {
             blocks,
             lines,

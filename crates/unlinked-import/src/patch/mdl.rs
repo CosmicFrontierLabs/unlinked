@@ -3,6 +3,9 @@
 //! Blocks are found by the containing system's path and the block name
 //! (MDL lines refer to blocks by name).
 
+#[path = "mdl_hierarchy.rs"]
+mod hierarchy;
+
 use super::{format_ports, parse_endpoint};
 use super::{Boundary, Resolved};
 use crate::convert::parse_port;
@@ -443,6 +446,18 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
     let sys = file
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
+    if let Edit::CreateSubsystem { .. } = edit {
+        let plan = resolved
+            .hierarchy
+            .as_ref()
+            .ok_or_else(|| ImportError::Edit("missing hierarchy plan".into()))?;
+        hierarchy::create(sys, resolved, plan)?;
+        let root = file
+            .system_mut(&[])
+            .ok_or_else(|| ImportError::Mdl("no root system".into()))?;
+        root.set_prop(SID_WATERMARK, &plan.watermark.to_string(), false);
+        return Ok(());
+    }
     if let Edit::AddAnnotation {
         id, text, position, ..
     } = edit
@@ -496,7 +511,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         return Ok(());
     }
     let id = match edit {
-        Edit::AddAnnotation { .. }
+        Edit::CreateSubsystem { .. }
+        | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
         | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
@@ -689,7 +705,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
                 _ => true,
             });
         }
-        Edit::AddAnnotation { .. }
+        Edit::CreateSubsystem { .. }
+        | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
         | Edit::DeleteAnnotation { .. }
@@ -1023,6 +1040,8 @@ mod tests {
             names: [("x".into(), name.into())].into(),
             added: None,
             route: None,
+            hierarchy: None,
+            source_line_count: 0,
             ports: None,
             renumbered: Vec::new(),
             boundary: None,

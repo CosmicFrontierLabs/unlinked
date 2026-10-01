@@ -184,6 +184,57 @@ fn sorted_sources(
     sources
 }
 
+// Boundary blocks must carry inherited signal semantics even when a file has
+// customized per-type defaults. Preserve other defaults in the preview and file.
+fn generated_parameters(model: &Model, kind: &str) -> Result<BTreeMap<String, String>, EditError> {
+    let mut p = model.type_defaults.get(kind).cloned().unwrap_or_default();
+    for (key, value) in &p {
+        if (key.ends_with("Fcn") && !value.trim().is_empty())
+            || ((key.starts_with("Mask") || key.starts_with("Variant") || key == "LinkStatus")
+                && !matches!(value.trim(), "" | "off" | "none"))
+        {
+            return Err(invalid(format!(
+                "unsupported {kind} document default {key}"
+            )));
+        }
+    }
+    let defaults: &[(&str, &str)] = if kind == "SubSystem" {
+        &[
+            ("TreatAsAtomicUnit", "off"),
+            ("SystemSampleTime", "-1"),
+            ("SFBlockType", "NONE"),
+            ("SimViewingDevice", "off"),
+            ("PermitHierarchicalResolution", "All"),
+            ("Commented", "off"),
+        ]
+    } else {
+        &[
+            ("SampleTime", "-1"),
+            ("PortDimensions", "-1"),
+            ("OutDataTypeStr", "Inherit: auto"),
+            ("SignalType", "auto"),
+            ("SamplingMode", "auto"),
+            ("VarSizeSig", "Inherit"),
+            ("Unit", "inherit"),
+            ("OutMin", "[]"),
+            ("OutMax", "[]"),
+            ("BusOutputAsStruct", "off"),
+            ("Commented", "off"),
+        ]
+    };
+    p.extend(defaults.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    if kind == "Inport" {
+        for key in [
+            "OutputFunctionCall",
+            "LatchInputForFeedbackSignals",
+            "LatchByDelayingOutsideSignal",
+        ] {
+            p.insert(key.into(), "off".into());
+        }
+    }
+    Ok(p)
+}
+
 /// Plan without mutating input. Selection order does not affect port numbering.
 /// Ordinary named nets may move intact, but named boundary nets are refused
 /// until both sides' signal-label semantics can be represented explicitly.
@@ -411,7 +462,8 @@ pub fn plan_create(
                 (sid + id_remap.len() as u64 + generated_ports.len() as u64 + 1).to_string(),
             );
             let descriptor = catalog::find(kind).unwrap();
-            let mut parameters = descriptor.creation_parameters();
+            let mut parameters = generated_parameters(model, kind)?;
+            parameters.extend(descriptor.creation_parameters());
             parameters.insert("Port".into(), (i + 1).to_string());
             let PortResolution::Known(ports) = descriptor.resolve_ports(&parameters) else {
                 unreachable!()
@@ -556,10 +608,7 @@ pub fn plan_create(
             outputs: outgoing.len() as u32,
             ..Default::default()
         },
-        parameters: BTreeMap::from([
-            ("TreatAsAtomicUnit".into(), "off".into()),
-            ("SystemSampleTime".into(), "-1".into()),
-        ]),
+        parameters: generated_parameters(model, "SubSystem")?,
         mask: None,
         library_source: None,
         subsystem: Some(Box::new(child)),
@@ -684,6 +733,7 @@ mod tests {
             config: SimConfig::default(),
             root: System::default(),
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: vec![],
         };
         for (id, kind, x, y) in [

@@ -152,6 +152,7 @@ pub fn import_slx(filename: &str, bytes: &[u8]) -> Result<Model, ImportError> {
         root,
         workspace: BTreeMap::new(),
         charts,
+        type_defaults: convert::model_defaults(&defaults),
     })
 }
 
@@ -192,6 +193,7 @@ pub fn import_mdl(filename: &str, text: &str) -> Result<Model, ImportError> {
         root,
         workspace: BTreeMap::new(),
         charts,
+        type_defaults: convert::model_defaults(&defaults),
     })
 }
 
