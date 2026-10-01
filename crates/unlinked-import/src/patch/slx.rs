@@ -11,9 +11,9 @@ mod hierarchy;
 use unlinked_model::expand::removable_property as expansion_property;
 
 use super::dom::{self, Document, XElem, XNode};
-use super::{format_ports, parse_endpoint};
+use super::{format_ports, parse_endpoint, ConfigPlace};
 use super::{Boundary, Resolved};
-use crate::{ImportError, MAX_DEPTH, MAX_UNCOMPRESSED_BYTES};
+use crate::{ConfigSource, ImportError, MAX_DEPTH, MAX_UNCOMPRESSED_BYTES};
 use std::io::{Cursor, Read, Write};
 use unlinked_model::edit::{Edit, SID_WATERMARK};
 use unlinked_model::geometry::to_rotation;
@@ -22,6 +22,113 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 const ROOT_PART: &str = "simulink/blockdiagram.xml";
+
+/// Write a solver setting where the importer reads it: the solver component
+/// of the active configuration set (of the block diagram in packages
+/// without configuration parts), or the `<Model>` element's properties.
+/// Refused when the active set is unknown, is a reference without its own
+/// solver component, or has several.
+fn set_config(
+    parts: &mut [(String, Document, bool)],
+    source: &ConfigSource,
+    key: &str,
+    value: &str,
+) -> Result<(), ImportError> {
+    /// Child index paths, below `e`, of the solver components.
+    fn find(e: &XElem, at: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if e.name == "Simulink.SolverCC"
+            || e.attr("ClassName").as_deref() == Some("Simulink.SolverCC")
+        {
+            out.push(at.clone());
+            return;
+        }
+        for (i, c) in e.children.iter().enumerate() {
+            if let XNode::Element(c) = c {
+                at.push(i);
+                find(c, at, out);
+                at.pop();
+            }
+        }
+    }
+    fn at_mut<'a>(e: &'a mut XElem, path: &[usize]) -> &'a mut XElem {
+        path.iter().fold(e, |e, &i| element_mut(e, i))
+    }
+    fn at<'a>(e: &'a XElem, path: &[usize]) -> &'a XElem {
+        path.iter().fold(e, |e, &i| element(e, i))
+    }
+    fn count(e: &XElem, key: &str) -> usize {
+        e.elements()
+            .filter(|p| p.name == "P" && p.attr("Name").as_deref() == Some(key))
+            .count()
+    }
+    let refused = |why: &str| ImportError::Edit(format!("cannot edit the solver settings: {why}"));
+    let index = |name: &str| {
+        parts
+            .iter()
+            .position(|(n, ..)| n == name)
+            .ok_or_else(|| ImportError::Xml(format!("{name} missing")))
+    };
+    let diagram = index(ROOT_PART)?;
+    let holder = match source {
+        ConfigSource::Part(part) => index(part)?,
+        ConfigSource::Diagram => diagram,
+        ConfigSource::Unknown => return Err(refused("no configuration set is marked active")),
+    };
+    fn root(parts: &[(String, Document, bool)], i: usize) -> Result<&XElem, ImportError> {
+        parts[i]
+            .1
+            .root()
+            .ok_or_else(|| ImportError::Xml("empty document".into()))
+    }
+    let mut found = Vec::new();
+    find(root(parts, holder)?, &mut Vec::new(), &mut found);
+    let component = match (found.as_slice(), source) {
+        ([], ConfigSource::Part(_)) => {
+            return Err(refused(
+                "the active configuration set has no solver settings of its own (it may be a reference)",
+            ))
+        }
+        ([], _) => None,
+        ([one], _) => Some(one.clone()),
+        _ => return Err(refused("the configuration set has several solver components")),
+    };
+    let model_path = vec![root(parts, diagram)?
+        .children
+        .iter()
+        .position(|c| {
+            matches!(c, XNode::Element(e) if matches!(e.name.as_str(), "Model" | "Library" | "Subsystem"))
+        })
+        .ok_or_else(|| ImportError::Xml("no <Model> element".into()))?];
+    let places = {
+        let holder_root = root(parts, holder)?;
+        let model = at(root(parts, diagram)?, &model_path);
+        let in_component = component
+            .as_deref()
+            .map(|p| |k: &str| count(at(holder_root, p), k));
+        super::config_places(
+            key,
+            in_component.as_ref().map(|f| f as &dyn Fn(&str) -> usize),
+            &|k| count(model, k),
+        )?
+    };
+    for (k, place) in places {
+        let (part, path) = match (place, &component) {
+            (ConfigPlace::Component, Some(path)) => (holder, path),
+            _ => (diagram, &model_path),
+        };
+        let (_, doc, changed) = &mut parts[part];
+        *changed = true;
+        let root = doc
+            .root_mut()
+            .ok_or_else(|| ImportError::Xml("empty document".into()))?;
+        let target = at_mut(root, path);
+        match target.prop_mut(k) {
+            Some(p) => p.set_text(value),
+            None => target.push_prop(k, value),
+        }
+    }
+    Ok(())
+}
 
 fn is_block_part(name: &str) -> bool {
     name == ROOT_PART || (name.starts_with("simulink/systems/") && name.ends_with(".xml"))
@@ -346,7 +453,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
-        | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
+        | Edit::DeleteAnnotation { .. }
+        | Edit::SetConfig { .. } => unreachable!("applied above"),
         Edit::AddBlock { .. } => {
             let block = resolved
                 .added
@@ -477,7 +585,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         | Edit::Disconnect { .. }
         | Edit::SetRoute { .. }
         | Edit::SetTrunkRoute { .. }
-        | Edit::SetSignalName { .. } => {
+        | Edit::SetSignalName { .. }
+        | Edit::SetConfig { .. } => {
             unreachable!("applied above")
         }
     }
@@ -975,17 +1084,32 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
     let package_metadata = edits
         .iter()
         .any(|r| matches!(r.edit, Edit::CreateSubsystem { .. }));
+    let config = if edits
+        .iter()
+        .any(|r| matches!(r.edit, Edit::SetConfig { .. }))
+    {
+        Some(crate::active_config(&mut crate::slx::SlxPackage::open(
+            bytes,
+        )?)?)
+    } else {
+        None
+    };
+    let config_part = match &config {
+        Some(ConfigSource::Part(part)) => Some(part.as_str()),
+        _ => None,
+    };
     let mut read = 0u64;
     let mut occupied = std::collections::BTreeSet::new();
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(zip_err)?;
         let name = file.name().to_string();
         occupied.insert(name.clone());
-        if !is_block_part(&name)
-            && !(package_metadata
+        let wanted = is_block_part(&name)
+            || config_part == Some(name.as_str())
+            || package_metadata
                 && (name.starts_with("simulink/systems/_rels/") && name.ends_with(".rels")
-                    || name == "[Content_Types].xml"))
-        {
+                    || name == "[Content_Types].xml");
+        if !wanted {
             continue;
         }
         let mut buf = String::new();
@@ -1001,6 +1125,11 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
     }
 
     for resolved in edits {
+        if let Edit::SetConfig { key, value } = &resolved.edit {
+            let source = config.as_ref().expect("read for config edits");
+            set_config(&mut parts, source, key, value)?;
+            continue;
+        }
         let at = locate(&parts, &resolved.system)?;
         system_at(&mut parts, &at)
             .map(|sys| apply_edit(sys, resolved))

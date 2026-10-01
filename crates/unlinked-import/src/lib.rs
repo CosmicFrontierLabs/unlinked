@@ -91,6 +91,57 @@ fn stem(filename: &str) -> String {
     }
 }
 
+/// Where an SLX package keeps the configuration set Simulink uses.
+pub(crate) enum ConfigSource {
+    /// This configuration set part.
+    Part(String),
+    /// The block diagram itself (packages without configuration parts).
+    Diagram,
+    /// Configuration parts exist but none is marked as the one in use.
+    Unknown,
+}
+
+const CONFIG_INFO: &str = "simulink/configSetInfo.xml";
+
+fn is_config_part(name: &str) -> bool {
+    name.strip_prefix("simulink/configSet")
+        .and_then(|rest| rest.strip_suffix(".xml"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether the package has configuration set parts.
+pub(crate) fn config_parts(pkg: &slx::SlxPackage) -> bool {
+    pkg.names().any(is_config_part)
+}
+
+/// The active configuration set: the part `configSetInfo.xml` marks
+/// `Active`, or `configSet0.xml` in packages without that index.
+pub(crate) fn active_config(pkg: &mut slx::SlxPackage) -> Result<ConfigSource, ImportError> {
+    if pkg.has(CONFIG_INFO) {
+        let info = pkg.read_xml(CONFIG_INFO)?;
+        let active: Vec<Option<&str>> = info
+            .children_named("ConfigSet")
+            .filter(|c| c.attr("Active") == Some("true"))
+            .map(|c| c.attr("PartName").map(|p| p.trim_start_matches('/')))
+            .collect();
+        return Ok(match active.as_slice() {
+            [Some(part)] if pkg.has(part) => ConfigSource::Part(part.to_string()),
+            _ => ConfigSource::Unknown,
+        });
+    }
+    let sets: Vec<String> = pkg
+        .names()
+        .filter(|n| is_config_part(n))
+        .map(str::to_string)
+        .collect();
+    Ok(match sets.as_slice() {
+        [] => ConfigSource::Diagram,
+        [only] if only == "simulink/configSet0.xml" => ConfigSource::Part(only.clone()),
+        // Several sets and no index saying which applies.
+        _ => ConfigSource::Unknown,
+    })
+}
+
 pub fn import_slx(filename: &str, bytes: &[u8]) -> Result<Model, ImportError> {
     let mut pkg = slx::SlxPackage::open(bytes)?;
     let doc = pkg.block_diagram()?;
@@ -113,14 +164,17 @@ pub fn import_slx(filename: &str, bytes: &[u8]) -> Result<Model, ImportError> {
         read_type_defaults(d, &mut defaults);
     }
 
-    let config_set = if pkg.has("simulink/configSet0.xml") {
-        Some(pkg.read_xml("simulink/configSet0.xml")?)
-    } else {
-        None
+    let config_set = match active_config(&mut pkg)? {
+        ConfigSource::Part(part) => Some(pkg.read_xml(&part)?),
+        ConfigSource::Diagram | ConfigSource::Unknown => None,
     };
-    let mut trees: Vec<&Node> = Vec::new();
-    trees.extend(config_set.as_ref());
-    trees.push(&doc);
+    // Settings come from the active configuration set only; files without
+    // configuration parts keep it in the block diagram.
+    let trees: Vec<&Node> = match &config_set {
+        Some(set) => vec![set],
+        None if config_parts(&pkg) => vec![],
+        None => vec![&doc],
+    };
     let config = sim_config(&trees, model_node);
 
     let simulink_version = if pkg.has("metadata/coreProperties.xml") {

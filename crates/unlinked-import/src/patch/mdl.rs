@@ -9,7 +9,7 @@ mod expand;
 mod hierarchy;
 use unlinked_model::expand::removable_property as expansion_property;
 
-use super::{format_ports, parse_endpoint};
+use super::{config_places, format_ports, parse_endpoint, ConfigPlace};
 use super::{Boundary, Resolved};
 use crate::convert::parse_port;
 use crate::{ImportError, MAX_DEPTH, MAX_NODES};
@@ -446,6 +446,9 @@ fn annotation_position(position: &Rect, existing: Option<&str>) -> String {
 
 fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError> {
     let (edit, path) = (&resolved.edit, &resolved.system);
+    if let Edit::SetConfig { key, value } = edit {
+        return set_config(file, key, value);
+    }
     let sys = file
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
@@ -531,7 +534,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
-        | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
+        | Edit::DeleteAnnotation { .. }
+        | Edit::SetConfig { .. } => unreachable!("applied above"),
         Edit::AddBlock { .. } => {
             let block = resolved
                 .added
@@ -732,7 +736,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         | Edit::Disconnect { .. }
         | Edit::SetRoute { .. }
         | Edit::SetTrunkRoute { .. }
-        | Edit::SetSignalName { .. } => {
+        | Edit::SetSignalName { .. }
+        | Edit::SetConfig { .. } => {
             unreachable!("applied above")
         }
     }
@@ -756,6 +761,97 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
             let bare = b.was_quoted("Port") == Some(false);
             b.set_prop("Port", number, bare);
         }
+    }
+    Ok(())
+}
+
+/// Write a solver setting where the importer reads it: the model's solver
+/// component, or the `Model` section's own properties. Models with several
+/// solver components are refused, since which one applies is not resolved.
+fn set_config(file: &mut MdlFile, key: &str, value: &str) -> Result<(), ImportError> {
+    /// Item index paths, below `s`, of the solver components.
+    fn find(s: &Section, at: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if s.tag == "Simulink.SolverCC"
+            || s.prop("ClassName").as_deref() == Some("Simulink.SolverCC")
+        {
+            out.push(at.clone());
+            return;
+        }
+        for (i, item) in s.items.iter().enumerate() {
+            if let Item::Section(c) = item {
+                at.push(i);
+                find(c, at, out);
+                at.pop();
+            }
+        }
+    }
+    fn at<'a>(s: &'a Section, path: &[usize]) -> &'a Section {
+        path.iter().fold(s, |s, &i| match &s.items[i] {
+            Item::Section(c) => c,
+            _ => unreachable!("paths lead through sections"),
+        })
+    }
+    fn at_mut<'a>(s: &'a mut Section, path: &[usize]) -> &'a mut Section {
+        path.iter().fold(s, |s, &i| match &mut s.items[i] {
+            Item::Section(c) => c,
+            _ => unreachable!("paths lead through sections"),
+        })
+    }
+    fn count(s: &Section, key: &str) -> usize {
+        s.items
+            .iter()
+            .filter(|i| matches!(i, Item::Prop { key: k, .. } if k == key))
+            .count()
+    }
+    let model = file
+        .items
+        .iter_mut()
+        .find_map(|i| match i {
+            Item::Section(s) if s.tag == "Model" || s.tag == "Library" => Some(s),
+            _ => None,
+        })
+        .ok_or_else(|| ImportError::Mdl("no Model section".into()))?;
+    fn references(s: &Section) -> bool {
+        s.tag == "Simulink.ConfigSetRef"
+            || s.prop("ClassName").as_deref() == Some("Simulink.ConfigSetRef")
+            || s.sections().any(references)
+    }
+    // A configuration reference may be the active set, whose settings live
+    // elsewhere.
+    if references(model) {
+        return Err(ImportError::Edit(
+            "the model refers to a shared configuration; editing it is not supported".into(),
+        ));
+    }
+    let mut found = Vec::new();
+    find(model, &mut Vec::new(), &mut found);
+    let component = match found.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        _ => {
+            return Err(ImportError::Edit(
+                "the model has several solver configurations; editing them is not supported".into(),
+            ))
+        }
+    };
+    let places = {
+        let in_component = component
+            .as_deref()
+            .map(|p| |k: &str| count(at(model, p), k));
+        let model = &*model;
+        config_places(
+            key,
+            in_component.as_ref().map(|f| f as &dyn Fn(&str) -> usize),
+            &|k| count(model, k),
+        )?
+    };
+    for (k, place) in places {
+        let target = match (place, &component) {
+            (ConfigPlace::Component, Some(path)) => at_mut(model, path),
+            _ => &mut *model,
+        };
+        let bare = target.was_quoted(k) == Some(false);
+        target.set_prop(k, value, bare && is_bare_token(value));
     }
     Ok(())
 }
