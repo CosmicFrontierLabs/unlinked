@@ -701,16 +701,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     };
                     let mut group = Vec::new();
                     if key == "r" {
-                        // A quarter turn swaps the outline's sides about
-                        // its centre.
-                        let (c, p) = (b.position.center(), b.position);
-                        let (hw, hh) = (p.height() / 2.0, p.width() / 2.0);
-                        let snap = |v: f64| (v / SNAP).round() * SNAP;
-                        let (left, top) = (snap(c.x - hw), snap(c.y - hh));
                         group.push(Edit::MoveBlock {
                             system: system_ref.clone(),
                             id: b.id.clone(),
-                            position: Rect::new(left, top, left + 2.0 * hw, top + 2.0 * hh),
+                            position: geometry::quarter_turn(b.position),
                         });
                     }
                     group.push(Edit::SetOrientation {

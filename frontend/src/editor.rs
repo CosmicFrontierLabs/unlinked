@@ -9,6 +9,7 @@
 
 use crate::api;
 use crate::diagram::DiagramView;
+use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::edit::{apply_batch, Edit};
 use unlinked_model::Model;
@@ -195,27 +196,33 @@ pub fn model_editor(props: &EditorProps) -> Html {
     {
         let (undo, redo, active) = (undo.clone(), redo.clone(), *editing && !*busy);
         use_effect(move || {
+            // Not passive, so the browser's own shortcut can be suppressed.
             let listener = active.then(|| {
-                gloo_events::EventListener::new(&gloo_utils::document(), "keydown", move |e| {
-                    let Some(e) = e.dyn_ref::<KeyboardEvent>() else {
-                        return;
-                    };
-                    let typing = e
-                        .target()
-                        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                        .is_some_and(|t| {
-                            matches!(t.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
-                        });
-                    if typing || !(e.ctrl_key() || e.meta_key()) {
-                        return;
-                    }
-                    match (e.key().to_ascii_lowercase().as_str(), e.shift_key()) {
-                        ("z", false) => undo.emit(()),
-                        ("z", true) | ("y", _) => redo.emit(()),
-                        _ => return,
-                    }
-                    e.prevent_default();
-                })
+                EventListener::new_with_options(
+                    &gloo_utils::document(),
+                    "keydown",
+                    EventListenerOptions::enable_prevent_default(),
+                    move |e| {
+                        let Some(e) = e.dyn_ref::<KeyboardEvent>() else {
+                            return;
+                        };
+                        let typing = e
+                            .target()
+                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                            .is_some_and(|t| {
+                                matches!(t.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+                            });
+                        if typing || !(e.ctrl_key() || e.meta_key()) {
+                            return;
+                        }
+                        match (e.key().to_ascii_lowercase().as_str(), e.shift_key()) {
+                            ("z", false) => undo.emit(()),
+                            ("z", true) | ("y", _) => redo.emit(()),
+                            _ => return,
+                        }
+                        e.prevent_default();
+                    },
+                )
             });
             move || drop(listener)
         });

@@ -9,7 +9,7 @@
 //! model files are stored relative to the port anchor, which is
 //! [`PORT_OFFSET`] outside the block outline.
 
-use crate::{Block, Orientation, Point, PortKind, PortRef};
+use crate::{Block, Orientation, Point, PortKind, PortRef, Rect};
 
 /// Distance from the block outline to a port's line anchor.
 pub const PORT_OFFSET: f64 = 5.0;
@@ -82,6 +82,14 @@ pub fn rotated(orientation: Orientation, mirrored: bool) -> (Orientation, bool) 
 pub fn flipped(orientation: Orientation, mirrored: bool) -> (Orientation, bool) {
     let (rotation, mirror) = to_rotation(orientation, mirrored);
     from_rotation(rotation, !mirror)
+}
+
+/// A block outline after a quarter turn: width and height swap about the
+/// exact centre, so repeated turns never drift.
+pub fn quarter_turn(r: Rect) -> Rect {
+    let c = r.center();
+    let (hw, hh) = (r.height() / 2.0, r.width() / 2.0);
+    Rect::new(c.x - hw, c.y - hh, c.x + hw, c.y + hh)
 }
 
 /// Ports drawn on the "control" side (top, for a right-facing block).
@@ -263,6 +271,16 @@ mod tests {
             flipped(Orientation::Right, false),
             (Orientation::Left, false)
         );
+    }
+
+    #[test]
+    fn quarter_turns_keep_the_centre() {
+        let r = Rect::new(0.0, 0.0, 30.0, 35.0);
+        let once = quarter_turn(r);
+        assert_eq!(once, Rect::new(-2.5, 2.5, 32.5, 32.5));
+        assert_eq!(once.center(), r.center());
+        let four = (0..4).fold(r, |r, _| quarter_turn(r));
+        assert_eq!(four, r);
     }
 
     fn block(pos: Rect, ports: &[u32], orientation: Orientation, mirrored: bool) -> Block {
