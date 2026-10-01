@@ -32,6 +32,48 @@ pub enum ParameterKind {
     Text,
 }
 
+/// Labels are presentation only; `value` remains the serialized Simulink token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct EnumLabel {
+    pub value: &'static str,
+    pub label: &'static str,
+}
+
+/// A bounded, nonrecursive predicate over one catalog enum/boolean parameter.
+/// Expressions and callbacks are never evaluated to decide dialog visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Visibility {
+    Always,
+    Equals {
+        parameter: &'static str,
+        value: &'static str,
+    },
+    NotEquals {
+        parameter: &'static str,
+        value: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ParameterDialog {
+    pub section: &'static str,
+    pub help: &'static str,
+    pub units: Option<&'static str>,
+    pub enum_labels: &'static [EnumLabel],
+    pub visible_when: Visibility,
+}
+
+impl ParameterDialog {
+    pub const fn when(mut self, condition: Visibility) -> Self {
+        self.visible_when = condition;
+        self
+    }
+    pub const fn with_enum_labels(mut self, labels: &'static [EnumLabel]) -> Self {
+        self.enum_labels = labels;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ParameterDescriptor {
     pub name: &'static str,
@@ -42,6 +84,50 @@ pub struct ParameterDescriptor {
     /// Verified native-block implicit value when no effective imported value exists.
     pub implicit_default: Option<&'static str>,
     pub affects_ports: bool,
+    pub dialog: ParameterDialog,
+}
+
+impl ParameterDescriptor {
+    /// Friendly enum label, or the exact stored token when no label is known.
+    pub fn label_for<'a>(&self, value: &'a str) -> &'a str {
+        self.dialog
+            .enum_labels
+            .iter()
+            .find(|label| label.value == value)
+            .map_or(value, |label| label.label)
+    }
+
+    /// Whether to show this typed field. Explicit effective imported values win;
+    /// absent values use the controlling parameter's implicit default, never its
+    /// creation profile. Unknown, invalid or nonliteral controllers remain visible.
+    /// Hidden values are not removed: callers must preserve the raw parameter map.
+    pub fn visible(&self, block: &BlockDescriptor, parameters: &BTreeMap<String, String>) -> bool {
+        let (name, wanted, equal) = match self.dialog.visible_when {
+            Visibility::Always => return true,
+            Visibility::Equals { parameter, value } => (parameter, value, true),
+            Visibility::NotEquals { parameter, value } => (parameter, value, false),
+        };
+        let Some(controller) = block.parameters.iter().find(|p| p.name == name) else {
+            return true;
+        };
+        let Some(actual) = parameters
+            .get(name)
+            .map(String::as_str)
+            .or(controller.implicit_default)
+        else {
+            return true;
+        };
+        if actual.len() > 64 * 1024
+            || !matches!(
+                controller.kind,
+                ParameterKind::Enum(_) | ParameterKind::Boolean
+            )
+            || validate_parameter(controller, actual).is_err()
+        {
+            return true;
+        }
+        (actual.trim() == wanted) == equal
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -96,7 +182,35 @@ pub struct BlockDescriptor {
     pub creatable: bool,
 }
 
+/// Sections and fields retain catalog order; hidden fields remain represented
+/// so callers can preserve their raw values instead of deleting them.
+#[derive(Debug)]
+pub struct DialogSection {
+    pub name: &'static str,
+    pub fields: Vec<(&'static ParameterDescriptor, bool)>,
+}
+
 impl BlockDescriptor {
+    pub fn dialog_sections(&self, parameters: &BTreeMap<String, String>) -> Vec<DialogSection> {
+        let mut sections: Vec<DialogSection> = Vec::new();
+        for field in self.parameters {
+            let index = sections
+                .iter()
+                .position(|section| section.name == field.dialog.section)
+                .unwrap_or_else(|| {
+                    sections.push(DialogSection {
+                        name: field.dialog.section,
+                        fields: Vec::new(),
+                    });
+                    sections.len() - 1
+                });
+            sections[index]
+                .fields
+                .push((field, field.visible(self, parameters)));
+        }
+        sections
+    }
+
     /// Use only when creating a new block; never merge into imported params.
     pub fn creation_parameters(&self) -> BTreeMap<String, String> {
         self.parameters
@@ -273,9 +387,12 @@ impl PortRule {
         let (parameter, input, widths, signs, other) = match self {
             Self::SineWave => {
                 return known(
-                    u32::from(value("TimeSource") == Some("Use external signal")),
+                    u32::from(
+                        value("SineType") == Some("Time based")
+                            && value("TimeSource") == Some("Use external signal"),
+                    ),
                     1,
-                )
+                );
             }
             Self::Trigonometry => {
                 return known(
@@ -289,7 +406,7 @@ impl PortRule {
                     } else {
                         1
                     },
-                )
+                );
             }
             Self::Display => return known(u32::from(value("Floating") != Some("on")), 0),
             Self::Integrator => {
@@ -477,6 +594,7 @@ const fn param(
     kind: ParameterKind,
     default: &'static str,
     affects_ports: bool,
+    dialog: ParameterDialog,
 ) -> ParameterDescriptor {
     ParameterDescriptor {
         name,
@@ -485,6 +603,20 @@ const fn param(
         default,
         implicit_default: Some(default),
         affects_ports,
+        dialog,
+    }
+}
+const fn dialog(
+    section: &'static str,
+    help: &'static str,
+    units: Option<&'static str>,
+) -> ParameterDialog {
+    ParameterDialog {
+        section,
+        help,
+        units,
+        enum_labels: &[],
+        visible_when: Visibility::Always,
     }
 }
 const fn block(
@@ -528,8 +660,30 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Constant",
         "Sources",
         &[
-            param("Value", "Value", Expr, "1", false),
-            param("SampleTime", "Sample time", Expr, "inf", false),
+            param(
+                "Value",
+                "Value",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Signal",
+                    "MATLAB scalar or array expression emitted by the constant source.",
+                    None,
+                ),
+            ),
+            param(
+                "SampleTime",
+                "Sample time",
+                Expr,
+                "inf",
+                false,
+                dialog(
+                    "Timing",
+                    "Sample period in seconds; -1 inherits timing, 0 is continuous where supported, and inf denotes a constant sample time.",
+                    Some("s"),
+                ),
+            ),
         ],
         SOURCE,
         [30.0, 30.0],
@@ -539,18 +693,56 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Gain",
         "Math",
         &[
-            param("Gain", "Gain", Expr, "1", false),
+            param(
+                "Gain",
+                "Gain",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Operation",
+                    "Scalar, vector, or matrix gain expression K; the multiplication mode determines how K combines with the input.",
+                    None,
+                ),
+            ),
             param(
                 "Multiplication",
                 "Multiplication",
-                Enum(&[
-                    "Element-wise(K.*u)",
-                    "Matrix(K*u)",
-                    "Matrix(u*K)",
-                    "Matrix(K*u) (u vector)",
-                ]),
+                Enum(
+                    &[
+                        "Element-wise(K.*u)",
+                        "Matrix(K*u)",
+                        "Matrix(u*K)",
+                        "Matrix(K*u) (u vector)",
+                    ],
+                ),
                 "Element-wise(K.*u)",
                 false,
+                dialog(
+                        "Operation",
+                        "Choose elementwise multiplication, K*u, or u*K; dimensions must agree with the chosen operation.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "Element-wise(K.*u)",
+                                label: "Elementwise: K .* u",
+                            },
+                            EnumLabel {
+                                value: "Matrix(K*u)",
+                                label: "Matrix: K * u",
+                            },
+                            EnumLabel {
+                                value: "Matrix(u*K)",
+                                label: "Matrix: u * K",
+                            },
+                            EnumLabel {
+                                value: "Matrix(K*u) (u vector)",
+                                label: "Matrix: K * u (vector input)",
+                            },
+                        ],
+                    ),
             ),
         ],
         ONE,
@@ -561,13 +753,41 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Sum",
         "Math",
         &[
-            param("Inputs", "Inputs", Expr, "++", true),
+            param(
+                "Inputs",
+                "Inputs",
+                Expr,
+                "++",
+                true,
+                dialog(
+                    "Operation",
+                    "A sign per input, such as ++ or +-, or an integer input count. Changes the number of input ports.",
+                    None,
+                ),
+            ),
             param(
                 "IconShape",
                 "Icon shape",
                 Enum(&["rectangular", "round"]),
                 "rectangular",
                 false,
+                dialog(
+                        "Appearance",
+                        "Choose the Sum block icon shape; this does not change its arithmetic.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "rectangular",
+                                label: "Rectangular",
+                            },
+                            EnumLabel {
+                                value: "round",
+                                label: "Round",
+                            },
+                        ],
+                    ),
             ),
         ],
         PortRule::Signs {
@@ -583,7 +803,18 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         &[
             ParameterDescriptor {
                 implicit_default: Some("2"),
-                ..param("Inputs", "Inputs", Expr, "**", true)
+                ..param(
+                    "Inputs",
+                    "Inputs",
+                    Expr,
+                    "**",
+                    true,
+                    dialog(
+                        "Operation",
+                        "A multiplication or division sign per input, such as ** or */, or an integer input count.",
+                        None,
+                    ),
+                )
             },
             param(
                 "Multiplication",
@@ -591,6 +822,23 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 Enum(&["Element-wise(.*)", "Matrix(*)"]),
                 "Element-wise(.*)",
                 false,
+                dialog(
+                        "Operation",
+                        "Choose elementwise or matrix multiplication and division.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "Element-wise(.*)",
+                                label: "Elementwise",
+                            },
+                            EnumLabel {
+                                value: "Matrix(*)",
+                                label: "Matrix",
+                            },
+                        ],
+                    ),
             ),
         ],
         PortRule::Signs {
@@ -604,31 +852,202 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Integrator",
         "Continuous",
         &[
-            param("InitialCondition", "Initial condition", Expr, "0", false),
-            param(
-                "ExternalReset",
-                "External reset",
-                Enum(&["none", "rising", "falling", "either", "level", "level hold"]),
-                "none",
-                true,
-            ),
             param(
                 "InitialConditionSource",
                 "Initial condition source",
                 Enum(&["internal", "external"]),
                 "internal",
                 true,
+                dialog(
+                        "State",
+                        "Use the initial-condition expression or obtain the initial condition from an additional input port.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "internal",
+                                label: "Parameter",
+                            },
+                            EnumLabel {
+                                value: "external",
+                                label: "Input port",
+                            },
+                        ],
+                    ),
             ),
-            param("ShowStatePort", "Show state port", Boolean, "off", true),
-            param("LimitOutput", "Limit output", Boolean, "off", true),
+            param(
+                "InitialCondition",
+                "Initial condition",
+                Expr,
+                "0",
+                false,
+                dialog(
+                        "State",
+                        "Value of the state before the first update; enter a MATLAB scalar or array expression.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "InitialConditionSource",
+                        value: "internal",
+                    }),
+            ),
+            param(
+                "ExternalReset",
+                "External reset",
+                Enum(&["none", "rising", "falling", "either", "level", "level hold"]),
+                "none",
+                true,
+                dialog(
+                        "State",
+                        "Select which external reset events restore the initial condition; enabled modes add a reset input.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "none",
+                                label: "None",
+                            },
+                            EnumLabel {
+                                value: "rising",
+                                label: "Rising edge",
+                            },
+                            EnumLabel {
+                                value: "falling",
+                                label: "Falling edge",
+                            },
+                            EnumLabel {
+                                value: "either",
+                                label: "Either edge",
+                            },
+                            EnumLabel {
+                                value: "level",
+                                label: "Level",
+                            },
+                            EnumLabel {
+                                value: "level hold",
+                                label: "Level hold",
+                            },
+                        ],
+                    ),
+            ),
+            param(
+                "ShowStatePort",
+                "Show state port",
+                Boolean,
+                "off",
+                true,
+                dialog(
+                    "Ports",
+                    "Expose the integrator state on a state port; changes the block interface.",
+                    None,
+                ),
+            ),
+            param(
+                "LimitOutput",
+                "Limit output",
+                Boolean,
+                "off",
+                true,
+                dialog(
+                    "Limits",
+                    "Enable output saturation. Set the upper and lower saturation limits below.",
+                    None,
+                ),
+            ),
+            param(
+                "UpperSaturationLimit",
+                "Upper saturation limit",
+                Expr,
+                "inf",
+                false,
+                dialog(
+                        "Limits",
+                        "Upper saturation limit as a MATLAB scalar or array expression.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "LimitOutput",
+                        value: "on",
+                    }),
+            ),
+            param(
+                "LowerSaturationLimit",
+                "Lower saturation limit",
+                Expr,
+                "-inf",
+                false,
+                dialog(
+                        "Limits",
+                        "Lower saturation limit as a MATLAB scalar or array expression.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "LimitOutput",
+                        value: "on",
+                    }),
+            ),
             param(
                 "ShowSaturationPort",
                 "Show saturation port",
                 Boolean,
                 "off",
                 true,
+                dialog(
+                        "Limits",
+                        "Expose saturation status when output limiting is enabled; changes the output port count.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "LimitOutput",
+                        value: "on",
+                    }),
             ),
-            param("WrapState", "Wrap state", Boolean, "off", false),
+            param(
+                "WrapState",
+                "Wrap state",
+                Boolean,
+                "off",
+                false,
+                dialog(
+                    "State",
+                    "Wrap the integrator state at its configured bounds. Set the upper and lower wrapped state values below.",
+                    None,
+                ),
+            ),
+            param(
+                "WrappedStateUpperValue",
+                "Wrapped state upper value",
+                Expr,
+                "pi",
+                false,
+                dialog(
+                        "State",
+                        "Wrapped state upper value as a MATLAB scalar or array expression.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "WrapState",
+                        value: "on",
+                    }),
+            ),
+            param(
+                "WrappedStateLowerValue",
+                "Wrapped state lower value",
+                Expr,
+                "-pi",
+                false,
+                dialog(
+                        "State",
+                        "Wrapped state lower value as a MATLAB scalar or array expression.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "WrapState",
+                        value: "on",
+                    }),
+            ),
         ],
         PortRule::Integrator,
         [40.0, 40.0],
@@ -638,8 +1057,30 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Unit Delay",
         "Discrete",
         &[
-            param("InitialCondition", "Initial condition", Expr, "0", false),
-            param("SampleTime", "Sample time", Expr, "-1", false),
+            param(
+                "InitialCondition",
+                "Initial condition",
+                Expr,
+                "0",
+                false,
+                dialog(
+                    "State",
+                    "Value of the state before the first update; enter a MATLAB scalar or array expression.",
+                    None,
+                ),
+            ),
+            param(
+                "SampleTime",
+                "Sample time",
+                Expr,
+                "-1",
+                false,
+                dialog(
+                    "Timing",
+                    "Discrete sample period in seconds, or -1 to inherit. Zero is not a continuous mode for this block; multirate simulation requires an explicit positive period.",
+                    Some("s"),
+                ),
+            ),
         ],
         ONE,
         [35.0, 34.0],
@@ -648,10 +1089,23 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "ZeroOrderHold",
         "Zero-Order Hold",
         "Discrete",
-        &[ParameterDescriptor {
-            implicit_default: Some("-1"),
-            ..param("SampleTime", "Sample time", Expr, "1", false)
-        }],
+        &[
+            ParameterDescriptor {
+                implicit_default: Some("-1"),
+                ..param(
+                    "SampleTime",
+                    "Sample time",
+                    Expr,
+                    "1",
+                    false,
+                    dialog(
+                        "Timing",
+                        "Discrete sample period in seconds, or -1 to inherit. Unlinked requires an explicit positive period; zero is not a continuous mode for this block.",
+                        Some("s"),
+                    ),
+                )
+            },
+        ],
         ONE,
         [35.0, 30.0],
     ),
@@ -660,8 +1114,35 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Scope",
         "Sinks",
         &[
-            param("NumInputPorts", "Number of input ports", Int, "1", true),
-            param("Floating", "Floating", Boolean, "off", true),
+            param(
+                "Floating",
+                "Floating",
+                Boolean,
+                "off",
+                true,
+                dialog(
+                    "Ports",
+                    "A floating scope has no wired input ports; the current simulation backend may not support that mode.",
+                    None,
+                ),
+            ),
+            param(
+                "NumInputPorts",
+                "Number of input ports",
+                Int,
+                "1",
+                true,
+                dialog(
+                        "Ports",
+                        "Number of wired signals accepted by the nonfloating scope.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "Floating",
+                        value: "off",
+                    }),
+            ),
+
         ],
         PortRule::Scope,
         [30.0, 32.0],
@@ -670,7 +1151,20 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Inport",
         "Inport",
         "Ports",
-        &[param("Port", "Port number", Int, "1", false)],
+        &[
+            param(
+                "Port",
+                "Port number",
+                Int,
+                "1",
+                false,
+                dialog(
+                    "Ports",
+                    "One-based interface port number within the containing system. Renumbering can move boundary connections.",
+                    None,
+                ),
+            ),
+        ],
         SOURCE,
         [30.0, 14.0],
     ),
@@ -678,7 +1172,20 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Outport",
         "Outport",
         "Ports",
-        &[param("Port", "Port number", Int, "1", false)],
+        &[
+            param(
+                "Port",
+                "Port number",
+                Int,
+                "1",
+                false,
+                dialog(
+                    "Ports",
+                    "One-based interface port number within the containing system. Renumbering can move boundary connections.",
+                    None,
+                ),
+            ),
+        ],
         SINK,
         [30.0, 14.0],
     ),
@@ -686,7 +1193,20 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Mux",
         "Mux",
         "Routing",
-        &[param("Inputs", "Inputs", Expr, "2", true)],
+        &[
+            param(
+                "Inputs",
+                "Inputs",
+                Expr,
+                "2",
+                true,
+                dialog(
+                    "Ports",
+                    "Number of inputs or a literal vector of input widths; -1 entries inherit width. Changes the input port count.",
+                    None,
+                ),
+            ),
+        ],
         PortRule::Count {
             parameter: "Inputs",
             input: true,
@@ -699,7 +1219,20 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Demux",
         "Demux",
         "Routing",
-        &[param("Outputs", "Outputs", Expr, "2", true)],
+        &[
+            param(
+                "Outputs",
+                "Outputs",
+                Expr,
+                "2",
+                true,
+                dialog(
+                    "Ports",
+                    "Number of outputs or a literal vector of output widths; -1 entries inherit width. Changes the output port count.",
+                    None,
+                ),
+            ),
+        ],
         PortRule::Count {
             parameter: "Outputs",
             input: false,
@@ -713,10 +1246,46 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Step",
         "Sources",
         &[
-            param("Time", "Step time", Expr, "1", false),
-            param("Before", "Initial value", Expr, "0", false),
-            param("After", "Final value", Expr, "1", false),
-            param("SampleTime", "Sample time", Expr, "0", false),
+            param(
+                "Time",
+                "Step time",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Timing",
+                    "Simulation time when the output changes from its initial value to its final value.",
+                    Some("s"),
+                ),
+            ),
+            param(
+                "Before",
+                "Initial value",
+                Expr,
+                "0",
+                false,
+                dialog("Signal", "Output value before the step time.", None),
+            ),
+            param(
+                "After",
+                "Final value",
+                Expr,
+                "1",
+                false,
+                dialog("Signal", "Output value at and after the step time.", None),
+            ),
+            param(
+                "SampleTime",
+                "Sample time",
+                Expr,
+                "0",
+                false,
+                dialog(
+                    "Timing",
+                    "Sample period in seconds; -1 inherits timing, 0 is continuous where supported, and inf denotes a constant sample time.",
+                    Some("s"),
+                ),
+            ),
         ],
         SOURCE,
         [30.0, 30.0],
@@ -731,7 +1300,24 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 "Sine type",
                 Enum(&["Time based", "Sample based"]),
                 "Time based",
-                false,
+                true,
+                dialog(
+                        "Timing",
+                        "Choose a waveform defined by simulation time or by discrete sample position.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "Time based",
+                                label: "Time based",
+                            },
+                            EnumLabel {
+                                value: "Sample based",
+                                label: "Sample based",
+                            },
+                        ],
+                    ),
             ),
             param(
                 "TimeSource",
@@ -739,12 +1325,124 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 Enum(&["Use simulation time", "Use external signal"]),
                 "Use simulation time",
                 true,
+                dialog(
+                        "Timing",
+                        "Use simulation time or an external signal as the time input; an external source adds an input port.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "Use simulation time",
+                                label: "Simulation time",
+                            },
+                            EnumLabel {
+                                value: "Use external signal",
+                                label: "External time input",
+                            },
+                        ],
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "SineType",
+                        value: "Time based",
+                    }),
             ),
-            param("Amplitude", "Amplitude", Expr, "1", false),
-            param("Bias", "Bias", Expr, "0", false),
-            param("Frequency", "Frequency (rad/s)", Expr, "1", false),
-            param("Phase", "Phase (rad)", Expr, "0", false),
-            param("SampleTime", "Sample time", Expr, "0", false),
+            param(
+                "Amplitude",
+                "Amplitude",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Signal",
+                    "Peak amplitude of the sine component before adding the bias.",
+                    None,
+                ),
+            ),
+            param(
+                "Bias",
+                "Bias",
+                Expr,
+                "0",
+                false,
+                dialog("Signal", "Constant offset added to the sine component.", None),
+            ),
+            param(
+                "Frequency",
+                "Frequency",
+                Expr,
+                "1",
+                false,
+                dialog(
+                        "Signal",
+                        "Angular frequency of a time-based sine wave.",
+                        Some("rad/s"),
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "SineType",
+                        value: "Time based",
+                    }),
+            ),
+            param(
+                "Phase",
+                "Phase",
+                Expr,
+                "0",
+                false,
+                dialog(
+                        "Signal",
+                        "Initial phase angle of a time-based sine wave.",
+                        Some("rad"),
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "SineType",
+                        value: "Time based",
+                    }),
+            ),
+            param(
+                "Samples",
+                "Samples per period",
+                Expr,
+                "10",
+                false,
+                dialog(
+                        "Signal",
+                        "Number of samples in each cycle; enter an integer scalar or vector.",
+                        Some("samples"),
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "SineType",
+                        value: "Sample based",
+                    }),
+            ),
+            param(
+                "Offset",
+                "Offset samples",
+                Expr,
+                "0",
+                false,
+                dialog(
+                        "Signal",
+                        "Discrete phase offset measured in sample intervals.",
+                        Some("samples"),
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "SineType",
+                        value: "Sample based",
+                    }),
+            ),
+            param(
+                "SampleTime",
+                "Sample time",
+                Expr,
+                "0",
+                false,
+                dialog(
+                    "Timing",
+                    "Sample period in seconds. Time-based mode permits zero for continuous output; sample-based mode requires a positive period.",
+                    Some("s"),
+                ),
+            ),
         ],
         PortRule::SineWave,
         [30.0, 30.0],
@@ -756,10 +1454,54 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Random Number",
         "Sources",
         &[
-            param("Mean", "Mean", Expr, "0", false),
-            param("Variance", "Variance", Expr, "1", false),
-            param("Seed", "Seed", Expr, "0", false),
-            param("SampleTime", "Sample time", Expr, "0.1", false),
+            param(
+                "Mean",
+                "Mean",
+                Expr,
+                "0",
+                false,
+                dialog(
+                    "Distribution",
+                    "Mean of the normally distributed random output.",
+                    None,
+                ),
+            ),
+            param(
+                "Variance",
+                "Variance",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Distribution",
+                    "Nonnegative variance of the normally distributed random output.",
+                    None,
+                ),
+            ),
+            param(
+                "Seed",
+                "Seed",
+                Expr,
+                "0",
+                false,
+                dialog(
+                    "Distribution",
+                    "Seed expression for reproducible runs; Unlinked requires an integer from 0 through 4294967295 (u32::MAX).",
+                    None,
+                ),
+            ),
+            param(
+                "SampleTime",
+                "Sample time",
+                Expr,
+                "0.1",
+                false,
+                dialog(
+                    "Timing",
+                    "Discrete sample period in seconds. Unlinked requires an explicit positive period for random sources.",
+                    Some("s"),
+                ),
+            ),
         ],
         SOURCE,
         [40.0, 30.0],
@@ -769,8 +1511,30 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Saturation",
         "Discontinuities",
         &[
-            param("UpperLimit", "Upper limit", Expr, "0.5", false),
-            param("LowerLimit", "Lower limit", Expr, "-0.5", false),
+            param(
+                "UpperLimit",
+                "Upper limit",
+                Expr,
+                "0.5",
+                false,
+                dialog(
+                    "Limits",
+                    "Largest permitted output value; must be no smaller than the lower limit.",
+                    None,
+                ),
+            ),
+            param(
+                "LowerLimit",
+                "Lower limit",
+                Expr,
+                "-0.5",
+                false,
+                dialog(
+                    "Limits",
+                    "Smallest permitted output value; must be no greater than the upper limit.",
+                    None,
+                ),
+            ),
         ],
         ONE,
         [30.0, 30.0],
@@ -780,13 +1544,29 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Transfer Function",
         "Continuous",
         &[
-            param("Numerator", "Numerator coefficients", Expr, "[1]", false),
+            param(
+                "Numerator",
+                "Numerator coefficients",
+                Expr,
+                "[1]",
+                false,
+                dialog(
+                    "Coefficients",
+                    "Numerator coefficients in descending powers of s.",
+                    None,
+                ),
+            ),
             param(
                 "Denominator",
                 "Denominator coefficients",
                 Expr,
                 "[1 1]",
                 false,
+                dialog(
+                    "Coefficients",
+                    "Denominator coefficients in descending powers of s; the leading coefficient must be nonzero.",
+                    None,
+                ),
             ),
         ],
         ONE,
@@ -797,17 +1577,73 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "State-Space",
         "Continuous",
         &[
-            param("A", "State matrix A", Expr, "1", false),
-            param("B", "Input matrix B", Expr, "1", false),
-            param("C", "Output matrix C", Expr, "1", false),
-            param("D", "Feedthrough matrix D", Expr, "1", false),
-            param("InitialCondition", "Initial conditions", Expr, "0", false),
+            param(
+                "A",
+                "State matrix A",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Matrices",
+                    "State matrix in the continuous-time equation dx/dt = A*x + B*u.",
+                    None,
+                ),
+            ),
+            param(
+                "B",
+                "Input matrix B",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Matrices",
+                    "Input matrix in the continuous-time equation dx/dt = A*x + B*u.",
+                    None,
+                ),
+            ),
+            param(
+                "C",
+                "Output matrix C",
+                Expr,
+                "1",
+                false,
+                dialog("Matrices", "Output matrix in the equation y = C*x + D*u.", None),
+            ),
+            param(
+                "D",
+                "Feedthrough matrix D",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Matrices",
+                    "Direct-feedthrough matrix in the equation y = C*x + D*u.",
+                    None,
+                ),
+            ),
+            param(
+                "InitialCondition",
+                "Initial conditions",
+                Expr,
+                "0",
+                false,
+                dialog(
+                    "State",
+                    "Value of the state before the first update; enter a MATLAB scalar or array expression.",
+                    None,
+                ),
+            ),
             param(
                 "AllowTunableDMatrix",
                 "Allow tunable D matrix",
                 Boolean,
                 "off",
                 false,
+                dialog(
+                    "Matrices",
+                    "Allow the direct-feedthrough matrix to change during simulation; support depends on the simulation backend.",
+                    None,
+                ),
             ),
         ],
         ONE,
@@ -826,9 +1662,45 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                     Enum(&["u2 >= Threshold", "u2 > Threshold", "u2 ~= 0"]),
                     "u2 ~= 0",
                     false,
+                    dialog(
+                            "Selection",
+                            "Select the first data input when the control input u2 satisfies this condition; otherwise select the third input.",
+                            None,
+                        )
+                        .with_enum_labels(
+                            &[
+                                EnumLabel {
+                                    value: "u2 >= Threshold",
+                                    label: "Control >= threshold",
+                                },
+                                EnumLabel {
+                                    value: "u2 > Threshold",
+                                    label: "Control > threshold",
+                                },
+                                EnumLabel {
+                                    value: "u2 ~= 0",
+                                    label: "Control is nonzero",
+                                },
+                            ],
+                        ),
                 )
             },
-            param("Threshold", "Threshold", Expr, "0", false),
+            param(
+                "Threshold",
+                "Threshold",
+                Expr,
+                "0",
+                false,
+                dialog(
+                        "Selection",
+                        "Comparison value for threshold-based switching; unused by the nonzero-control criterion.",
+                        None,
+                    )
+                    .when(Visibility::NotEquals {
+                        parameter: "Criteria",
+                        value: "u2 ~= 0",
+                    }),
+            ),
             ParameterDescriptor {
                 implicit_default: Some("on"),
                 ..param(
@@ -837,6 +1709,11 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                     Boolean,
                     "off",
                     false,
+                    dialog(
+                        "Timing",
+                        "Request zero-crossing detection for switching events; solver support is required.",
+                        None,
+                    ),
                 )
             },
         ],
@@ -851,29 +1728,38 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Trigonometry",
         "Trigonometric Function",
         "Math",
-        &[param(
-            "Operator",
-            "Function",
-            Enum(&[
+        &[
+            param(
+                "Operator",
+                "Function",
+                Enum(
+                    &[
+                        "sin",
+                        "cos",
+                        "tan",
+                        "asin",
+                        "acos",
+                        "atan",
+                        "atan2",
+                        "sinh",
+                        "cosh",
+                        "tanh",
+                        "asinh",
+                        "acosh",
+                        "atanh",
+                        "sincos",
+                        "cos + jsin",
+                    ],
+                ),
                 "sin",
-                "cos",
-                "tan",
-                "asin",
-                "acos",
-                "atan",
-                "atan2",
-                "sinh",
-                "cosh",
-                "tanh",
-                "asinh",
-                "acosh",
-                "atanh",
-                "sincos",
-                "cos + jsin",
-            ]),
-            "sin",
-            true,
-        )],
+                true,
+                dialog(
+                    "Operation",
+                    "Trigonometric function to apply. atan2 uses two inputs; sincos produces separate sine and cosine outputs.",
+                    None,
+                ),
+            ),
+        ],
         PortRule::Trigonometry,
         [40.0, 30.0],
     ),
@@ -882,7 +1768,20 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Display",
         "Display",
         "Sinks",
-        &[param("Floating", "Floating", Boolean, "off", true)],
+        &[
+            param(
+                "Floating",
+                "Floating",
+                Boolean,
+                "off",
+                true,
+                dialog(
+                    "Ports",
+                    "A floating display has no wired input port. Turning this on changes the block interface.",
+                    None,
+                ),
+            ),
+        ],
         PortRule::Display,
         [60.0, 30.0],
     ),
@@ -1118,7 +2017,7 @@ mod tests {
             ("SineType".into(), "Sample based".into()),
             ("TimeSource".into(), "Use external signal".into()),
         ]);
-        assert_eq!(find("Sin").unwrap().resolve_ports(&sample), known(1, 1));
+        assert_eq!(find("Sin").unwrap().resolve_ports(&sample), known(0, 1));
         assert_eq!(ports("Trigonometry", "Operator", "atan2"), known(2, 1));
         assert_eq!(ports("Trigonometry", "Operator", "sincos"), known(1, 2));
         assert_eq!(ports("Trigonometry", "Operator", "cos + jsin"), known(1, 1));
