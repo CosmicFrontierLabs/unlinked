@@ -99,7 +99,10 @@ fn an_existing_error_cannot_be_traded_for_a_new_one() {
 #[test]
 fn truncated_validation_does_not_authorize_regressions() {
     let mut before = two_sums();
-    before.root.lines = vec![Line::default(); 1001];
+    before.root.lines = vec![Line {
+        points: vec![unlinked_model::Point { x: 0.0, y: 0.0 }; 500_001],
+        ..Default::default()
+    }];
     assert!(unlinked_model::validation::validate_structure(&before).truncated);
     let mut after = before.clone();
     after.root.blocks[0]
@@ -134,4 +137,19 @@ fn unresolved_port_counts_do_not_allow_rewiring_stale_ports() {
         },
     };
     assert!(apply_batch(&mut m, &[connect]).is_err());
+}
+
+#[test]
+fn warning_display_cap_allows_safe_edits_but_not_new_errors() {
+    let mut before = two_sums();
+    before.root.lines = vec![Line::default(); 1500];
+    let report = unlinked_model::validation::validate_structure(&before);
+    assert!(report.warnings_omitted && !report.truncated);
+    let mut after = before.clone();
+    after.root.blocks[0].name = "renamed".into();
+    assert!(structural_regression(&before, &after).is_ok());
+    after.root.blocks[0]
+        .parameters
+        .insert("Inputs".into(), "0".into());
+    assert!(structural_regression(&before, &after).is_err());
 }
