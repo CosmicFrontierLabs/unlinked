@@ -6,9 +6,11 @@
 
 use super::dom::{self, Document, XElem, XNode};
 use super::Resolved;
+use super::{format_ports, parse_endpoint};
 use crate::{ImportError, MAX_DEPTH, MAX_UNCOMPRESSED_BYTES};
 use std::io::{Cursor, Read, Write};
-use unlinked_model::edit::Edit;
+use unlinked_model::edit::{Edit, SID_WATERMARK};
+use unlinked_model::{Block, Endpoint, PortCounts, PortKind};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -133,6 +135,16 @@ fn locate(parts: &[(String, Document, bool)], path: &[String]) -> Result<SystemA
     Ok(at)
 }
 
+/// The system element at `at`, marking its part changed.
+fn system_at<'a>(
+    parts: &'a mut [(String, Document, bool)],
+    at: &SystemAt,
+) -> Option<&'a mut XElem> {
+    let (_, doc, changed) = &mut parts[at.part];
+    *changed = true;
+    Some(descend_mut(doc.root_mut()?, &at.path))
+}
+
 fn refers_to(e: &XElem, key: &str, sid: &str) -> bool {
     e.prop(key)
         .is_some_and(|v| v.split_once('#').is_some_and(|(b, _)| b == sid))
@@ -154,18 +166,19 @@ fn clear_points(e: &mut XElem) {
     }
 }
 
-/// Remove endpoints at `sid` from a line or branch; returns whether it
-/// still leads anywhere. Physical-connection branches store their port as
-/// `Src`, so both keys count as destinations below the line's own source.
-fn prune(e: &mut XElem, sid: &str, is_line: bool) -> bool {
+/// Remove endpoints whose value `hit` matches from a line or branch;
+/// returns whether it still leads anywhere. Physical-connection branches
+/// store their port as `Src`, so both keys count as destinations below the
+/// line's own source.
+fn prune(e: &mut XElem, hit: &dyn Fn(&str) -> bool, is_line: bool) -> bool {
     e.children.retain_mut(|c| match c {
         XNode::Element(p) if p.name == "P" => {
             let name = p.attr("Name");
             let dst =
                 name.as_deref() == Some("Dst") || (!is_line && name.as_deref() == Some("Src"));
-            !(dst && refers_to_value(&p.text(), sid))
+            !(dst && hit(&p.text()))
         }
-        XNode::Element(b) if b.name == "Branch" => prune(b, sid, false),
+        XNode::Element(b) if b.name == "Branch" => prune(b, hit, false),
         _ => true,
     });
     e.prop("Dst").is_some()
@@ -247,9 +260,35 @@ fn set_parameter(block: &mut XElem, name: &str, value: &str) {
     block.push_prop(name, value);
 }
 
-/// Apply `edit` to its block, a direct child of the system element `parent`.
-fn apply_edit(parent: &mut XElem, edit: &Edit) -> Result<(), ImportError> {
-    let sid = edit.block().0.clone();
+/// Apply an edit to the system element `parent`.
+fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError> {
+    let edit = &resolved.edit;
+    let sid = match edit {
+        Edit::AddBlock { .. } => {
+            let block = resolved
+                .added
+                .as_ref()
+                .ok_or_else(|| ImportError::Edit("the added block is missing".into()))?;
+            add_block(parent, block);
+            return Ok(());
+        }
+        Edit::Connect { src, dst, .. } => {
+            connect(parent, src, dst);
+            return Ok(());
+        }
+        Edit::Disconnect { dst, .. } => {
+            let hit = |v: &str| is_endpoint(v, dst, PortKind::In);
+            parent.children.retain_mut(|c| match c {
+                XNode::Element(l) if l.name == "Line" && reaches(l, &hit) => prune(l, &hit, true),
+                _ => true,
+            });
+            return Ok(());
+        }
+        Edit::MoveBlock { id, .. }
+        | Edit::SetParameter { id, .. }
+        | Edit::RenameBlock { id, .. }
+        | Edit::DeleteBlock { id, .. } => id.0.clone(),
+    };
     let i = only_child(parent, &format!("block {sid}"), |c| {
         c.name == "Block" && c.attr("SID").as_deref() == Some(sid.as_str())
     })?;
@@ -268,21 +307,219 @@ fn apply_edit(parent: &mut XElem, edit: &Edit) -> Result<(), ImportError> {
             }
         }
         Edit::SetParameter { name, value, .. } => {
-            set_parameter(element_mut(parent, i), name, value)
+            let block = element_mut(parent, i);
+            set_parameter(block, name, value);
+            if let Some(ports) = &resolved.ports {
+                set_ports(block, ports);
+            }
         }
         Edit::RenameBlock { name, .. } => element_mut(parent, i).set_attr("Name", name),
         Edit::DeleteBlock { .. } => {
             parent.children.remove(i);
+            let hit = |v: &str| refers_to_value(v, &sid);
             parent.children.retain_mut(|c| match c {
                 // Leave unrelated (possibly already dangling) lines alone.
                 XNode::Element(l) if l.name == "Line" && touches(l, &sid) => {
-                    !refers_to(l, "Src", &sid) && prune(l, &sid, true)
+                    !refers_to(l, "Src", &sid) && prune(l, &hit, true)
                 }
                 _ => true,
             });
+            for (id, number) in &resolved.renumbered {
+                let Some(b) = parent
+                    .elements_mut()
+                    .find(|b| b.name == "Block" && b.attr("SID").as_deref() == Some(id.0.as_str()))
+                else {
+                    continue;
+                };
+                let interface = b.elements_mut().find(|l| {
+                    l.name == "List" && l.attr("ListType").as_deref() == Some("InterfaceData")
+                });
+                let bus = interface.is_some();
+                if let Some(p) = interface.and_then(|l| l.prop_mut("PortNumber")) {
+                    p.set_text(number);
+                }
+                if !bus || b.prop("Port").is_some() {
+                    set_parameter(b, "Port", number);
+                }
+            }
+        }
+        Edit::AddBlock { .. } | Edit::Connect { .. } | Edit::Disconnect { .. } => {
+            unreachable!("applied above")
         }
     }
     Ok(())
+}
+
+/// Whether the endpoint value `v` (`12#out:1`) is `ep`.
+fn is_endpoint(v: &str, ep: &Endpoint, default_kind: PortKind) -> bool {
+    parse_endpoint(v, default_kind).is_some_and(|(sid, port)| sid == ep.block.0 && port == ep.port)
+}
+
+/// Whether `e` or a branch below it has a destination `hit` matches.
+fn reaches(e: &XElem, hit: &dyn Fn(&str) -> bool) -> bool {
+    e.prop("Dst").is_some_and(|v| hit(&v))
+        || e.elements().any(|b| b.name == "Branch" && reaches(b, hit))
+}
+
+/// The whitespace preceding `e`'s first child element: the newline and
+/// indentation new children should get. Empty for unindented documents.
+fn indent_in(e: &XElem) -> String {
+    let first = e
+        .children
+        .iter()
+        .position(|c| matches!(c, XNode::Element(_)));
+    match first.and_then(|i| i.checked_sub(1)).map(|i| &e.children[i]) {
+        Some(XNode::Text(t)) if t.trim().is_empty() && t.contains('\n') => t.clone(),
+        _ => String::new(),
+    }
+}
+
+/// A new element that will sit after `indent`, closing on its own line.
+fn new_element(name: &str, indent: &str) -> XElem {
+    let mut e = XElem::new(name);
+    if !indent.is_empty() {
+        e.children.push(XNode::Text(indent.to_string()));
+    }
+    e
+}
+
+/// One level deeper than `indent`.
+fn deeper(indent: &str) -> String {
+    if indent.is_empty() {
+        String::new()
+    } else {
+        format!("{indent}  ")
+    }
+}
+
+/// Insert `child` at `at` in `parent`, on its own line after `indent`.
+fn insert_child(parent: &mut XElem, at: usize, child: XElem, indent: &str) {
+    parent.children.insert(at, XNode::Element(child));
+    if !indent.is_empty() {
+        parent.children.insert(at, XNode::Text(indent.to_string()));
+    }
+    parent.empty = false;
+}
+
+/// Index just before the whitespace that precedes `e`'s end tag.
+fn end_of(e: &XElem) -> usize {
+    match e.children.last() {
+        Some(XNode::Text(t)) if t.trim().is_empty() => e.children.len() - 1,
+        _ => e.children.len(),
+    }
+}
+
+/// Index after the last child element named one of `after`, or the end.
+fn after_last(e: &XElem, after: &[&str]) -> usize {
+    e.children
+        .iter()
+        .rposition(|c| matches!(c, XNode::Element(x) if after.contains(&x.name.as_str())))
+        .map_or_else(|| end_of(e), |i| i + 1)
+}
+
+/// Append `<P Name="name">value</P>` to a new element built by
+/// [`new_element`] after `indent`.
+fn push_new_prop(e: &mut XElem, name: &str, value: &str, indent: &str) {
+    let mut p = XElem::new("P");
+    p.set_attr("Name", name);
+    p.set_text(value);
+    insert_child(e, end_of(e), p, &deeper(indent));
+}
+
+fn add_block(sys: &mut XElem, block: &Block) {
+    let indent = indent_in(sys);
+    let mut b = new_element("Block", &indent);
+    b.set_attr("BlockType", &block.block_type);
+    b.set_attr("Name", &block.name);
+    b.set_attr("SID", &block.id.0);
+    push_new_prop(&mut b, "Ports", &format_ports(&block.ports), &indent);
+    push_new_prop(&mut b, "Position", &format_rect(&block.position), &indent);
+    for (key, value) in &block.parameters {
+        push_new_prop(&mut b, key, value, &indent);
+    }
+    let at = after_last(sys, &["Block"]);
+    insert_child(sys, at, b, &indent);
+}
+
+/// Write port counts, in the `<PortCounts>` form if the block uses it.
+fn set_ports(block: &mut XElem, ports: &PortCounts) {
+    if let Some(pc) = block.elements_mut().find(|e| e.name == "PortCounts") {
+        let counts = [
+            ("in", ports.inputs),
+            ("out", ports.outputs),
+            ("enable", ports.enable),
+            ("trigger", ports.trigger),
+            ("state", ports.state),
+            ("lconn", ports.lconn),
+            ("rconn", ports.rconn),
+            ("ifaction", ports.ifaction),
+            ("reset", ports.reset),
+        ];
+        pc.attrs
+            .retain(|(k, _)| !counts.iter().any(|(name, _)| k == name));
+        for (name, n) in counts.into_iter().filter(|&(_, n)| n > 0) {
+            pc.set_attr(name, &n.to_string());
+        }
+        return;
+    }
+    match block.prop_mut("Ports") {
+        Some(p) => p.set_text(&format_ports(ports)),
+        None => block.push_prop("Ports", &format_ports(ports)),
+    }
+}
+
+/// Mirror of the IR's connect: branch the source's existing line (its
+/// destination becoming the first branch), or start a new line.
+fn connect(sys: &mut XElem, src: &Endpoint, dst: &Endpoint) {
+    let sys_indent = indent_in(sys);
+    let line = sys.elements_mut().find(|l| {
+        l.name == "Line"
+            && l.prop("Src")
+                .is_some_and(|v| is_endpoint(&v, src, PortKind::Out))
+    });
+    let Some(line) = line else {
+        let mut line = new_element("Line", &sys_indent);
+        push_new_prop(&mut line, "Src", &src.to_string(), &sys_indent);
+        push_new_prop(&mut line, "Dst", &dst.to_string(), &sys_indent);
+        let at = after_last(sys, &["Line", "Block"]);
+        insert_child(sys, at, line, &sys_indent);
+        return;
+    };
+    let indent = indent_in(line);
+    let old = line.children.iter().position(
+        |c| matches!(c, XNode::Element(p) if p.name == "P" && p.attr("Name").as_deref() == Some("Dst")),
+    );
+    if let Some(i) = old {
+        let XNode::Element(p) = line.children.remove(i) else {
+            unreachable!("position matched an element")
+        };
+        if i > 0 && matches!(&line.children[i - 1], XNode::Text(t) if t.trim().is_empty()) {
+            line.children.remove(i - 1);
+        }
+        let mut branch = new_element("Branch", &indent);
+        let end = end_of(&branch);
+        insert_child(&mut branch, end, p, &deeper(&indent));
+        // Before the first branch and the indentation preceding it.
+        let at = match line
+            .children
+            .iter()
+            .position(|c| matches!(c, XNode::Element(b) if b.name == "Branch"))
+        {
+            Some(i)
+                if i > 0
+                    && matches!(&line.children[i - 1], XNode::Text(t) if t.trim().is_empty()) =>
+            {
+                i - 1
+            }
+            Some(i) => i,
+            None => end_of(line),
+        };
+        insert_child(line, at, branch, &indent);
+    }
+    let mut branch = new_element("Branch", &indent);
+    push_new_prop(&mut branch, "Dst", &dst.to_string(), &indent);
+    let at = end_of(line);
+    insert_child(line, at, branch, &indent);
 }
 
 pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportError> {
@@ -310,14 +547,22 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
         parts.push((name, dom::parse(&buf)?, false));
     }
 
-    for Resolved { edit, system, .. } in edits {
-        let at = locate(&parts, system)?;
-        let (_, doc, changed) = &mut parts[at.part];
-        let root = doc
-            .root_mut()
-            .ok_or_else(|| ImportError::Xml("empty document".into()))?;
-        apply_edit(descend_mut(root, &at.path), edit)?;
-        *changed = true;
+    for resolved in edits {
+        let at = locate(&parts, &resolved.system)?;
+        system_at(&mut parts, &at)
+            .map(|sys| apply_edit(sys, resolved))
+            .ok_or_else(|| ImportError::Xml("empty document".into()))??;
+        if let Some(block) = &resolved.added {
+            let at = locate(&parts, &[])?;
+            let root = descend(part_root(&parts, at.part)?, &at.path);
+            if root.prop(SID_WATERMARK).is_some() {
+                if let Some(watermark) =
+                    system_at(&mut parts, &at).and_then(|s| s.prop_mut(SID_WATERMARK))
+                {
+                    watermark.set_text(&block.id.0);
+                }
+            }
+        }
     }
 
     let mut out = ZipWriter::new(Cursor::new(Vec::new()));
@@ -369,7 +614,10 @@ mod tests {
                 name: name.into(),
             },
             system: system.iter().map(|s| s.to_string()).collect(),
-            block: String::new(),
+            names: Default::default(),
+            added: None,
+            ports: None,
+            renumbered: Vec::new(),
         }
     }
 
@@ -413,6 +661,61 @@ mod tests {
         assert!(apply(&wrong, &[rename(&["S"], "3", "c")]).is_err());
         let missing = slx(&[(ROOT_PART, root)]);
         assert!(apply(&missing, &[rename(&["S"], "3", "c")]).is_err());
+    }
+
+    #[test]
+    fn connecting_a_driven_source_branches_its_line_in_place() {
+        let root = "<ModelInformation>\n  <Model>\n    <System>\n      <P Name=\"SIDHighWatermark\">3</P>\n      <Block BlockType=\"Gain\" Name=\"a\" SID=\"1\"/>\n      <Line>\n        <P Name=\"Src\">1#out:1</P>\n        <P Name=\"Points\">[20, 0]</P>\n        <P Name=\"Dst\">2#in:1</P>\n      </Line>\n    </System>\n  </Model>\n</ModelInformation>";
+        let bytes = slx(&[(ROOT_PART, root)]);
+        let ep = |s: &str| {
+            let (block, port) = s.split_once('#').unwrap();
+            Endpoint {
+                block: block.into(),
+                port: crate::convert::parse_port(port, PortKind::In).unwrap(),
+            }
+        };
+        let resolved = |edit| Resolved {
+            edit,
+            system: vec![],
+            names: Default::default(),
+            added: None,
+            ports: None,
+            renumbered: Vec::new(),
+        };
+        let gain = Block {
+            id: "4".into(),
+            block_type: "Gain".into(),
+            name: "b".into(),
+            position: unlinked_model::Rect::new(0.0, 0.0, 30.0, 30.0),
+            orientation: Default::default(),
+            mirrored: false,
+            ports: PortCounts::from_slice(&[1, 1]),
+            parameters: [("Gain".to_string(), "1".to_string())].into(),
+            mask: None,
+            library_source: None,
+            subsystem: None,
+            style: Default::default(),
+            interface: None,
+        };
+        let mut add = resolved(Edit::AddBlock {
+            system: vec![],
+            id: "4".into(),
+            block_type: "Gain".into(),
+            name: "b".into(),
+            position: gain.position,
+        });
+        add.added = Some(gain);
+        let connect = resolved(Edit::Connect {
+            system: vec![],
+            src: ep("1#out:1"),
+            dst: ep("4#in:1"),
+        });
+        let out = apply(&bytes, &[add, connect]).unwrap();
+        let xml = part(&out, ROOT_PART);
+        assert_eq!(
+            xml,
+            "<ModelInformation>\n  <Model>\n    <System>\n      <P Name=\"SIDHighWatermark\">4</P>\n      <Block BlockType=\"Gain\" Name=\"a\" SID=\"1\"/>\n      <Block BlockType=\"Gain\" Name=\"b\" SID=\"4\">\n        <P Name=\"Ports\">[1, 1]</P>\n        <P Name=\"Position\">[0, 0, 30, 30]</P>\n        <P Name=\"Gain\">1</P>\n      </Block>\n      <Line>\n        <P Name=\"Src\">1#out:1</P>\n        <P Name=\"Points\">[20, 0]</P>\n        <Branch>\n          <P Name=\"Dst\">2#in:1</P>\n        </Branch>\n        <Branch>\n          <P Name=\"Dst\">4#in:1</P>\n        </Branch>\n      </Line>\n    </System>\n  </Model>\n</ModelInformation>"
+        );
     }
 
     #[test]

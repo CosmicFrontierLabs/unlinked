@@ -2,8 +2,8 @@
 //! the IR obtained by applying the same edits to the imported model.
 
 use std::path::{Path, PathBuf};
-use unlinked_model::edit::{apply_batch, DisconnectPolicy, Edit};
-use unlinked_model::{Model, Rect};
+use unlinked_model::edit::{apply_batch, next_sid, touches, DisconnectPolicy, Edit};
+use unlinked_model::{BlockId, Branch, Endpoint, Line, Model, PortKind, PortRef, Rect};
 
 fn corpus_dir() -> Option<PathBuf> {
     let dir = match std::env::var_os("UNLINKED_TEST_CASES") {
@@ -67,13 +67,7 @@ fn edits_for(model: &Model) -> Vec<Edit> {
         id: first.id.clone(),
         name: format!("{} renamed", first.name),
     });
-    let connected = free.find(|b| {
-        model
-            .root
-            .lines
-            .iter()
-            .any(|l| unlinked_model::edit::touches(l, &b.id))
-    });
+    let connected = free.find(|b| model.root.lines.iter().any(|l| touches(l, &b.id)));
     if let Some(b) = connected {
         edits.push(Edit::DeleteBlock {
             system: vec![],
@@ -86,7 +80,7 @@ fn edits_for(model: &Model) -> Vec<Edit> {
     let sub = model.root.blocks.iter().find(|b| {
         !owns_chart(model, &b.name)
             && b.subsystem.as_ref().is_some_and(|s| !s.blocks.is_empty())
-            && !edits.iter().any(|e| e.block() == &b.id)
+            && !edits.iter().any(|e| e.block() == Some(&b.id))
     });
     if let Some(sub) = sub {
         let inner = &sub.subsystem.as_ref().unwrap().blocks[0];
@@ -102,7 +96,102 @@ fn edits_for(model: &Model) -> Vec<Edit> {
             value: "nested edit".into(),
         });
     }
+    structural_edits(model, &mut edits);
     edits
+}
+
+/// In the root: feed an existing signal into a new gain, connect that to a
+/// new scope, and remove a connection from another line.
+fn structural_edits(model: &Model, edits: &mut Vec<Edit>) {
+    let Some(sid) = next_sid(model) else {
+        return;
+    };
+    let deleted: Vec<&BlockId> = edits
+        .iter()
+        .filter_map(|e| match e {
+            Edit::DeleteBlock { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    let mut lines = model.root.lines.iter().filter(|l| {
+        l.src.as_ref().is_some_and(|s| s.port.kind == PortKind::Out)
+            && !deleted.iter().any(|id| touches(l, id))
+    });
+    let feed = lines.next().and_then(|l| l.src.clone());
+    let cut = lines
+        .find_map(first_destination)
+        .filter(|d| d.port.kind == PortKind::In);
+
+    let right = model
+        .root
+        .blocks
+        .iter()
+        .map(|b| b.position.right)
+        .fold(0.0, f64::max);
+    let ids = [sid.to_string(), (sid + 1).to_string()];
+    let port = |id: &str, kind| Endpoint {
+        block: id.into(),
+        port: PortRef { kind, index: 1 },
+    };
+    for (i, (id, block_type)) in ids.iter().zip(["Gain", "Scope"]).enumerate() {
+        let left = right + 100.0 + 80.0 * i as f64;
+        edits.push(Edit::AddBlock {
+            system: vec![],
+            id: id.as_str().into(),
+            block_type: block_type.into(),
+            name: format!("Added {block_type}"),
+            position: Rect::new(left, 20.0, left + 30.0, 50.0),
+        });
+    }
+    if let Some(src) = feed {
+        edits.push(Edit::Connect {
+            system: vec![],
+            src,
+            dst: port(&ids[0], PortKind::In),
+        });
+    }
+    edits.push(Edit::Connect {
+        system: vec![],
+        src: port(&ids[0], PortKind::Out),
+        dst: port(&ids[1], PortKind::In),
+    });
+    if let Some(dst) = cut {
+        edits.push(Edit::Disconnect {
+            system: vec![],
+            dst,
+        });
+    }
+}
+
+fn first_destination(line: &Line) -> Option<Endpoint> {
+    fn branches(bs: &[Branch]) -> Option<Endpoint> {
+        bs.iter()
+            .find_map(|b| b.dst.clone().or_else(|| branches(&b.branches)))
+    }
+    line.dst.clone().or_else(|| branches(&line.branches))
+}
+
+/// MDL type defaults (`BlockParameterDefaults`) give re-imported new blocks
+/// parameters they were not created with; the created ones must survive.
+fn adopt_defaults(expected: &mut Model, actual: &Model, edits: &[Edit]) {
+    for edit in edits {
+        let Edit::AddBlock { id, .. } = edit else {
+            continue;
+        };
+        let (Some(want), Some(got)) = (
+            expected.root.blocks.iter_mut().find(|b| &b.id == id),
+            actual.root.block(id),
+        ) else {
+            continue;
+        };
+        if want
+            .parameters
+            .iter()
+            .all(|(k, v)| got.parameters.get(k) == Some(v))
+        {
+            want.parameters = got.parameters.clone();
+        }
+    }
 }
 
 /// What differs between two versions of a model file: zip entry names for
@@ -147,6 +236,7 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
     models(&dir, &mut files);
     files.sort();
     let mut failures = Vec::new();
+    let mut exercised = std::collections::BTreeMap::new();
     for f in &files {
         let name = f.display().to_string();
         let bytes = std::fs::read(f).unwrap();
@@ -177,7 +267,21 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
 
         let edits = edits_for(&original);
         let mut expected = original.clone();
-        apply_batch(&mut expected, &edits).unwrap();
+        for edit in &edits {
+            *exercised
+                .entry(match edit {
+                    Edit::Connect { src, .. } if original.root.block(&src.block).is_some() => {
+                        "connect into an existing line"
+                    }
+                    Edit::Disconnect { .. } => "disconnect",
+                    _ => "other",
+                })
+                .or_insert(0) += 1;
+        }
+        if let Err(e) = apply_batch(&mut expected, &edits) {
+            failures.push(format!("{name}: {e} ({:?})", edits[e.index]));
+            continue;
+        }
 
         // Deleting a connected block without consent to disconnect fails
         // and writes nothing.
@@ -209,10 +313,13 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
                         changed_content(&bytes, &patched)
                     ));
                 }
-                Ok(actual) if actual.root == expected.root => {}
                 Ok(actual) => {
-                    let diff = unlinked_model::diff::diff(&expected, &actual);
-                    failures.push(format!("{name}: patched model differs: {:?}", diff));
+                    let mut expected = expected.clone();
+                    adopt_defaults(&mut expected, &actual, &edits);
+                    if actual.root != expected.root {
+                        let diff = unlinked_model::diff::diff(&expected, &actual);
+                        failures.push(format!("{name}: patched model differs: {:?}", diff));
+                    }
                 }
                 Err(e) => failures.push(format!("{name}: patched file does not import: {e}")),
             },
@@ -220,4 +327,8 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    for kind in ["connect into an existing line", "disconnect"] {
+        assert!(exercised.get(kind).copied().unwrap_or(0) > 0, "no {kind}");
+    }
+    eprintln!("structural edits exercised: {exercised:?}");
 }

@@ -480,7 +480,7 @@ fn endpoint(
 
 /// Parse `out:1`, `in:2`, `state`, `enable`, `LConn1`, or a bare number.
 /// Indices outside `1..=MAX_PORTS` are rejected.
-fn parse_port(s: &str, default_kind: PortKind) -> Option<PortRef> {
+pub(crate) fn parse_port(s: &str, default_kind: PortKind) -> Option<PortRef> {
     let s = s.trim();
     let (kind, index) = if let Ok(index) = s.parse::<u32>() {
         (default_kind, index)

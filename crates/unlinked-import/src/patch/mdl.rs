@@ -4,9 +4,12 @@
 //! (MDL lines refer to blocks by name).
 
 use super::Resolved;
+use super::{format_ports, parse_endpoint};
+use crate::convert::parse_port;
 use crate::{ImportError, MAX_DEPTH, MAX_NODES};
-use unlinked_model::edit::Edit;
+use unlinked_model::edit::{Edit, SID_WATERMARK};
 use unlinked_model::Rect;
+use unlinked_model::{Block, PortKind, PortRef};
 
 #[derive(Debug, Clone)]
 enum Item {
@@ -340,13 +343,11 @@ fn rename_refs(s: &mut Section, old: &str, new: &str) {
     }
 }
 
-fn prune(s: &mut Section, name: &str, sid: Option<&str>, is_line: bool) -> bool {
-    let keys: &[&str] = if is_line {
-        &DST_KEYS
-    } else {
-        &["DstBlock", "Dst", "SrcBlock", "Src"]
-    };
-    if endpoint_is(s, keys, name, sid) {
+/// Remove the endpoints `hit` matches (given whether `s` is the line
+/// itself) and branches left leading nowhere; returns whether `s` still
+/// leads anywhere. Physical-connection branches store their port as `Src`.
+fn prune(s: &mut Section, hit: &dyn Fn(&Section, bool) -> bool, is_line: bool) -> bool {
+    if hit(s, is_line) {
         for k in ["DstBlock", "DstPort", "Dst"] {
             s.remove_prop(k);
         }
@@ -357,7 +358,7 @@ fn prune(s: &mut Section, name: &str, sid: Option<&str>, is_line: bool) -> bool 
         }
     }
     s.items.retain_mut(|i| match i {
-        Item::Section(b) if b.tag == "Branch" => prune(b, name, sid, false),
+        Item::Section(b) if b.tag == "Branch" => prune(b, hit, false),
         _ => true,
     });
     s.prop("DstBlock").is_some()
@@ -420,12 +421,47 @@ fn format_rect(p: &Rect) -> String {
     )
 }
 
-/// `name` is the block's current name (the edit refers to it by id).
 fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError> {
-    let (edit, path, name) = (&resolved.edit, &resolved.system, resolved.block.as_str());
+    let (edit, path) = (&resolved.edit, &resolved.system);
     let sys = file
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
+    let id = match edit {
+        Edit::AddBlock { .. } => {
+            let block = resolved
+                .added
+                .as_ref()
+                .ok_or_else(|| ImportError::Edit("the added block is missing".into()))?;
+            add_block(sys, block);
+            let root = file
+                .system_mut(&[])
+                .ok_or_else(|| ImportError::Mdl("no root system".into()))?;
+            if root.prop(SID_WATERMARK).is_some() {
+                root.set_prop(SID_WATERMARK, &block.id.0, false);
+            }
+            return Ok(());
+        }
+        Edit::Connect { src, dst, .. } => {
+            let src = Port::new(sys, resolved.name(&src.block)?, src.port, PortKind::Out);
+            let dst = Port::new(sys, resolved.name(&dst.block)?, dst.port, PortKind::In);
+            connect(sys, &src, &dst);
+            return Ok(());
+        }
+        Edit::Disconnect { dst, .. } => {
+            let dst = Port::new(sys, resolved.name(&dst.block)?, dst.port, PortKind::In);
+            let hit = |s: &Section, _: bool| dst.is_at(s, DST_FORMS);
+            sys.items.retain_mut(|item| match item {
+                Item::Section(l) if l.tag == "Line" && reaches(l, &hit) => prune(l, &hit, true),
+                _ => true,
+            });
+            return Ok(());
+        }
+        Edit::MoveBlock { id, .. }
+        | Edit::SetParameter { id, .. }
+        | Edit::RenameBlock { id, .. }
+        | Edit::DeleteBlock { id, .. } => id,
+    };
+    let name = resolved.name(id)?;
     let mut matches = sys.items.iter().enumerate().filter(|(_, i)| {
         matches!(i, Item::Section(b) if b.tag == "Block" && b.prop("Name").as_deref() == Some(name))
     });
@@ -464,6 +500,9 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
                 let bare = b.was_quoted(key) == Some(false) && is_bare_token(value);
                 b.set_prop(key, value, bare);
             }
+            if let Some(ports) = &resolved.ports {
+                b.set_prop("Ports", &format_ports(ports), true);
+            }
         }
         Edit::RenameBlock { name: new, .. } => {
             block_at(sys, i).set_prop("Name", new, false);
@@ -473,15 +512,184 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         }
         Edit::DeleteBlock { .. } => {
             sys.items.remove(i);
+            let hit = |s: &Section, is_line: bool| {
+                let keys: &[&str] = if is_line {
+                    &DST_KEYS
+                } else {
+                    &["DstBlock", "Dst", "SrcBlock", "Src"]
+                };
+                endpoint_is(s, keys, name, sid)
+            };
             sys.items.retain_mut(|item| match item {
                 Item::Section(l) if l.tag == "Line" && touches(l, name, sid) => {
-                    !endpoint_is(l, &SRC_KEYS, name, sid) && prune(l, name, sid, true)
+                    !endpoint_is(l, &SRC_KEYS, name, sid) && prune(l, &hit, true)
                 }
                 _ => true,
             });
+            for (id, number) in &resolved.renumbered {
+                let other = resolved.name(id)?;
+                let Some(b) = sys
+                    .sections_mut()
+                    .find(|b| b.tag == "Block" && b.prop("Name").as_deref() == Some(other))
+                else {
+                    continue;
+                };
+                let interface = b.sections_mut().find(|l| {
+                    l.tag == "List" && l.prop("ListType").as_deref() == Some("InterfaceData")
+                });
+                let bus = interface.is_some();
+                if let Some(list) = interface {
+                    list.set_prop("PortNumber", number, false);
+                }
+                if !bus || b.prop("Port").is_some() {
+                    let bare = b.was_quoted("Port") == Some(false);
+                    b.set_prop("Port", number, bare);
+                }
+            }
+        }
+        Edit::AddBlock { .. } | Edit::Connect { .. } | Edit::Disconnect { .. } => {
+            unreachable!("applied above")
         }
     }
     Ok(())
+}
+
+/// A port on a block of the edited system, which lines may name either by
+/// block name and port (`SrcBlock`/`SrcPort`) or by SID (`Src "12#out:1"`).
+struct Port<'a> {
+    name: &'a str,
+    sid: Option<String>,
+    port: PortRef,
+    default_kind: PortKind,
+}
+
+/// The SID, name and port keys of an endpoint.
+type Forms = [&'static str; 3];
+const SRC_FORMS: Forms = ["Src", "SrcBlock", "SrcPort"];
+const DST_FORMS: Forms = ["Dst", "DstBlock", "DstPort"];
+
+impl<'a> Port<'a> {
+    fn new(sys: &Section, name: &'a str, port: PortRef, default_kind: PortKind) -> Self {
+        let sid = sys
+            .sections()
+            .find(|b| b.tag == "Block" && b.prop("Name").as_deref() == Some(name))
+            .and_then(|b| b.prop("SID"));
+        Port {
+            name,
+            sid,
+            port,
+            default_kind,
+        }
+    }
+
+    /// Whether `s`'s endpoint written under `forms` is this port; read as
+    /// the importer reads it.
+    fn is_at(&self, s: &Section, [sid_key, block_key, port_key]: Forms) -> bool {
+        if let Some(v) = s.prop(sid_key) {
+            return parse_endpoint(&v, self.default_kind)
+                .is_some_and(|(sid, port)| Some(sid) == self.sid.as_deref() && port == self.port);
+        }
+        s.prop(block_key).as_deref() == Some(self.name)
+            && parse_port(
+                s.prop(port_key).as_deref().unwrap_or("1"),
+                self.default_kind,
+            ) == Some(self.port)
+    }
+
+    /// Write this port under the name forms of `forms`.
+    fn write(&self, s: &mut Section, [_, block_key, port_key]: Forms) {
+        s.set_prop(block_key, self.name, false);
+        let port = match self.port.kind {
+            PortKind::In | PortKind::Out => self.port.index.to_string(),
+            kind => kind.token().to_string(),
+        };
+        s.set_prop(port_key, &port, true);
+    }
+}
+
+fn new_section(tag: &str, indent: &str, eol: &str) -> Section {
+    Section {
+        tag: tag.into(),
+        header: format!("{indent}{tag} {{{eol}"),
+        items: Vec::new(),
+        footer: format!("{indent}}}{eol}"),
+    }
+}
+
+/// Indentation for a new child section of `s`.
+fn child_indent(s: &Section) -> String {
+    s.items
+        .iter()
+        .find_map(|i| match i {
+            Item::Section(c) => Some(indent_of(&c.header).to_string()),
+            Item::Prop { lines, .. } => Some(indent_of(&lines[0]).to_string()),
+            Item::Raw(_) => None,
+        })
+        .unwrap_or_else(|| format!("{}  ", indent_of(&s.header)))
+}
+
+/// Insert `section` after the last child section tagged `after`, or at the
+/// end.
+fn insert_after(s: &mut Section, after: &[&str], section: Section) {
+    let at = s
+        .items
+        .iter()
+        .rposition(|i| matches!(i, Item::Section(c) if after.contains(&c.tag.as_str())))
+        .map_or(s.items.len(), |i| i + 1);
+    s.items.insert(at, Item::Section(section));
+}
+
+fn add_block(sys: &mut Section, block: &Block) {
+    let mut b = new_section("Block", &child_indent(sys), sys.eol());
+    b.set_prop("BlockType", &block.block_type, true);
+    b.set_prop("Name", &block.name, false);
+    b.set_prop("SID", &block.id.0, false);
+    b.set_prop("Ports", &format_ports(&block.ports), true);
+    b.set_prop("Position", &format_rect(&block.position), true);
+    for (key, value) in &block.parameters {
+        b.set_prop(key, value, false);
+    }
+    insert_after(sys, &["Block"], b);
+}
+
+/// Mirror of the IR's connect: branch the source's existing line (its
+/// destination becoming the first branch), or start a new line.
+fn connect(sys: &mut Section, src: &Port, dst: &Port) {
+    let eol = sys.eol().to_string();
+    let line = sys
+        .sections_mut()
+        .find(|l| l.tag == "Line" && src.is_at(l, SRC_FORMS));
+    let Some(line) = line else {
+        let mut line = new_section("Line", &child_indent(sys), &eol);
+        src.write(&mut line, SRC_FORMS);
+        dst.write(&mut line, DST_FORMS);
+        insert_after(sys, &["Line", "Block"], line);
+        return;
+    };
+    let indent = child_indent(line);
+    if DST_FORMS[..2].iter().any(|k| line.prop(k).is_some()) {
+        let mut old = new_section("Branch", &indent, &eol);
+        for key in DST_FORMS {
+            if let Some(value) = line.prop(key) {
+                old.set_prop(key, &value, line.was_quoted(key) == Some(false));
+                line.remove_prop(key);
+            }
+        }
+        let at = line
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::Section(b) if b.tag == "Branch"))
+            .unwrap_or(line.items.len());
+        line.items.insert(at, Item::Section(old));
+    }
+    let mut new = new_section("Branch", &indent, &eol);
+    dst.write(&mut new, DST_FORMS);
+    line.items.push(Item::Section(new));
+}
+
+/// Whether `hit` matches `s` or any branch below it.
+fn reaches(s: &Section, hit: &dyn Fn(&Section, bool) -> bool) -> bool {
+    hit(s, false) || s.sections().any(|b| b.tag == "Branch" && reaches(b, hit))
 }
 
 pub(super) fn apply(text: &str, edits: &[Resolved]) -> Result<String, ImportError> {
@@ -498,12 +706,15 @@ mod tests {
 
     const SRC: &str = "Model {\n  Name\t\"m\"\n  System {\n    Name\t\"m\"\n    Block {\n      BlockType\tGain\n      Name\t\"g\"\n      Position\t[10, 10, 40, 40]\n      Gain\t\"2\"\n    }\n    Block {\n      BlockType\tOutport\n      Name\t\"out\"\n      Position\t[100, 10, 130, 40]\n    }\n    Line {\n      SrcBlock\t\"g\"\n      SrcPort\t1\n      Points\t[20, 0]\n      DstBlock\t\"out\"\n      DstPort\t1\n    }\n  }\n}\n";
 
-    /// An edit to block `name` in the root system.
+    /// An edit to block `name` (id `x`) in the root system.
     fn at_root(edit: Edit, name: &str) -> Resolved {
         Resolved {
             edit,
             system: vec![],
-            block: name.into(),
+            names: [("x".into(), name.into())].into(),
+            added: None,
+            ports: None,
+            renumbered: Vec::new(),
         }
     }
 
