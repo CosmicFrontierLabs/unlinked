@@ -69,10 +69,25 @@ CI. Per-model import, render and simulation coverage is tracked in
   layout, appearance, ports, library links), wiring, configuration,
   workspace and charts. Block changes are highlighted on the diagram; the
   other changes, including charts, are listed in the change summary.
-- Diagram editing: move, rename, re-parameterize and delete blocks, saved as a
-  new version by patching the original file rather than regenerating it.
-  Untouched SLX parts and a no-op save are byte-identical; an edited XML part
-  keeps its unmodeled content but may reserialize attribute quoting.
+- Diagram editing, saved as a new version by patching the original file
+  rather than regenerating it. Untouched SLX parts and a no-op save are
+  byte-identical; an edited XML part keeps its unmodeled content but may
+  reserialize attribute quoting.
+  - Blocks: add from a palette of native catalog blocks, move, resize, rotate
+    and flip, rename, re-parameterize (port counts follow the parameters) and
+    delete. Deleting an Inport/Outport renumbers its siblings.
+  - Lines: connect ports by dragging, disconnect, reroute by dragging a
+    segment of a final leg or of a branched line's trunk, and name signals.
+  - Annotations: add, move, edit plain or TeX-source text, and delete.
+  - Selection by box, Shift-click and Ctrl+A; group move, rotate and delete;
+    copy/paste of native blocks with the lines between them; undo/redo by
+    action.
+  - Every batch is refused if it adds a structural error, both in the
+    preview and when saving.
+  - Not yet: copying masked, linked, styled or subsystem blocks; editing
+    rich-text annotation text; adding or removing port blocks inside
+    subsystems; renaming or deleting blocks that own Stateflow charts; and
+    editing chart contents.
 
 ### Simulation
 - Bounded, version-pinned simulation jobs over HTTP and a WebSocket stream,
@@ -126,8 +141,10 @@ These are deliberately out of scope today and are rejected when encountered:
   other than Dormand–Prince, algebraic loop solving, triggered/enabled and
   function-call subsystems, buses, MIMO state-space, fixed-point types,
   multi-instance model references.
-- **Editing**: adding blocks, drawing lines, renaming/deleting blocks that
-  own Stateflow charts, and editing chart contents.
+- **Editing**: subsystem hierarchy (adding or removing port blocks, creating
+  subsystems from a selection), copying non-native blocks, rich-text
+  annotations, renaming/deleting blocks that own Stateflow charts, and
+  editing chart contents.
 - **Scale-out**: simulation caps are per backend instance.
 
 ## Conventions

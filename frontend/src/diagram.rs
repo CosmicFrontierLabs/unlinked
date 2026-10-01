@@ -8,16 +8,20 @@
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
-use unlinked_model::edit::{system_ids, touches, DisconnectPolicy, Edit, SystemRef};
+use unlinked_model::edit::{
+    system_ids, touches, AnnotationTarget, DisconnectPolicy, Edit, SystemRef,
+};
 use unlinked_model::scope::ScopeConfig;
 use unlinked_model::{catalog, geometry};
 use unlinked_model::{
-    Block, BlockId, Chart, Endpoint, Line, Model, Point, PortKind, PortRef, Rect, System,
+    Annotation, Block, BlockId, Chart, Endpoint, Line, Model, Point, PortKind, PortRef, Rect,
+    System,
 };
 use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
 use web_sys::{
-    DragEvent, Element, HtmlElement, HtmlInputElement, KeyboardEvent, MouseEvent, WheelEvent,
+    DragEvent, Element, HtmlElement, HtmlInputElement, HtmlTextAreaElement, KeyboardEvent,
+    MouseEvent, WheelEvent,
 };
 use yew::prelude::*;
 
@@ -76,6 +80,15 @@ enum Drag {
     },
     /// Dragging a new connection out of port `from`.
     Wire { from: Endpoint },
+    /// Moving annotation `index` (its rendered elements) by `offset`.
+    Annotation {
+        sx: f64,
+        sy: f64,
+        index: usize,
+        elements: Vec<Element>,
+        offset: (f64, f64),
+        moved: bool,
+    },
     /// Dragging a corner of block `id`, whose outline was `rect`; `right`
     /// and `bottom` say which corner.
     Resize {
@@ -439,6 +452,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let selected_wire = use_state(|| None::<Endpoint>);
     // A selected branched line, by the source of its trunk.
     let selected_trunk = use_state(|| None::<Endpoint>);
+    // A selected annotation, by its index in the shown system.
+    let selected_annotation = use_state(|| None::<usize>);
     // A connection being dragged: from its first port to the pointer.
     let wire_preview = use_state(|| None::<(Point, Point)>);
     // The outline of a block being resized.
@@ -501,10 +516,15 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
 
     // A selected connection belongs to the level it was picked on.
     {
-        let (selected_wire, selected_trunk) = (selected_wire.clone(), selected_trunk.clone());
+        let (selected_wire, selected_trunk, selected_annotation) = (
+            selected_wire.clone(),
+            selected_trunk.clone(),
+            selected_annotation.clone(),
+        );
         use_effect_with((*path).clone(), move |_| {
             selected_wire.set(None);
             selected_trunk.set(None);
+            selected_annotation.set(None);
         });
     }
 
@@ -630,6 +650,34 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             });
             if let Some(segment) = segment {
                 *drag.borrow_mut() = Some(segment);
+                return;
+            }
+            // Pressing on an annotation may start moving it.
+            let annotation = on_edit.as_ref().and_then(|_| {
+                closest(e.target(), "[data-annotation]")?
+                    .get_attribute("data-annotation")?
+                    .parse::<usize>()
+                    .ok()
+            });
+            if let Some(index) = annotation {
+                let selector = format!("[data-annotation=\"{index}\"]");
+                let elements = container
+                    .cast::<Element>()
+                    .and_then(|c| c.query_selector_all(&selector).ok())
+                    .map(|list| {
+                        (0..list.length())
+                            .filter_map(|i| list.item(i)?.dyn_into::<Element>().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                *drag.borrow_mut() = Some(Drag::Annotation {
+                    sx,
+                    sy,
+                    index,
+                    elements,
+                    offset: (0.0, 0.0),
+                    moved: false,
+                });
                 return;
             }
             let grabbed = on_edit
@@ -759,6 +807,27 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         }
                     }
                 }
+                Some(Drag::Annotation {
+                    sx,
+                    sy,
+                    elements,
+                    offset,
+                    moved,
+                    ..
+                }) => {
+                    let (dx, dy) = (cx - *sx, cy - *sy);
+                    *moved |= dx.abs() + dy.abs() > 3.0;
+                    if *moved {
+                        let snap = |v: f64| (v / view.scale / SNAP).round() * SNAP;
+                        *offset = (snap(dx), snap(dy));
+                        for element in elements.iter() {
+                            let _ = element.set_attribute(
+                                "transform",
+                                &format!("translate({} {})", offset.0, offset.1),
+                            );
+                        }
+                    }
+                }
                 Some(Drag::Select { start, .. }) => {
                     let to = (*rendered)
                         .as_ref()
@@ -843,6 +912,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .collect()
             })
             .unwrap_or_default();
+        let annotations: Vec<Annotation> =
+            system.map(|s| s.annotations.clone()).unwrap_or_default();
         Callback::from(move |e: MouseEvent| {
             let mut d = drag.borrow_mut();
             let moved = match d.take() {
@@ -899,6 +970,34 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                 src,
                                 points,
                             },
+                        });
+                    }
+                    moved
+                }
+                Some(Drag::Annotation {
+                    index,
+                    offset,
+                    moved,
+                    ..
+                }) => {
+                    let current = annotations.get(index);
+                    if let (true, Some(on_edit), Some(a)) =
+                        (moved && offset != (0.0, 0.0), &on_edit, current)
+                    {
+                        let (dx, dy) = offset;
+                        let p = a.position;
+                        on_edit.emit(Edit::MoveAnnotation {
+                            system: system_ref.clone(),
+                            target: AnnotationTarget {
+                                index,
+                                expected: a.clone(),
+                            },
+                            position: Rect::new(
+                                p.left + dx,
+                                p.top + dy,
+                                p.right + dx,
+                                p.bottom + dy,
+                            ),
                         });
                     }
                     moved
@@ -970,10 +1069,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onclick = {
         let drag = drag.clone();
-        let (selected, selected_wire, selected_trunk) = (
+        let (selected, selected_wire, selected_trunk, selected_annotation) = (
             selected.clone(),
             selected_wire.clone(),
             selected_trunk.clone(),
+            selected_annotation.clone(),
         );
         Callback::from(move |e: MouseEvent| {
             let moved = matches!(drag.borrow_mut().take(), Some(Drag::Ended { moved: true }));
@@ -984,9 +1084,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 closest(e.target(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"));
             let trunk =
                 closest(e.target(), "polyline.trunk-hit").and_then(|w| endpoint_of(&w, "src-"));
+            let annotation = closest(e.target(), "[data-annotation]")
+                .and_then(|a| a.get_attribute("data-annotation")?.parse::<usize>().ok());
             let block = block_group(e.target()).and_then(|g| g.get_attribute("data-sid"));
             selected_trunk.set(trunk.clone());
-            selected.set(match (wire.is_some() || trunk.is_some(), block) {
+            selected_annotation.set(annotation);
+            let other = wire.is_some() || trunk.is_some() || annotation.is_some();
+            selected.set(match (other, block) {
                 (true, _) => Vec::new(),
                 // Shift-click adds or removes a block.
                 (false, Some(id)) if e.shift_key() => {
@@ -1015,7 +1119,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
         let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
-        let selected_trunk = selected_trunk.clone();
+        let annotations: Vec<Annotation> =
+            system.map(|s| s.annotations.clone()).unwrap_or_default();
+        let (selected_trunk, selected_annotation) =
+            (selected_trunk.clone(), selected_annotation.clone());
         let (clipboard, model, on_error) = (
             clipboard.clone(),
             props.model.clone(),
@@ -1126,6 +1233,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
                 return;
             }
+            let annotation = selected_annotation.and_then(|i| Some((i, annotations.get(i)?)));
             if let Some(dst) = (*selected_wire).clone() {
                 e.prevent_default();
                 on_edit.emit(Edit::Disconnect {
@@ -1133,6 +1241,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     dst,
                 });
                 selected_wire.set(None);
+            } else if let Some((index, a)) = annotation {
+                e.prevent_default();
+                on_edit.emit(Edit::DeleteAnnotation {
+                    system: system_ref.clone(),
+                    target: AnnotationTarget {
+                        index,
+                        expected: a.clone(),
+                    },
+                });
+                selected_annotation.set(None);
             } else if !selected.is_empty() {
                 e.prevent_default();
                 let ids: Vec<BlockId> = selected.iter().cloned().map(BlockId).collect();
@@ -1183,7 +1301,41 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let path = path.clone();
         let selected = selected.clone();
         let model = props.model.clone();
+        let (on_edit, system_ref, selected_annotation) = (
+            on_edit.clone(),
+            system_ref.clone(),
+            selected_annotation.clone(),
+        );
+        let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
+        let annotation_count = system.map_or(0, |s| s.annotations.len());
         Callback::from(move |e: MouseEvent| {
+            // While editing, double-clicking empty canvas adds an annotation
+            // there, selected so its text can be typed in the inspector.
+            let on_something = closest(
+                e.target(),
+                "g.block, [data-annotation], polyline, circle, rect.resize-handle, g.state",
+            )
+            .is_some();
+            if let (Some(on_edit), false) = (&on_edit, on_something) {
+                let at = (*rendered)
+                    .as_ref()
+                    .ok()
+                    .and_then(|svg| to_diagram(&e, &container, &view, svg));
+                let sid = unlinked_model::edit::next_sid(&model);
+                if let (Some(at), Some(sid)) = (at, sid) {
+                    let snap = |v: f64| (v / SNAP).round() * SNAP;
+                    let (x, y) = (snap(at.x), snap(at.y));
+                    on_edit.emit(Edit::AddAnnotation {
+                        system: system_ref.clone(),
+                        id: sid.to_string(),
+                        text: "Annotation".into(),
+                        position: Rect::new(x, y, x, y),
+                    });
+                    selected.set(Vec::new());
+                    selected_annotation.set(Some(annotation_count));
+                }
+                return;
+            }
             let name = if let Some(g) = closest(e.target(), "g.state[data-subchart]") {
                 let refs: Vec<&str> = path.iter().map(String::as_str).collect();
                 g.get_attribute("data-sid")
@@ -1302,6 +1454,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 )
             })
             .unwrap_or_default();
+    let wire_highlight = wire_highlight
+        + &selected_annotation
+            .map(|i| format!(".diagram .annotation[data-annotation=\"{i}\"] {{ fill: #ff9e64; }}"))
+            .unwrap_or_default();
     let highlight = match &props.diff {
         Some(d) => diff_css(d, &path, system) + &highlight + &wire_highlight,
         None => highlight + &wire_highlight,
@@ -1399,6 +1555,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     <LineInspector line={Rc::new(line.clone())} system={system_ref.clone()}
                         blocks={Rc::new(system.map(|s| s.blocks.clone()).unwrap_or_default())}
                         on_edit={on_edit.clone()} />
+                }
+                if let Some((index, annotation)) = selected_annotation
+                    .and_then(|i| Some((i, system?.annotations.get(i)?)))
+                {
+                    <AnnotationInspector {index} annotation={Rc::new(annotation.clone())}
+                        system={system_ref.clone()} on_edit={on_edit.clone()} />
                 }
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
@@ -1501,6 +1663,75 @@ fn block_palette() -> Html {
             <p class="hint">{ "Drag onto the diagram. Drag from a port to another to connect; select a line and press Delete to remove it." }</p>
             { for groups }
         </div>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+struct AnnotationInspectorProps {
+    /// Index of the annotation in its system.
+    index: usize,
+    annotation: Rc<Annotation>,
+    system: SystemRef,
+    on_edit: Option<Callback<Edit>>,
+}
+
+/// The selected annotation: its text, editable unless it is rich text, and
+/// a delete button.
+#[function_component(AnnotationInspector)]
+fn annotation_inspector(props: &AnnotationInspectorProps) -> Html {
+    let a = &props.annotation;
+    let target = AnnotationTarget {
+        index: props.index,
+        expected: (**a).clone(),
+    };
+    let interpreter = a.properties.get("Interpreter").filter(|i| !i.is_empty());
+    let rich = a.rich_text || interpreter.is_some_and(|i| i == "rich");
+    let label = match interpreter {
+        Some(i) if !rich && i != "off" => format!("Source text (Interpreter: {i})"),
+        _ => "Text".into(),
+    };
+    let text = match (&props.on_edit, rich) {
+        (Some(on_edit), false) => {
+            let (on_edit, system, target, current) = (
+                on_edit.clone(),
+                props.system.clone(),
+                target.clone(),
+                a.text.clone(),
+            );
+            let onchange = Callback::from(move |e: Event| {
+                let text = e.target_unchecked_into::<HtmlTextAreaElement>().value();
+                if text != current {
+                    on_edit.emit(Edit::SetAnnotationText {
+                        system: system.clone(),
+                        target: target.clone(),
+                        text,
+                    });
+                }
+            });
+            html! { <textarea class="annotation-text" value={a.text.clone()} rows="4" {onchange} /> }
+        }
+        (_, true) => html! {
+            <p class="muted">{ "Rich text; it can be moved or deleted but not edited here." }</p>
+        },
+        (None, false) => html! { <pre>{ a.text.clone() }</pre> },
+    };
+    let delete = props.on_edit.clone().map(|on_edit| {
+        let system = props.system.clone();
+        let onclick = Callback::from(move |_: MouseEvent| {
+            on_edit.emit(Edit::DeleteAnnotation {
+                system: system.clone(),
+                target: target.clone(),
+            })
+        });
+        html! { <button class="danger" {onclick}>{ "Delete annotation" }</button> }
+    });
+    html! {
+        <aside class="inspector">
+            <h3>{ "Annotation" }</h3>
+            <h4>{ label }</h4>
+            { text }
+            { for delete }
+        </aside>
     }
 }
 
