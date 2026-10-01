@@ -5,7 +5,7 @@ use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
 fn send(scope: &DedicatedWorkerGlobalScope, response: protocol::Response) {
-    if let Ok(text) = serde_json::to_string(&response) {
+    if let Ok(text) = protocol::encode_response(&response) {
         if scope.post_message(&JsValue::from_str(&text)).is_ok() {
             return;
         }

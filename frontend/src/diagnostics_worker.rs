@@ -55,7 +55,7 @@ impl Job {
             self.finish(Err("Diagnostics worker sent a non-text response.".into()));
             return;
         };
-        if text.len() > 4 * 1024 * 1024 {
+        if text.len() > protocol::MAX_RESPONSE_BYTES {
             self.finish(Err("Diagnostics worker response exceeds 4 MiB.".into()));
             return;
         }

@@ -7,6 +7,7 @@ use unlinked_sim::diagnose::{DiagnosticContext, DiagnosticReport};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct Request {
@@ -30,66 +31,41 @@ pub enum Response {
         message: String,
     },
 }
-struct CappedBuffer(Vec<u8>);
+struct CappedBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+}
 impl Write for CappedBuffer {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > MAX_REQUEST_BYTES.saturating_sub(self.0.len()) {
-            return Err(io::Error::other("diagnostics request exceeds 2 MiB"));
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(io::Error::other(format!(
+                "diagnostics payload exceeds {} MiB",
+                self.limit / (1024 * 1024)
+            )));
         }
-        self.0.extend_from_slice(bytes);
+        let needed = self.bytes.len() + bytes.len();
+        if needed > self.bytes.capacity() {
+            let capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(needed)
+                .min(self.limit);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
-/// Reject recursive shapes before serialization, without cloning the snapshot.
-/// Byte/text growth is separately capped by the streaming writer.
-fn shape_allowed(model: &Model) -> bool {
-    let mut remaining = 25_000usize;
-    let mut systems = vec![(&model.root, 0usize)];
-    while let Some((system, depth)) = systems.pop() {
-        if depth > 32 {
-            return false;
-        }
-        let Some(left) = remaining
-            .checked_sub(system.blocks.len() + system.lines.len() + system.annotations.len())
-        else {
-            return false;
-        };
-        remaining = left;
-        for block in &system.blocks {
-            if let Some(child) = block.subsystem.as_deref() {
-                systems.push((child, depth + 1));
-            }
-        }
-        for line in &system.lines {
-            let Some(left) = remaining.checked_sub(line.branches.len() + line.points.len()) else {
-                return false;
-            };
-            remaining = left;
-            let mut branches: Vec<_> = line.branches.iter().map(|b| (b, 0usize)).collect();
-            while let Some((branch, depth)) = branches.pop() {
-                if depth > 32 {
-                    return false;
-                }
-                let Some(left) = remaining.checked_sub(branch.branches.len() + branch.points.len())
-                else {
-                    return false;
-                };
-                remaining = left;
-                branches.extend(branch.branches.iter().map(|b| (b, depth + 1)));
-            }
-        }
-    }
-    true
-}
 pub fn encode_request(
     generation: u64,
     model: &Model,
     context: &DiagnosticContext,
 ) -> Result<String, String> {
-    if !shape_allowed(model) {
+    if !unlinked_sim::diagnose::snapshot_shape_bounded(model) {
         return Err("Diagnostics snapshot exceeds shape/depth limits.".into());
     }
     #[derive(Serialize)]
@@ -98,7 +74,10 @@ pub fn encode_request(
         model: &'a Model,
         context: &'a DiagnosticContext,
     }
-    let mut buffer = CappedBuffer(Vec::new());
+    let mut buffer = CappedBuffer {
+        bytes: Vec::new(),
+        limit: MAX_REQUEST_BYTES,
+    };
     serde_json::to_writer(
         &mut buffer,
         &BorrowedRequest {
@@ -108,7 +87,32 @@ pub fn encode_request(
         },
     )
     .map_err(|e| format!("Cannot encode diagnostics request: {e}"))?;
-    String::from_utf8(buffer.0).map_err(|e| e.to_string())
+    String::from_utf8(buffer.bytes).map_err(|e| e.to_string())
+}
+/// Encode with a hard allocation cap. Large reports become a small error carrying
+/// the same generation rather than allocating the entire JSON result first.
+pub fn encode_response(response: &Response) -> Result<String, String> {
+    let mut buffer = CappedBuffer {
+        bytes: Vec::new(),
+        limit: MAX_RESPONSE_BYTES,
+    };
+    if serde_json::to_writer(&mut buffer, response).is_err() {
+        let generation = match response {
+            Response::Report { generation, .. } => Some(*generation),
+            Response::Error { generation, .. } => *generation,
+            Response::Ready { .. } => None,
+        };
+        buffer.bytes.clear();
+        serde_json::to_writer(
+            &mut buffer,
+            &Response::Error {
+                generation,
+                message: "Diagnostics response exceeds the 4 MiB transport limit.".into(),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    String::from_utf8(buffer.bytes).map_err(|e| e.to_string())
 }
 pub fn decode_request(text: &str) -> Result<Request, String> {
     if text.len() > MAX_REQUEST_BYTES {
@@ -132,6 +136,28 @@ mod tests {
             charts: vec![],
             type_defaults: Default::default(),
         }
+    }
+    #[test]
+    fn oversized_response_becomes_a_small_generation_preserving_error() {
+        use unlinked_model::validation::{Diagnostic, DiagnosticTarget, Severity};
+        let report = DiagnosticReport {
+            diagnostics: vec![Diagnostic {
+                severity: Severity::Warning,
+                code: "large".into(),
+                target: DiagnosticTarget::Model,
+                message: "x".repeat(MAX_RESPONSE_BYTES),
+            }],
+            ..Default::default()
+        };
+        let text = encode_response(&Response::Report {
+            generation: u64::MAX,
+            report,
+        })
+        .unwrap();
+        assert!(text.len() < 256);
+        assert!(
+            matches!(serde_json::from_str::<Response>(&text).unwrap(),Response::Error{generation:Some(u64::MAX),message} if message.contains("4 MiB"))
+        );
     }
     #[test]
     fn full_width_generation_roundtrips_without_javascript_number_conversion() {

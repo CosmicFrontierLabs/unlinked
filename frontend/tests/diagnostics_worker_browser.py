@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 URL = os.environ.get("WORKER_TEST_URL", "http://localhost:3140/")
 MODEL = dict(name="Worker test", source="Mdl", simulink_version=None,
              config=dict(solver="ode4", start_time="0", stop_time="1", fixed_step="0.01", raw={}),
-             root=dict(blocks=[], lines=[], annotations=[], properties={}),
+             root=dict(blocks=[], lines=[], annotations=[], properties={"InitFcn": "error('must never execute')"}),
              workspace={}, charts=[], type_defaults={})
 
 def request(generation, compile=False):

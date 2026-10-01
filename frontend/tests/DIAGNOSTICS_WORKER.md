@@ -31,3 +31,8 @@ the normal HTML/build. Set `CHROME` to the browser executable and `WORKER_TEST_U
 to another static server if needed. Tests cover actual generated assets, handshake,
 static/compile reports, same-generation supersession, cancellation/drop, timeout,
 missing loader, malformed request, and loading from a nested application route.
+
+Transport serializes snapshots into at most 2 MiB and reports into at most 4 MiB.
+Oversized reports become a small generation-preserving error. Shared diagnostic
+preflight limits IDs to 1 KiB and accumulated escaped ID/name paths to 4 KiB,
+preventing repeated diagnostic targets from amplifying large identity strings.
