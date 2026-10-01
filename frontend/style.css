@@ -648,6 +648,14 @@ a.compare {
     fill: none;
 }
 
+.overlay rect.select-box {
+    fill: rgba(122, 162, 247, 0.12);
+    stroke: var(--blue);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+    stroke-dasharray: 3 2;
+}
+
 .overlay rect.resize-handle {
     fill: var(--orange);
     stroke: var(--bg);
