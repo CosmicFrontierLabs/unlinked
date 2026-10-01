@@ -155,6 +155,16 @@ fn structural_edits(model: &Model, edits: &mut Vec<Edit>) {
         src: port(&ids[0], PortKind::Out),
         dst: port(&ids[1], PortKind::In),
     });
+    edits.push(Edit::SetRoute {
+        system: vec![],
+        dst: port(&ids[1], PortKind::In),
+        points: vec![unlinked_model::Point::new(right + 150.0, 65.0)],
+    });
+    edits.push(Edit::SetTrunkRoute {
+        system: vec![],
+        src: port(&ids[0], PortKind::Out),
+        points: vec![unlinked_model::Point::new(right + 155.0, 75.0)],
+    });
     if let Some(dst) = cut {
         edits.push(Edit::Disconnect {
             system: vec![],

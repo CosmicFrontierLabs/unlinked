@@ -459,6 +459,36 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
             });
             return Ok(());
         }
+        Edit::SetRoute { .. } | Edit::SetTrunkRoute { .. } => {
+            let update = resolved
+                .route
+                .as_ref()
+                .ok_or_else(|| ImportError::Edit("route update missing".into()))?;
+            let src = Port::new(
+                sys,
+                resolved.name(&update.src.block)?,
+                update.src.port,
+                PortKind::Out,
+            );
+            let matches: Vec<usize> = sys
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| match item {
+                    Item::Section(l) if l.tag == "Line" && src.is_at(l, SRC_FORMS) => Some(i),
+                    _ => None,
+                })
+                .collect();
+            if matches.len() != 1 {
+                return Err(ImportError::Edit(
+                    "serialized route source missing or ambiguous".into(),
+                ));
+            }
+            if let Item::Section(line) = &mut sys.items[matches[0]] {
+                set_route_points(line, &update.points)?;
+            }
+            return Ok(());
+        }
         Edit::MoveBlock { id, .. }
         | Edit::SetParameter { id, .. }
         | Edit::RenameBlock { id, .. }
@@ -550,7 +580,11 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
                 }
             }
         }
-        Edit::AddBlock { .. } | Edit::Connect { .. } | Edit::Disconnect { .. } => {
+        Edit::AddBlock { .. }
+        | Edit::Connect { .. }
+        | Edit::Disconnect { .. }
+        | Edit::SetRoute { .. }
+        | Edit::SetTrunkRoute { .. } => {
             unreachable!("applied above")
         }
     }
@@ -705,6 +739,27 @@ pub(super) fn apply(text: &str, edits: &[Resolved]) -> Result<String, ImportErro
     Ok(file.to_text())
 }
 
+fn set_route_points(section: &mut Section, points: &super::RoutePoints) -> Result<(), ImportError> {
+    if section.sections().filter(|b| b.tag == "Branch").count() != points.branches.len() {
+        return Err(ImportError::Edit(
+            "serialized route topology differs from imported model".into(),
+        ));
+    }
+    if points.value == "[]" {
+        section.remove_prop("Points");
+    } else {
+        section.set_prop("Points", &points.value, false);
+    }
+    for (branch, p) in section
+        .sections_mut()
+        .filter(|b| b.tag == "Branch")
+        .zip(&points.branches)
+    {
+        set_route_points(branch, p)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,6 +773,7 @@ mod tests {
             system: vec![],
             names: [("x".into(), name.into())].into(),
             added: None,
+            route: None,
             ports: None,
             renumbered: Vec::new(),
         }

@@ -18,6 +18,7 @@ use unlinked_model::{Block, BlockId, PortCounts, PortKind};
 /// the batch, and what it produced in the IR.
 struct Resolved {
     edit: Edit,
+    route: Option<RouteUpdate>,
     /// Subsystem block names from the root.
     system: Vec<String>,
     /// Names of the system's blocks before the edit.
@@ -91,6 +92,15 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
             .and_then(|id| sys.block(id))
             .map(|b| b.ports)
             .filter(|p| ports_before.is_some_and(|before| before != *p));
+        let route = match edit {
+            Edit::SetRoute { dst, .. } => {
+                Some(route_update(sys, dst, false).map_err(|e| failed(e.to_string()))?)
+            }
+            Edit::SetTrunkRoute { src, .. } => {
+                Some(route_update(sys, src, true).map_err(|e| failed(e.to_string()))?)
+            }
+            _ => None,
+        };
         let renumbered = ports_numbered
             .into_iter()
             .filter_map(|(id, before)| {
@@ -100,6 +110,7 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
             .collect();
         resolved.push(Resolved {
             edit: edit.clone(),
+            route,
             system,
             names,
             added,
@@ -153,6 +164,59 @@ fn encode_cp1252(text: &str) -> Result<Vec<u8>, ImportError> {
             })
         })
         .collect()
+}
+
+struct RouteUpdate {
+    src: unlinked_model::Endpoint,
+    points: RoutePoints,
+}
+struct RoutePoints {
+    value: String,
+    branches: Vec<RoutePoints>,
+}
+fn route_update(
+    sys: &unlinked_model::System,
+    endpoint: &unlinked_model::Endpoint,
+    trunk: bool,
+) -> Result<RouteUpdate, unlinked_model::edit::EditError> {
+    use unlinked_model::{Branch, Point};
+    fn points(
+        start: Point,
+        vertices: &[Point],
+        branches: &[Branch],
+    ) -> Result<RoutePoints, unlinked_model::edit::EditError> {
+        let mut prev = start;
+        let mut parts = Vec::with_capacity(vertices.len());
+        for p in vertices {
+            let (dx, dy) = (p.x - prev.x, p.y - prev.y);
+            if !dx.is_finite() || !dy.is_finite() {
+                return Err(unlinked_model::edit::EditError::Invalid(
+                    "route relative coordinates overflow".into(),
+                ));
+            }
+            parts.push(format!("{dx}, {dy}"));
+            prev = *p;
+        }
+        Ok(RoutePoints {
+            value: format!("[{}]", parts.join("; ")),
+            branches: branches
+                .iter()
+                .map(|b| points(prev, &b.points, &b.branches))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+    let (root, _) = unlinked_model::route_edit::route_location(sys, endpoint, trunk)?;
+    let line = &sys.lines[root];
+    let src = line.src.as_ref().expect("route checked source");
+    let block = sys.block(&src.block).expect("route checked block");
+    Ok(RouteUpdate {
+        src: src.clone(),
+        points: points(
+            unlinked_model::geometry::port_anchor(block, src.port),
+            &line.points,
+            &line.branches,
+        )?,
+    })
 }
 
 #[cfg(test)]

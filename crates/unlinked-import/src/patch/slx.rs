@@ -286,6 +286,19 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
             });
             return Ok(());
         }
+        Edit::SetRoute { .. } | Edit::SetTrunkRoute { .. } => {
+            let update = resolved
+                .route
+                .as_ref()
+                .ok_or_else(|| ImportError::Edit("route update missing".into()))?;
+            let i = only_child(parent, "route source", |l| {
+                l.name == "Line"
+                    && l.prop("Src")
+                        .is_some_and(|v| is_endpoint(&v, &update.src, PortKind::Out))
+            })?;
+            set_route_points(element_mut(parent, i), &update.points)?;
+            return Ok(());
+        }
         Edit::MoveBlock { id, .. }
         | Edit::SetParameter { id, .. }
         | Edit::RenameBlock { id, .. }
@@ -345,7 +358,11 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
                 }
             }
         }
-        Edit::AddBlock { .. } | Edit::Connect { .. } | Edit::Disconnect { .. } => {
+        Edit::AddBlock { .. }
+        | Edit::Connect { .. }
+        | Edit::Disconnect { .. }
+        | Edit::SetRoute { .. }
+        | Edit::SetTrunkRoute { .. } => {
             unreachable!("applied above")
         }
     }
@@ -595,6 +612,29 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
     Ok(out.finish().map_err(zip_err)?.into_inner())
 }
 
+fn set_route_points(element: &mut XElem, points: &super::RoutePoints) -> Result<(), ImportError> {
+    if element.elements().filter(|b| b.name == "Branch").count() != points.branches.len() {
+        return Err(ImportError::Edit(
+            "serialized route topology differs from imported model".into(),
+        ));
+    }
+    if points.value == "[]" {
+        element.children.retain(|c|!matches!(c,XNode::Element(p) if p.name=="P" && p.attr("Name").as_deref()==Some("Points")));
+    } else if let Some(p) = element.prop_mut("Points") {
+        p.set_text(&points.value);
+    } else {
+        element.push_prop("Points", &points.value);
+    }
+    for (branch, p) in element
+        .elements_mut()
+        .filter(|b| b.name == "Branch")
+        .zip(&points.branches)
+    {
+        set_route_points(branch, p)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +667,7 @@ mod tests {
             system: system.iter().map(|s| s.to_string()).collect(),
             names: Default::default(),
             added: None,
+            route: None,
             ports: None,
             renumbered: Vec::new(),
         }
@@ -690,6 +731,7 @@ mod tests {
             system: vec![],
             names: Default::default(),
             added: None,
+            route: None,
             ports: None,
             renumbered: Vec::new(),
         };
