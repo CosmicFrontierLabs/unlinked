@@ -2394,6 +2394,16 @@ fn inspector(props: &InspectorProps) -> Html {
             descriptor.is_none_or(|d| d.parameters.iter().all(|p| p.name != k.as_str()))
         })
         .collect();
+    let shown_fields: Vec<&str> = descriptor
+        .map(|d| {
+            d.dialog_sections(&b.parameters)
+                .into_iter()
+                .flat_map(|s| s.fields)
+                .filter(|(_, visible)| *visible)
+                .map(|(p, _)| p.name)
+                .collect()
+        })
+        .unwrap_or_default();
     // A value cell: editable input when editing, code otherwise. Changes
     // are committed on blur or Enter.
     let value_cell = |name: &str, value: &str| -> Html {
@@ -2464,7 +2474,10 @@ fn inspector(props: &InspectorProps) -> Html {
         <aside class="inspector">
             { title }
             <div class="muted">{ format!("{kind} · SID {}", b.id) }</div>
-            { for props.problems.iter().map(|d| {
+            // Problems with a shown dialog field are shown beside it instead.
+            { for props.problems.iter().filter(|d| !matches!(&d.target,
+                DiagnosticTarget::Block { parameter: Some(p), .. } if shown_fields.contains(&p.as_str())
+            )).map(|d| {
                 let about = match &d.target {
                     DiagnosticTarget::Block { parameter: Some(p), .. } => format!("{p}: "),
                     _ => String::new(),
