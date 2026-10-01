@@ -98,6 +98,13 @@ pub enum Edit {
         orientation: Orientation,
         mirrored: bool,
     },
+    /// Name the whole ordinary signal tree identified by its unique source.
+    /// An empty name removes its label.
+    SetSignalName {
+        system: SystemRef,
+        src: Endpoint,
+        name: String,
+    },
 }
 
 /// An edit that could not be applied, and its position in the batch.
@@ -311,7 +318,8 @@ impl Edit {
             | Edit::Disconnect { system, .. }
             | Edit::SetRoute { system, .. }
             | Edit::SetTrunkRoute { system, .. }
-            | Edit::SetOrientation { system, .. } => system,
+            | Edit::SetOrientation { system, .. }
+            | Edit::SetSignalName { system, .. } => system,
         }
     }
 
@@ -327,7 +335,8 @@ impl Edit {
             | Edit::Connect { .. }
             | Edit::Disconnect { .. }
             | Edit::SetRoute { .. }
-            | Edit::SetTrunkRoute { .. } => None,
+            | Edit::SetTrunkRoute { .. }
+            | Edit::SetSignalName { .. } => None,
         }
     }
 
@@ -335,6 +344,19 @@ impl Edit {
     pub fn validate(&self) -> Result<(), EditError> {
         match self {
             Edit::MoveBlock { position, .. } => check_rect(position)?,
+            Edit::SetSignalName { name, .. } => {
+                if name.len() > 4096
+                    || name.chars().any(|c| {
+                        (c < ' ' && !matches!(c, '\n' | '\r' | '\t'))
+                            || matches!(c, '\u{FFFE}' | '\u{FFFF}')
+                    })
+                {
+                    return Err(EditError::Invalid(
+                        "signal name is too long or contains characters forbidden in XML".into(),
+                    ));
+                }
+            }
+
             Edit::SetParameter { name, value, .. } => {
                 if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     return Err(EditError::Invalid(format!("bad parameter name {name:?}")));
@@ -369,6 +391,13 @@ impl Edit {
 
     fn apply_to_diagram(&self, model: &mut Model, charts: &[Chart]) -> Result<(), EditError> {
         let id = match self {
+            Edit::SetSignalName { system, src, name } => {
+                let sys = system_mut(model, system)?;
+                let (root, _) = crate::route_edit::route_location(sys, src, true)?;
+                sys.lines[root].name = (!name.is_empty()).then(|| name.clone());
+                return Ok(());
+            }
+
             Edit::SetRoute {
                 system,
                 dst,
@@ -491,7 +520,8 @@ impl Edit {
             | Edit::Connect { .. }
             | Edit::Disconnect { .. }
             | Edit::SetRoute { .. }
-            | Edit::SetTrunkRoute { .. } => {
+            | Edit::SetTrunkRoute { .. }
+            | Edit::SetSignalName { .. } => {
                 unreachable!("applied above")
             }
         }

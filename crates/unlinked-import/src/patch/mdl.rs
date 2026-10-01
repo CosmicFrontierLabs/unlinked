@@ -460,6 +460,31 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
             });
             return Ok(());
         }
+        Edit::SetSignalName { src, name, .. } => {
+            let source = Port::new(sys, resolved.name(&src.block)?, src.port, PortKind::Out);
+            let matches: Vec<usize> = sys
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| match item {
+                    Item::Section(l) if l.tag == "Line" && source.is_at(l, SRC_FORMS) => Some(i),
+                    _ => None,
+                })
+                .collect();
+            if matches.len() != 1 {
+                return Err(ImportError::Edit(
+                    "serialized signal source missing or ambiguous".into(),
+                ));
+            }
+            if let Item::Section(line) = &mut sys.items[matches[0]] {
+                if name.is_empty() {
+                    line.remove_prop("Name");
+                } else {
+                    line.set_prop("Name", name, false);
+                }
+            }
+            return Ok(());
+        }
         Edit::SetRoute { .. } | Edit::SetTrunkRoute { .. } => {
             let update = resolved
                 .route
@@ -616,7 +641,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         | Edit::Connect { .. }
         | Edit::Disconnect { .. }
         | Edit::SetRoute { .. }
-        | Edit::SetTrunkRoute { .. } => {
+        | Edit::SetTrunkRoute { .. }
+        | Edit::SetSignalName { .. } => {
             unreachable!("applied above")
         }
     }
