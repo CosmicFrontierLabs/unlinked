@@ -103,6 +103,79 @@ enum Drag {
     Ended { moved: bool },
 }
 
+/// An editing action, whether from the keyboard, the toolbar or the context
+/// menu.
+#[derive(Clone, Copy, PartialEq)]
+enum Action {
+    Copy,
+    Paste,
+    Rotate,
+    Flip,
+    Group,
+    Expand,
+    Delete,
+    SelectAll,
+    /// Move the selected blocks by (dx, dy).
+    Nudge(f64, f64),
+}
+
+/// Actions on the editing toolbar, and in the context menu, in order.
+const TOOLBAR: [Action; 7] = [
+    Action::Rotate,
+    Action::Flip,
+    Action::Group,
+    Action::Expand,
+    Action::Copy,
+    Action::Paste,
+    Action::Delete,
+];
+const MENU: [Action; 8] = [
+    Action::Copy,
+    Action::Paste,
+    Action::Delete,
+    Action::Rotate,
+    Action::Flip,
+    Action::Group,
+    Action::Expand,
+    Action::SelectAll,
+];
+
+/// A button performing `action`: a toolbar button, or a context menu item
+/// showing its shortcut.
+fn action_button(action: Action, enabled: bool, act: &Callback<Action>, menu: bool) -> Html {
+    let (label, shortcut) = action.label();
+    let act = act.clone();
+    let onclick = Callback::from(move |_: MouseEvent| act.emit(action));
+    if menu {
+        html! {
+            <button class="menu-item" {onclick}>
+                <span>{ label }</span><span class="shortcut">{ shortcut }</span>
+            </button>
+        }
+    } else {
+        html! {
+            <button {onclick} disabled={!enabled} title={format!("{label} ({shortcut})")}>{ label }</button>
+        }
+    }
+}
+
+impl Action {
+    /// Label and shortcut, as shown on buttons and in the context menu.
+    fn label(self) -> (&'static str, &'static str) {
+        match self {
+            Action::Copy => ("Copy", "Ctrl+C"),
+            Action::Paste => ("Paste", "Ctrl+V"),
+            Action::Rotate => ("Rotate", "Ctrl+R"),
+            Action::Flip => ("Flip", "Ctrl+I"),
+            Action::Group => ("Group into subsystem", "Ctrl+G"),
+            Action::Expand => ("Expand subsystem", "Ctrl+Shift+G"),
+            Action::Delete => ("Delete", "Del"),
+            Action::SelectAll => ("Select all", "Ctrl+A"),
+            Action::Nudge(..) => ("Nudge", "Arrows"),
+        }
+    }
+}
+
 /// What is selected on the shown diagram level: one kind of thing at a time,
 /// so actions such as Delete never act on a stale selection of another kind.
 #[derive(Clone, Default, PartialEq)]
@@ -541,6 +614,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // A block an action asked to create, selected once the model has it; a
     // refused action leaves the selection as it was.
     let select_created = use_mut_ref(|| None::<BlockId>);
+    // The open context menu's client position.
+    let menu = use_state(|| None::<(i32, i32)>);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -1202,7 +1277,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             });
         })
     };
-    let onkeydown = {
+    // Editing actions, from the keyboard, the toolbar or the context menu.
+    let act = {
         let (selection, on_edit, on_edits, system_ref) = (
             selection.clone(),
             on_edit.clone(),
@@ -1219,180 +1295,217 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_error.clone(),
             select_created.clone(),
         );
-        Callback::from(move |e: KeyboardEvent| {
+        Callback::from(move |action: Action| {
             let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
                 return;
             };
-            let command = e.ctrl_key() || e.meta_key();
-            let key = e.key().to_ascii_lowercase();
-            // Copy (Ctrl+C) the selected blocks; paste (Ctrl+V) duplicates
-            // them with their internal lines, offset from the originals.
-            if command && key == "c" && !selection.blocks().is_empty() {
-                e.prevent_default();
-                *clipboard.borrow_mut() = Some(Clipboard {
-                    model: model.clone(),
-                    system: system_ref.clone(),
-                    ids: selection.blocks().iter().cloned().map(BlockId).collect(),
-                    pastes: 0,
-                });
-                return;
-            }
-            if command && key == "v" {
-                let mut clip = clipboard.borrow_mut();
-                let Some(clip) = clip.as_mut() else {
-                    return;
-                };
-                e.prevent_default();
-                let pasted = if clip.system == system_ref {
-                    unlinked_model::clipboard::paste(
-                        &clip.model,
-                        &clip.system,
-                        &clip.ids,
-                        clip.pastes,
-                        &model,
-                    )
-                    .map_err(|e| e.to_string())
-                } else {
-                    Err("blocks paste only into the system they were copied from".into())
-                };
-                match pasted {
-                    Ok(group) => {
-                        clip.pastes = clip.pastes.saturating_add(1);
-                        let added = group
-                            .iter()
-                            .filter_map(|edit| match edit {
-                                Edit::AddBlock { id, .. } => Some(id.0.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        on_edits.emit(group);
-                        selection.set(Selection::Blocks(added));
+            let chosen: Vec<&Block> = blocks
+                .iter()
+                .filter(|b| selection.blocks().contains(&b.id.0))
+                .collect();
+            match action {
+                // Copy the selected blocks; paste duplicates them with their
+                // internal lines, offset from the originals.
+                Action::Copy => {
+                    if selection.blocks().is_empty() {
+                        return;
                     }
-                    Err(message) => {
-                        if let Some(on_error) = &on_error {
-                            on_error.emit(format!("Cannot paste: {message}"));
+                    *clipboard.borrow_mut() = Some(Clipboard {
+                        model: model.clone(),
+                        system: system_ref.clone(),
+                        ids: selection.blocks().iter().cloned().map(BlockId).collect(),
+                        pastes: 0,
+                    });
+                }
+                Action::Paste => {
+                    let mut clip = clipboard.borrow_mut();
+                    let Some(clip) = clip.as_mut() else {
+                        return;
+                    };
+                    let pasted = if clip.system == system_ref {
+                        unlinked_model::clipboard::paste(
+                            &clip.model,
+                            &clip.system,
+                            &clip.ids,
+                            clip.pastes,
+                            &model,
+                        )
+                        .map_err(|e| e.to_string())
+                    } else {
+                        Err("blocks paste only into the system they were copied from".into())
+                    };
+                    match pasted {
+                        Ok(group) => {
+                            clip.pastes = clip.pastes.saturating_add(1);
+                            let added = group
+                                .iter()
+                                .filter_map(|edit| match edit {
+                                    Edit::AddBlock { id, .. } => Some(id.0.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            on_edits.emit(group);
+                            selection.set(Selection::Blocks(added));
+                        }
+                        Err(message) => {
+                            if let Some(on_error) = &on_error {
+                                on_error.emit(format!("Cannot paste: {message}"));
+                            }
                         }
                     }
                 }
-                return;
-            }
-            // Rotate (Ctrl+R) and flip (Ctrl+I), as in Simulink.
-            if command && (key == "r" || key == "i") {
-                let chosen: Vec<&Block> = blocks
-                    .iter()
-                    .filter(|b| selection.blocks().contains(&b.id.0))
-                    .collect();
-                if chosen.is_empty() {
-                    return;
-                }
-                e.prevent_default();
-                // Each selected block turns or flips in place, as one action.
-                let mut group = Vec::new();
-                for b in chosen {
-                    let (orientation, mirrored) = if key == "r" {
-                        geometry::rotated(b.orientation, b.mirrored)
-                    } else {
-                        geometry::flipped(b.orientation, b.mirrored)
-                    };
-                    if key == "r" {
-                        group.push(Edit::MoveBlock {
+                Action::Rotate | Action::Flip => {
+                    // Each selected block turns or flips in place, as one
+                    // action.
+                    let mut group = Vec::new();
+                    for b in &chosen {
+                        let (orientation, mirrored) = if action == Action::Rotate {
+                            geometry::rotated(b.orientation, b.mirrored)
+                        } else {
+                            geometry::flipped(b.orientation, b.mirrored)
+                        };
+                        if action == Action::Rotate {
+                            group.push(Edit::MoveBlock {
+                                system: system_ref.clone(),
+                                id: b.id.clone(),
+                                position: geometry::quarter_turn(b.position),
+                            });
+                        }
+                        group.push(Edit::SetOrientation {
                             system: system_ref.clone(),
                             id: b.id.clone(),
-                            position: geometry::quarter_turn(b.position),
+                            orientation,
+                            mirrored,
                         });
                     }
-                    group.push(Edit::SetOrientation {
-                        system: system_ref.clone(),
-                        id: b.id.clone(),
-                        orientation,
-                        mirrored,
-                    });
+                    if !group.is_empty() {
+                        on_edits.emit(group);
+                    }
                 }
-                on_edits.emit(group);
-                return;
-            }
-            // Select every block (Ctrl+A).
-            if command && key == "a" {
-                e.prevent_default();
-                selection.set(Selection::Blocks(
+                // Move the selected blocks by (dx, dy), as one action.
+                Action::Nudge(dx, dy) => {
+                    let group: Vec<Edit> = chosen
+                        .iter()
+                        .map(|b| {
+                            let p = b.position;
+                            Edit::MoveBlock {
+                                system: system_ref.clone(),
+                                id: b.id.clone(),
+                                position: Rect::new(
+                                    p.left + dx,
+                                    p.top + dy,
+                                    p.right + dx,
+                                    p.bottom + dy,
+                                ),
+                            }
+                        })
+                        .collect();
+                    if !group.is_empty() {
+                        on_edits.emit(group);
+                    }
+                }
+                Action::SelectAll => selection.set(Selection::Blocks(
                     blocks.iter().map(|b| b.id.0.clone()).collect(),
-                ));
-                return;
-            }
-            // Expand a lone selected subsystem into its parent (Ctrl+Shift+G).
-            if command && key == "g" && e.shift_key() {
-                if let [id] = selection.blocks() {
-                    e.prevent_default();
-                    on_edit.emit(Edit::ExpandSubsystem {
-                        system: system_ref.clone(),
-                        id: BlockId(id.clone()),
-                    });
-                    selection.set(Selection::Nothing);
-                }
-                return;
-            }
-            // Group the selected blocks into a new subsystem (Ctrl+G), named
-            // as Simulink names one, and select it.
-            if command && key == "g" && !selection.blocks().is_empty() {
-                e.prevent_default();
-                let Some(sid) = unlinked_model::edit::next_sid(&model) else {
-                    return;
-                };
-                let names: std::collections::HashSet<&str> =
-                    blocks.iter().map(|b| b.name.as_str()).collect();
-                let name = std::iter::once("Subsystem".to_string())
-                    .chain((1..).map(|i| format!("Subsystem{i}")))
-                    .find(|n| !names.contains(n.as_str()))
-                    .expect("some suffix is free");
-                let id = BlockId(sid.to_string());
-                *select_created.borrow_mut() = Some(id.clone());
-                on_edit.emit(Edit::CreateSubsystem {
-                    system: system_ref.clone(),
-                    ids: selection.blocks().iter().cloned().map(BlockId).collect(),
-                    id,
-                    name,
-                });
-                return;
-            }
-            if !matches!(e.key().as_str(), "Delete" | "Backspace") {
-                return;
-            }
-            match &*selection {
-                Selection::Wire(dst) => {
-                    e.prevent_default();
-                    on_edit.emit(Edit::Disconnect {
-                        system: system_ref.clone(),
-                        dst: dst.clone(),
-                    });
-                    selection.set(Selection::Nothing);
-                }
-                Selection::Annotation(index, expected) => {
-                    // Only the annotation that was selected, if it is still
-                    // where it was.
-                    if annotations.get(*index) != Some(expected) {
+                )),
+                // Flatten a lone selected subsystem into its parent.
+                Action::Expand => {
+                    if let [id] = selection.blocks() {
+                        on_edit.emit(Edit::ExpandSubsystem {
+                            system: system_ref.clone(),
+                            id: BlockId(id.clone()),
+                        });
                         selection.set(Selection::Nothing);
+                    }
+                }
+                // Group the selected blocks into a new subsystem, named as
+                // Simulink names one, and select it.
+                Action::Group => {
+                    if selection.blocks().is_empty() {
                         return;
                     }
-                    e.prevent_default();
-                    on_edit.emit(Edit::DeleteAnnotation {
+                    let Some(sid) = unlinked_model::edit::next_sid(&model) else {
+                        return;
+                    };
+                    let names: std::collections::HashSet<&str> =
+                        blocks.iter().map(|b| b.name.as_str()).collect();
+                    let name = std::iter::once("Subsystem".to_string())
+                        .chain((1..).map(|i| format!("Subsystem{i}")))
+                        .find(|n| !names.contains(n.as_str()))
+                        .expect("some suffix is free");
+                    let id = BlockId(sid.to_string());
+                    *select_created.borrow_mut() = Some(id.clone());
+                    on_edit.emit(Edit::CreateSubsystem {
                         system: system_ref.clone(),
-                        target: AnnotationTarget {
-                            index: *index,
-                            expected: expected.clone(),
-                        },
+                        ids: selection.blocks().iter().cloned().map(BlockId).collect(),
+                        id,
+                        name,
                     });
-                    selection.set(Selection::Nothing);
                 }
-                Selection::Blocks(ids) if !ids.is_empty() => {
-                    e.prevent_default();
-                    let ids: Vec<BlockId> = ids.iter().cloned().map(BlockId).collect();
-                    if let Some(group) = confirm_delete(&model, &system_ref, &ids, &lines) {
-                        on_edits.emit(group);
+                Action::Delete => match &*selection {
+                    Selection::Wire(dst) => {
+                        on_edit.emit(Edit::Disconnect {
+                            system: system_ref.clone(),
+                            dst: dst.clone(),
+                        });
                         selection.set(Selection::Nothing);
                     }
-                }
-                _ => {}
+                    // Only the annotation that was selected, if it is still
+                    // where it was.
+                    Selection::Annotation(index, expected) => {
+                        if annotations.get(*index) == Some(expected) {
+                            on_edit.emit(Edit::DeleteAnnotation {
+                                system: system_ref.clone(),
+                                target: AnnotationTarget {
+                                    index: *index,
+                                    expected: expected.clone(),
+                                },
+                            });
+                        }
+                        selection.set(Selection::Nothing);
+                    }
+                    Selection::Blocks(ids) if !ids.is_empty() => {
+                        let ids: Vec<BlockId> = ids.iter().cloned().map(BlockId).collect();
+                        if let Some(group) = confirm_delete(&model, &system_ref, &ids, &lines) {
+                            on_edits.emit(group);
+                            selection.set(Selection::Nothing);
+                        }
+                    }
+                    _ => {}
+                },
             }
+        })
+    };
+    let onkeydown = {
+        let (act, selection, clipboard) = (act.clone(), selection.clone(), clipboard.clone());
+        Callback::from(move |e: KeyboardEvent| {
+            let command = e.ctrl_key() || e.meta_key();
+            let key = e.key().to_ascii_lowercase();
+            let blocks = !selection.blocks().is_empty();
+            // Keys are only taken from the browser when they act on something.
+            let action = match key.as_str() {
+                "c" if command && blocks => Action::Copy,
+                "v" if command && clipboard.borrow().is_some() => Action::Paste,
+                "r" if command && blocks => Action::Rotate,
+                "i" if command && blocks => Action::Flip,
+                "a" if command => Action::SelectAll,
+                "g" if command && e.shift_key() => Action::Expand,
+                "g" if command && blocks => Action::Group,
+                "delete" | "backspace" if *selection != Selection::Nothing => Action::Delete,
+                // Arrows nudge the selection by a grid step, or one unit
+                // with Shift.
+                "arrowleft" | "arrowright" | "arrowup" | "arrowdown" if blocks && !command => {
+                    let step = if e.shift_key() { 1.0 } else { SNAP };
+                    match key.as_str() {
+                        "arrowleft" => Action::Nudge(-step, 0.0),
+                        "arrowright" => Action::Nudge(step, 0.0),
+                        "arrowup" => Action::Nudge(0.0, -step),
+                        _ => Action::Nudge(0.0, step),
+                    }
+                }
+                _ => return,
+            };
+            e.prevent_default();
+            act.emit(action);
         })
     };
     // Palette blocks are dragged in with HTML drag and drop.
@@ -1429,6 +1542,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             if let Some(edit) = at.and_then(|at| add_block_at(&model, &system_ref, &type_key, at)) {
                 on_edit.emit(edit);
             }
+        })
+    };
+    // The context menu, open at a client position.
+    let oncontextmenu = {
+        let (menu, selection, editable) =
+            (menu.clone(), selection.clone(), props.on_edit.is_some());
+        Callback::from(move |e: MouseEvent| {
+            if !editable {
+                return;
+            }
+            e.prevent_default();
+            // Right-clicking an unselected block selects it alone.
+            if let Some(id) = block_group(e.target()).and_then(|g| g.get_attribute("data-sid")) {
+                if !selection.blocks().contains(&id) {
+                    selection.set(Selection::Blocks(vec![id]));
+                }
+            }
+            menu.set(Some((e.client_x(), e.client_y())));
         })
     };
     let ondblclick = {
@@ -1554,6 +1685,23 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
 
+    // Which actions apply to the current selection.
+    let lone_subsystem = matches!(
+        selection.blocks(),
+        [id] if system
+            .and_then(|s| s.block(&BlockId(id.clone())))
+            .is_some_and(|b| b.subsystem.is_some())
+    );
+    let blocks_selected = !selection.blocks().is_empty();
+    let something_selected = *selection != Selection::Nothing;
+    let enabled = |a: Action| match a {
+        Action::Copy | Action::Rotate | Action::Flip | Action::Group | Action::Nudge(..) => {
+            blocks_selected
+        }
+        Action::Expand => lone_subsystem,
+        Action::Delete => something_selected,
+        Action::Paste | Action::SelectAll => true,
+    };
     let line_end = |class: &str, prefix: &str, ep: &Endpoint| {
         format!(
             ".diagram polyline.{class}[data-{prefix}sid=\"{}\"][data-{prefix}kind=\"{}\"][data-{prefix}index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
@@ -1649,6 +1797,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         <div class="viewer">
             <div class="toolbar">
                 <nav class="crumbs">{ for crumbs }</nav>
+                if props.on_edit.is_some() {
+                    <span class="edit-tools">
+                        { for TOOLBAR.iter().map(|&a| action_button(a, enabled(a), &act, false)) }
+                    </span>
+                }
                 <span class="spacer" />
                 <span class="zoom">{ format!("{:.0}%", v.scale * 100.0) }</span>
                 <button onclick={fit_view}>{ "Fit" }</button>
@@ -1667,10 +1820,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"))}
                     ref={container} tabindex="0"
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={end_drag}
-                    {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop}>
+                    {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop} {oncontextmenu}>
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
                 </div>
+                if let (Some((x, y)), true) = (*menu, props.on_edit.is_some()) {
+                    // Clicking anywhere, including an item, closes it.
+                    <div class="context-backdrop" onclick={{
+                        let menu = menu.clone();
+                        Callback::from(move |_: MouseEvent| menu.set(None))
+                    }} oncontextmenu={{
+                        let menu = menu.clone();
+                        Callback::from(move |e: MouseEvent| { e.prevent_default(); menu.set(None) })
+                    }}>
+                        <div class="context-menu" style={format!("left: {x}px; top: {y}px;")}>
+                            { for MENU.iter().filter(|&&a| enabled(a)).map(|&a| action_button(a, true, &act, true)) }
+                        </div>
+                    </div>
+                }
                 if let Some(line) = selected_line {
                     <LineInspector line={Rc::new(line.clone())} system={system_ref.clone()}
                         blocks={Rc::new(system.map(|s| s.blocks.clone()).unwrap_or_default())}

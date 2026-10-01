@@ -92,7 +92,9 @@ CI. Per-model import, render and simulation coverage is tracked in
   - Annotations: add, move, edit plain or TeX-source text, and delete.
   - Selection by box, Shift-click and Ctrl+A; group move, rotate and delete;
     copy/paste of native blocks with the lines between them; undo/redo by
-    action.
+    action. Arrow keys nudge the selection by a grid step (Shift for one
+    unit); a toolbar and a right-click menu offer the same actions as the
+    shortcuts.
   - Every batch is refused if it adds a structural error, both in the
     preview and when saving.
   - Not yet: copying masked, linked, styled or subsystem blocks; editing
