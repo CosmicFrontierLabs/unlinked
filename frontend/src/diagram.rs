@@ -1292,6 +1292,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 ));
                 return;
             }
+            // Expand a lone selected subsystem into its parent (Ctrl+Shift+G).
+            if command && key == "g" && e.shift_key() {
+                if let [id] = selection.blocks() {
+                    e.prevent_default();
+                    on_edit.emit(Edit::ExpandSubsystem {
+                        system: system_ref.clone(),
+                        id: BlockId(id.clone()),
+                    });
+                    selection.set(Selection::Nothing);
+                }
+                return;
+            }
             // Group the selected blocks into a new subsystem (Ctrl+G), named
             // as Simulink names one, and select it.
             if command && key == "g" && !selection.blocks().is_empty() {
@@ -1934,6 +1946,22 @@ fn inspector(props: &InspectorProps) -> Html {
         };
         html! { <button onclick={Callback::from(move |_: MouseEvent| on_open.emit(name.clone()))}>{ label }</button> }
     });
+    // Expanding is offered for any subsystem; the edit refuses ones it
+    // cannot flatten faithfully and says why.
+    let expand = props
+        .on_edit
+        .clone()
+        .filter(|_| b.subsystem.is_some() && props.chart.is_none())
+        .map(|on_edit| {
+            let (system, id) = (props.system.clone(), b.id.clone());
+            let onclick = Callback::from(move |_: MouseEvent| {
+                on_edit.emit(Edit::ExpandSubsystem {
+                    system: system.clone(),
+                    id: id.clone(),
+                })
+            });
+            html! { <button {onclick} title="Ctrl+Shift+G">{ "Expand subsystem" }</button> }
+        });
     let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
     let script = props.chart.as_ref().and_then(|c| c.script.clone());
     // A value cell: editable input when editing, code otherwise. Changes
@@ -2007,6 +2035,7 @@ fn inspector(props: &InspectorProps) -> Html {
             { title }
             <div class="muted">{ format!("{kind} · SID {}", b.id) }</div>
             { for open }
+            { for expand }
             { for delete }
             if let Some(script) = script {
                 <h4>{ "MATLAB code" }</h4>
