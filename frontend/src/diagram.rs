@@ -603,8 +603,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .iter()
                     .filter_map(|id| {
                         let rect = blocks.iter().find(|(b, _)| b == id)?.1;
-                        let selector = format!(".diagram g.block[data-sid=\"{}\"]", css_string(id));
-                        let group = gloo_utils::document().query_selector(&selector).ok()??;
+                        // Within this diagram: other viewers may show the
+                        // same SIDs.
+                        let selector = format!("g.block[data-sid=\"{}\"]", css_string(id));
+                        let group = container
+                            .cast::<Element>()?
+                            .query_selector(&selector)
+                            .ok()??;
                         Some((group, id.clone(), rect))
                     })
                     .collect();

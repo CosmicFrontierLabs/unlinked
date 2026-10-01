@@ -125,20 +125,20 @@ pub fn drag_segment(
         out.push(b);
     }
     out.extend_from_slice(&points[segment + 2..]);
-    // Drop repeated and collinear interior points.
-    let same = |p: Point, q: Point| (p.x - q.x).abs() < 1e-9 && (p.y - q.y).abs() < 1e-9;
-    let mut i = fixed;
-    while i + FIXED_END < out.len() {
-        let (prev, here, next) = (out[i - 1], out[i], out[i + 1]);
-        let collinear = ((prev.x - here.x).abs() < 1e-9 && (here.x - next.x).abs() < 1e-9)
-            || ((prev.y - here.y).abs() < 1e-9 && (here.y - next.y).abs() < 1e-9);
-        if same(prev, here) || collinear {
-            out.remove(i);
-        } else {
-            i += 1;
+    // Drop repeated and collinear interior points in one pass: each point is
+    // judged against the last one kept and the one after it.
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    let mut kept: Vec<Point> = out[..fixed].to_vec();
+    for i in fixed..out.len() - FIXED_END {
+        let (prev, here, next) = (kept[kept.len() - 1], out[i], out[i + 1]);
+        let repeated = close(prev.x, here.x) && close(prev.y, here.y);
+        let collinear = (close(prev.x, here.x) && close(here.x, next.x))
+            || (close(prev.y, here.y) && close(here.y, next.y));
+        if !repeated && !collinear {
+            kept.push(here);
         }
     }
-    Some(out[fixed..out.len() - FIXED_END].to_vec())
+    Some(kept.split_off(fixed))
 }
 
 /// A block outline after a quarter turn: width and height swap about the
@@ -376,6 +376,30 @@ mod tests {
             drag_segment(&straight, 2, 3, -10.0),
             Some(vec![p(95.0, 20.0)])
         );
+    }
+
+    /// Dragging runs on every pointer move, so it must stay linear in the
+    /// size of imported routes (from review: a quadratic pass took 1.7 s at
+    /// 100k points).
+    #[test]
+    fn dragging_long_routes_stays_linear() {
+        let n = 200_000;
+        let mut wire = vec![Point::new(-5.0, 0.0), Point::new(0.0, 0.0)];
+        wire.extend((1..n).map(|i| {
+            let step = (i / 2) as f64 * 10.0;
+            if i % 2 == 0 {
+                Point::new(step, step)
+            } else {
+                Point::new(step + 10.0, step)
+            }
+        }));
+        let last = *wire.last().unwrap();
+        wire.push(Point::new(last.x, last.y + 5.0));
+        wire.push(Point::new(last.x, last.y + 10.0));
+        let start = std::time::Instant::now();
+        let route = drag_segment(&wire, 2, n / 2, 5.0).unwrap();
+        assert!(route.len() > n / 2);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
