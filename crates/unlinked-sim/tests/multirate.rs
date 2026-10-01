@@ -18,6 +18,7 @@ fn block(id: &str, kind: &str, params: &[(&str, &str)]) -> Block {
         library_source: None,
         subsystem: None,
         style: BlockStyle::default(),
+        interface: None,
     }
 }
 fn line(source: &str, output: u32, target: &str, input: u32) -> Line {

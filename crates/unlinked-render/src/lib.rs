@@ -341,7 +341,7 @@ fn draw_block(
     if b.block_type == "Sum" {
         draw_sum_signs(s, b, &fg);
     }
-    if let Some(element) = b.param("Element").filter(|e| !e.is_empty()) {
+    if let Some(element) = b.interface.as_ref().and_then(|i| i.element.as_deref()) {
         draw_bus_element_label(s, b, element, pal);
     }
 
@@ -685,6 +685,7 @@ mod tests {
             library_source: None,
             subsystem: None,
             style: BlockStyle::default(),
+            interface: None,
         }
     }
 

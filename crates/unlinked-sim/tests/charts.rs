@@ -20,6 +20,7 @@ fn block(id: &str, kind: &str, name: &str, inputs: u32, outputs: u32) -> Block {
         library_source: None,
         subsystem: None,
         style: BlockStyle::default(),
+        interface: None,
     }
 }
 fn line(source: &str, output: u32, target: &str, input: u32) -> Line {

@@ -316,3 +316,46 @@ fn corpus_scope_configs_parse() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(specs > 0, "corpus has scope specifications");
 }
+
+/// Bus element ports keep their interface: port number, name and element,
+/// including several blocks sharing one port number.
+#[test]
+fn corpus_bus_element_ports_keep_their_interface() {
+    let Some(dir) = corpus_dir() else { return };
+    let mut files = Vec::new();
+    models(&dir, &mut files);
+    let mut interfaces = 0;
+    let mut shared = false;
+    for f in &files {
+        let rel = f.strip_prefix(&dir).unwrap().display().to_string();
+        let bytes = std::fs::read(f).unwrap();
+        let Ok(model) = unlinked_import::import(&rel, &bytes) else {
+            continue;
+        };
+        for (path, sys) in model.walk() {
+            let mut numbers = std::collections::BTreeMap::new();
+            for b in &sys.blocks {
+                let Some(i) = &b.interface else { continue };
+                interfaces += 1;
+                assert!(
+                    matches!(b.block_type.as_str(), "Inport" | "Outport"),
+                    "{rel}: {path}/{}: interface on {}",
+                    b.name,
+                    b.block_type
+                );
+                let n = i.port_number.unwrap_or_else(|| {
+                    panic!("{rel}: {path}/{}: no port number in {:?}", b.name, i.raw)
+                });
+                assert!(i.raw.contains_key("PortNumber"));
+                *numbers.entry((b.block_type.clone(), n)).or_insert(0) += 1;
+                assert!(
+                    !b.parameters.contains_key("Element"),
+                    "interface kept out of parameters"
+                );
+            }
+            shared |= numbers.values().any(|&count| count > 1);
+        }
+    }
+    assert!(interfaces >= 13, "found {interfaces} bus element ports");
+    assert!(shared, "corpus has bus element ports sharing a port number");
+}

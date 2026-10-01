@@ -206,6 +206,7 @@ mod tests {
             library_source: None,
             subsystem: None,
             style: BlockStyle::default(),
+            interface: None,
         }
     }
 
