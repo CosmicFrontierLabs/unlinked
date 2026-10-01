@@ -103,7 +103,9 @@ fn to_diagram(e: &MouseEvent, container: &NodeRef, view: &View, svg: &str) -> Op
 /// `base`, or `base` with the smallest number appended that no block in
 /// `sys` is named, as Simulink names copies.
 fn unique_name(sys: &System, base: &str) -> String {
-    let taken = |n: &str| sys.blocks.iter().any(|b| b.name == n);
+    let names: std::collections::HashSet<&str> =
+        sys.blocks.iter().map(|b| b.name.as_str()).collect();
+    let taken = |n: &str| names.contains(n);
     if !taken(base) {
         return base.to_string();
     }

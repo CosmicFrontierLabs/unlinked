@@ -232,10 +232,7 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
     s.close("g");
 
     if opts.hit_targets {
-        draw_hit_targets(&mut s, sys, &routed);
-        if s.elements() > MAX_ELEMENTS {
-            return Err(RenderError::TooLarge);
-        }
+        draw_hit_targets(&mut s, sys, &routed)?;
     }
 
     s.close("svg");
@@ -558,7 +555,18 @@ const WIRABLE: [PortKind; 7] = [
 
 /// Transparent pointer targets drawn above everything else; see
 /// [`RenderOptions::hit_targets`].
-fn draw_hit_targets(s: &mut Svg, sys: &System, routed: &[route::RoutedLine]) {
+fn draw_hit_targets(
+    s: &mut Svg,
+    sys: &System,
+    routed: &[route::RoutedLine],
+) -> Result<(), RenderError> {
+    let budget = |s: &Svg| {
+        if s.elements() > MAX_ELEMENTS {
+            Err(RenderError::TooLarge)
+        } else {
+            Ok(())
+        }
+    };
     let endpoint_attrs = |prefix: &str, ep: &unlinked_model::Endpoint| {
         [
             (format!("data-{prefix}sid"), ep.block.0.clone()),
@@ -590,6 +598,7 @@ fn draw_hit_targets(s: &mut Svg, sys: &System, routed: &[route::RoutedLine]) {
         ];
         attrs.extend(data.iter().map(|(k, v)| (k.as_str(), v.clone())));
         s.leaf("polyline", &attrs);
+        budget(s)?;
     }
     s.close("g");
 
@@ -620,8 +629,10 @@ fn draw_hit_targets(s: &mut Svg, sys: &System, routed: &[route::RoutedLine]) {
                 s.leaf("circle", &attrs);
             }
         }
+        budget(s)?;
     }
     s.close("g");
+    Ok(())
 }
 
 fn draw_line(s: &mut Svg, r: &route::RoutedLine, label: Option<&TextBox>, pal: &Palette) {
