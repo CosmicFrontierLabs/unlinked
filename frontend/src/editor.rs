@@ -100,7 +100,8 @@ pub fn model_editor(props: &EditorProps) -> Html {
     let settings = use_state(|| false);
     let worker = use_mut_ref(DiagnosticsWorker::default);
     let generation = use_mut_ref(|| 0u64);
-    let compile = use_state(|| Compile::Idle);
+    // The compile check, with the model snapshot it is for.
+    let compile = use_state(|| (0usize, Compile::Idle));
     // Cleared on unmount so a request finishing afterwards neither updates
     // state nor navigates.
     let mounted = use_mut_ref(|| true);
@@ -466,15 +467,19 @@ pub fn model_editor(props: &EditorProps) -> Html {
             unlinked_sim::diagnose::diagnose(&model, &Default::default())
         })
     };
-    // A compile check runs on request in a worker, for one model snapshot;
-    // any edit cancels it and drops its result.
+    // A compile check runs on request in a worker, for one model snapshot:
+    // its state is kept with that snapshot and ignored for any other, and
+    // an edit cancels a check still running and forgets it, so a later
+    // snapshot reusing the address cannot pick it up.
     {
         let (worker, compile) = (worker.clone(), compile.clone());
         use_effect_with(snapshot, move |_| {
             worker.borrow_mut().cancel();
-            compile.set(Compile::Idle);
+            compile.set((0, Compile::Idle));
         });
     }
+    // The run settings a check uses: the Simulate tab's initial ones.
+    let (run_options, substitutions) = initial_options(&model.config);
     let check_compile = {
         let (worker, generation, compile, model) = (
             worker.clone(),
@@ -482,6 +487,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
             compile.clone(),
             model.clone(),
         );
+        let options = run_options.clone();
         Callback::from(move |()| {
             let current = {
                 let mut g = generation.borrow_mut();
@@ -490,45 +496,66 @@ pub fn model_editor(props: &EditorProps) -> Html {
             };
             let context = DiagnosticContext {
                 mode: CheckMode::Compile,
-                options: Some(initial_options(&model.config).0),
+                options: Some(options.clone()),
                 ..Default::default()
             };
             let done = {
                 let (compile, generation) = (compile.clone(), generation.clone());
                 Callback::from(move |outcome: DiagnosticOutcome| {
                     if outcome.generation == *generation.borrow() {
-                        compile.set(match outcome.result {
-                            Ok(report) => Compile::Done(Rc::new(report)),
-                            Err(e) => Compile::Failed(e),
-                        });
+                        compile.set((
+                            snapshot,
+                            match outcome.result {
+                                Ok(report) => Compile::Done(Rc::new(report)),
+                                Err(e) => Compile::Failed(e),
+                            },
+                        ));
                     }
                 })
             };
-            compile.set(
-                match worker.borrow_mut().start(current, &model, &context, done) {
-                    Ok(()) => Compile::Running,
-                    Err(e) => Compile::Failed(e),
-                },
-            );
+            let state = match worker.borrow_mut().start(current, &model, &context, done) {
+                Ok(()) => Compile::Running,
+                Err(e) => Compile::Failed(e),
+            };
+            compile.set((snapshot, state));
         })
     };
-    let compiled = match &*compile {
+    let current_compile = match &*compile {
+        (at, state) if *at == snapshot => state,
+        _ => &Compile::Idle,
+    };
+    let compiled = match current_compile {
         Compile::Done(report) => Some(report.clone()),
         _ => None,
     };
     let shown = compiled.as_deref().unwrap_or(&report);
     let problems = Rc::new(shown.diagnostics.clone());
     let problems_truncated = shown.truncated || shown.warnings_omitted;
-    let compile_status: AttrValue = match &*compile {
+    let settings_used = {
+        let o = &run_options;
+        let mut text = format!(
+            "Run settings: {}, {} to {} s, output step {}",
+            crate::sim::solver_name(o.solver),
+            o.start,
+            o.stop,
+            o.step
+        );
+        if !substitutions.is_empty() {
+            text.push_str(&format!(" ({})", substitutions.join(" ")));
+        }
+        text
+    };
+    let compile_status: AttrValue = match current_compile {
         Compile::Idle => "".into(),
-        Compile::Running => "Checking whether the simulator compiles the model…".into(),
+        Compile::Running => format!("Checking whether the simulator compiles the model… {settings_used}.").into(),
         Compile::Failed(e) => format!("Compile check failed: {e}").into(),
         Compile::Done(report) => match report.simulation {
-            SimulationCheck::Compiled => "The simulator compiles the model with the Simulate tab's initial run settings. Nothing was simulated, so this says nothing about results.".into(),
-            SimulationCheck::Rejected => "The simulator does not compile the model; see the problems.".into(),
+            SimulationCheck::Compiled => format!("The simulator compiles the model. Nothing was simulated, so this says nothing about results. {settings_used}.").into(),
+            SimulationCheck::Rejected => format!("The simulator does not compile the model; see the problems. {settings_used}.").into(),
             SimulationCheck::Incomplete | SimulationCheck::NotChecked => "The compile check could not finish; see the problems.".into(),
         },
     };
+    let compile_running = matches!(current_compile, Compile::Running);
     html! {
         <>
             { toolbar }
@@ -546,7 +573,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     on_edit={(*editing && !*busy).then(|| on_edit.clone())} />
             }
             <DiagramView {model} fit_key={props.fit_key.clone()} {problems} {problems_truncated}
-                on_compile={(!matches!(*compile, Compile::Running)).then_some(check_compile)}
+                on_compile={(!compile_running).then_some(check_compile)}
                 {compile_status}
                 on_settings={Callback::from({
                     let settings = settings.clone();

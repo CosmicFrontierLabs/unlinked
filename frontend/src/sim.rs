@@ -348,7 +348,7 @@ pub(crate) fn initial_options(config: &SimConfig) -> (SimulationOptions, Vec<Str
     (o, notes)
 }
 
-fn solver_name(s: Solver) -> &'static str {
+pub(crate) fn solver_name(s: Solver) -> &'static str {
     match s {
         Solver::Euler => "euler",
         Solver::Rk4 => "rk4",
