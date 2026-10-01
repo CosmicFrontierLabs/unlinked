@@ -80,8 +80,21 @@ pub fn route_location(
             "route requires a unique signal source".into(),
         ));
     }
+    let mut blocks = std::collections::BTreeMap::new();
+    for block in &sys.blocks {
+        budget = budget
+            .checked_sub(1)
+            .ok_or_else(|| EditError::Invalid("route traversal budget exceeded".into()))?;
+        blocks
+            .entry(&block.id)
+            .and_modify(|value| *value = None)
+            .or_insert(Some(block));
+    }
     let valid = |ep: &Endpoint| {
-        sys.block(&ep.block)
+        blocks
+            .get(&ep.block)
+            .copied()
+            .flatten()
             .is_some_and(|b| ep.port.index > 0 && ep.port.index <= b.ports.count(ep.port.kind))
     };
     if !valid(src) {

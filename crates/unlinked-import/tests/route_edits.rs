@@ -100,6 +100,18 @@ fn route_edits_fail_atomically_for_ambiguous_or_invalid_targets() {
     }
     .apply(&mut duplicate)
     .is_err());
+    let mut ambiguous_block = original.clone();
+    ambiguous_block
+        .root
+        .blocks
+        .push(ambiguous_block.root.blocks[0].clone());
+    assert!(Edit::SetTrunkRoute {
+        system: vec![],
+        src: ep("1", PortKind::Out),
+        points: vec![]
+    }
+    .apply(&mut ambiguous_block)
+    .is_err());
     let mut detached = original.clone();
     detached.root.lines[0].src = None;
     assert!(Edit::SetRoute {
