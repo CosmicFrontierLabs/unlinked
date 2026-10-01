@@ -7,9 +7,9 @@ license = "Apache-2.0"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+serde_json = "1"
 unlinked-model = { path = "../unlinked-model" }
 unlinked-matlab = { path = "../unlinked-matlab" }
 
 [dev-dependencies]
-serde_json = "1"
 unlinked-import = { path = "../unlinked-import" }
