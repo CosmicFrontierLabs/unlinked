@@ -118,7 +118,17 @@ fn parent_block<'a>(model: &'a Model, system: &[BlockId]) -> Result<&'a Block, E
     // The subsystem itself must also be virtual and unconditional, with no
     // sample time of its own.
     let ports = &block.ports;
-    let conditional = ports.enable + ports.trigger + ports.ifaction + ports.reset + ports.state > 0
+    let conditional = [
+        ports.enable,
+        ports.trigger,
+        ports.ifaction,
+        ports.reset,
+        ports.state,
+        ports.lconn,
+        ports.rconn,
+    ]
+    .iter()
+    .any(|&n| n != 0)
         || sys
             .blocks
             .iter()
@@ -604,6 +614,10 @@ mod tests {
             .blocks
             .push(block("20", "EnablePort", "en", None, [0, 0]));
         assert!(boundary_remap(&conditional, &delete("11", DisconnectPolicy::Disconnect)).is_err());
+        // Physical ports count too, even without a PMIO port block inside.
+        let mut physical = model();
+        physical.root.blocks[2].ports.lconn = 1;
+        assert!(boundary_remap(&physical, &delete("11", DisconnectPolicy::Disconnect)).is_err());
         let mut timed = model();
         timed.root.blocks[2]
             .parameters
