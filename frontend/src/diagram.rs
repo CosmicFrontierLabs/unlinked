@@ -599,7 +599,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.model.clone(),
             (*path).clone(),
         );
-        use_effect_with(Rc::as_ptr(&props.model) as usize, move |_| {
+        // Every render: success and refusal both re-render, so the request
+        // never outlives its action (and a later block reusing its SID is
+        // not selected by mistake).
+        use_effect(move || {
             let created = select_created.borrow_mut().take();
             let refs: Vec<&str> = path.iter().map(String::as_str).collect();
             if let Some(id) = created.filter(|id| {
@@ -1342,13 +1345,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .find(|n| !names.contains(n.as_str()))
                     .expect("some suffix is free");
                 let id = BlockId(sid.to_string());
+                *select_created.borrow_mut() = Some(id.clone());
                 on_edit.emit(Edit::CreateSubsystem {
                     system: system_ref.clone(),
                     ids: selection.blocks().iter().cloned().map(BlockId).collect(),
-                    id: id.clone(),
+                    id,
                     name,
                 });
-                *select_created.borrow_mut() = Some(id);
                 return;
             }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
