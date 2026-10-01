@@ -76,6 +76,10 @@ CI. Per-model import, render and simulation coverage is tracked in
   - Blocks: add from a palette of native catalog blocks, move, resize, rotate
     and flip, rename, re-parameterize (port counts follow the parameters) and
     delete. Deleting an Inport/Outport renumbers its siblings.
+  - Subsystem ports: adding, deleting or renumbering a plain Inport/Outport
+    inside a plain subsystem updates the subsystem block's ports and moves the
+    connections outside it with their signals (a wired port is only removed
+    with consent).
   - Lines: connect ports by dragging, disconnect, reroute by dragging a
     segment of a final leg or of a branched line's trunk, and name signals.
   - Annotations: add, move, edit plain or TeX-source text, and delete.
@@ -85,9 +89,10 @@ CI. Per-model import, render and simulation coverage is tracked in
   - Every batch is refused if it adds a structural error, both in the
     preview and when saving.
   - Not yet: copying masked, linked, styled or subsystem blocks; editing
-    rich-text annotation text; adding or removing port blocks inside
-    subsystems; renaming or deleting blocks that own Stateflow charts; and
-    editing chart contents.
+    rich-text annotation text; bus element, control (enable, trigger, action,
+    reset) and physical port blocks inside subsystems, and port edits in
+    masked, linked, atomic or variant subsystems; renaming or deleting blocks
+    that own Stateflow charts; and editing chart contents.
 
 ### Simulation
 - Bounded, version-pinned simulation jobs over HTTP and a WebSocket stream,
@@ -141,7 +146,7 @@ These are deliberately out of scope today and are rejected when encountered:
   other than Dormand–Prince, algebraic loop solving, triggered/enabled and
   function-call subsystems, buses, MIMO state-space, fixed-point types,
   multi-instance model references.
-- **Editing**: subsystem hierarchy (adding or removing port blocks, creating
+- **Editing**: subsystem hierarchy (non-plain port blocks, creating
   subsystems from a selection), copying non-native blocks, rich-text
   annotations, renaming/deleting blocks that own Stateflow charts, and
   editing chart contents.

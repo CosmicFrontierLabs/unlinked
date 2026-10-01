@@ -7,6 +7,7 @@
 //! Block parameters are kept as raw MATLAB expression strings; evaluating them
 //! is left to consumers that need numbers.
 
+pub mod boundary;
 pub mod catalog;
 pub mod clipboard;
 pub mod diff;

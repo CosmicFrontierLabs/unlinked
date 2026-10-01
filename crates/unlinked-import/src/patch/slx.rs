@@ -5,8 +5,8 @@
 //! other zip entry is copied raw.
 
 use super::dom::{self, Document, XElem, XNode};
-use super::Resolved;
 use super::{format_ports, parse_endpoint};
+use super::{Boundary, Resolved};
 use crate::{ImportError, MAX_DEPTH, MAX_UNCOMPRESSED_BYTES};
 use std::io::{Cursor, Read, Write};
 use unlinked_model::edit::{Edit, SID_WATERMARK};
@@ -443,24 +443,6 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
                 }
                 _ => true,
             });
-            for (id, number) in &resolved.renumbered {
-                let Some(b) = parent
-                    .elements_mut()
-                    .find(|b| b.name == "Block" && b.attr("SID").as_deref() == Some(id.0.as_str()))
-                else {
-                    continue;
-                };
-                let interface = b.elements_mut().find(|l| {
-                    l.name == "List" && l.attr("ListType").as_deref() == Some("InterfaceData")
-                });
-                let bus = interface.is_some();
-                if let Some(p) = interface.and_then(|l| l.prop_mut("PortNumber")) {
-                    p.set_text(number);
-                }
-                if !bus || b.prop("Port").is_some() {
-                    set_parameter(b, "Port", number);
-                }
-            }
         }
         Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
@@ -474,6 +456,88 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         | Edit::SetSignalName { .. } => {
             unreachable!("applied above")
         }
+    }
+    // Deleting or renumbering a port block renumbers its siblings.
+    for (id, number) in &resolved.renumbered {
+        let Some(b) = parent
+            .elements_mut()
+            .find(|b| b.name == "Block" && b.attr("SID").as_deref() == Some(id.0.as_str()))
+        else {
+            continue;
+        };
+        let interface = b
+            .elements_mut()
+            .find(|l| l.name == "List" && l.attr("ListType").as_deref() == Some("InterfaceData"));
+        let bus = interface.is_some();
+        if let Some(p) = interface.and_then(|l| l.prop_mut("PortNumber")) {
+            p.set_text(number);
+        }
+        if !bus || b.prop("Port").is_some() {
+            set_parameter(b, "Port", number);
+        }
+    }
+    Ok(())
+}
+
+/// Update the subsystem block around an edited system, the system element
+/// `sys`: its port count and the connections outside it.
+fn apply_boundary(sys: &mut XElem, boundary: &Boundary) -> Result<(), ImportError> {
+    let remap = &boundary.remap;
+    let sid = remap.parent.0.as_str();
+    let i = only_child(sys, &format!("block {sid}"), |c| {
+        c.name == "Block" && c.attr("SID").as_deref() == Some(sid)
+    })?;
+    set_ports(element_mut(sys, i), &boundary.ports);
+    let (key, default_kind) = match remap.kind {
+        PortKind::Out => ("Src", PortKind::Out),
+        _ => ("Dst", PortKind::In),
+    };
+    let index_of = |v: &str| {
+        parse_endpoint(v, default_kind)
+            .filter(|(b, p)| *b == sid && p.kind == remap.kind && p.index >= 1)
+            .map(|(_, p)| p.index)
+    };
+    let new_index = |old: u32| remap.map.get(old as usize - 1).copied().flatten();
+    let gone = |v: &str| index_of(v).is_some_and(|i| new_index(i).is_none());
+    // Connections on removed ports go (the IR already refused them unless
+    // disconnecting); the rest move to their new numbers.
+    sys.children.retain_mut(|c| match c {
+        XNode::Element(l) if l.name == "Line" => match remap.kind {
+            PortKind::Out => !l.prop("Src").is_some_and(|v| gone(&v)),
+            _ => !reaches(l, &gone, true) || prune(l, &gone, true),
+        },
+        _ => true,
+    });
+    fn renumber(
+        e: &mut XElem,
+        key: &str,
+        index_of: &dyn Fn(&str) -> Option<u32>,
+        new_index: &dyn Fn(u32) -> Option<u32>,
+        sid: &str,
+        kind: PortKind,
+        deep: bool,
+    ) {
+        if let Some(n) = e.prop(key).and_then(|v| index_of(&v)).and_then(new_index) {
+            if let Some(p) = e.prop_mut(key) {
+                p.set_text(&format!("{sid}#{}:{n}", kind.token()));
+            }
+        }
+        if deep {
+            for b in e.elements_mut().filter(|b| b.name == "Branch") {
+                renumber(b, key, index_of, new_index, sid, kind, true);
+            }
+        }
+    }
+    for line in sys.elements_mut().filter(|l| l.name == "Line") {
+        renumber(
+            line,
+            key,
+            &index_of,
+            &new_index,
+            sid,
+            remap.kind,
+            remap.kind != PortKind::Out,
+        );
     }
     Ok(())
 }
@@ -684,6 +748,12 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
         system_at(&mut parts, &at)
             .map(|sys| apply_edit(sys, resolved))
             .ok_or_else(|| ImportError::Xml("empty document".into()))??;
+        if let Some(boundary) = &resolved.boundary {
+            let at = locate(&parts, &boundary.system)?;
+            system_at(&mut parts, &at)
+                .map(|sys| apply_boundary(sys, boundary))
+                .ok_or_else(|| ImportError::Xml("empty document".into()))??;
+        }
         let allocated = match &resolved.edit {
             Edit::AddAnnotation { id, .. } => Some(id.as_str()),
             _ => resolved.added.as_ref().map(|block| block.id.0.as_str()),
@@ -783,6 +853,7 @@ mod tests {
             route: None,
             ports: None,
             renumbered: Vec::new(),
+            boundary: None,
         }
     }
 
@@ -847,6 +918,7 @@ mod tests {
             route: None,
             ports: None,
             renumbered: Vec::new(),
+            boundary: None,
         };
         let gain = Block {
             id: "4".into(),

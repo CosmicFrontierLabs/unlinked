@@ -286,20 +286,9 @@ pub enum EditError {
     NotConnected(Endpoint),
     #[error("the edit would add a structural error ({0})")]
     Structure(String),
-    #[error("adding or removing a subsystem's port blocks is not supported yet")]
-    SubsystemPorts,
+    #[error("{0}")]
+    SubsystemPorts(String),
 }
-
-/// Blocks that define a port of the subsystem containing them.
-const PORT_BLOCKS: &[&str] = &[
-    "Inport",
-    "Outport",
-    "EnablePort",
-    "TriggerPort",
-    "ActionPort",
-    "ResetPort",
-    "PMIOPort",
-];
 
 /// As Simulink does, renumber the ports above a deleted Inport/Outport so
 /// the numbers stay contiguous. Plain and bus element ports share the
@@ -437,10 +426,16 @@ impl Edit {
 
     pub fn apply(&self, model: &mut Model) -> Result<(), EditError> {
         self.validate()?;
+        // Worked out before the edit: it needs the port numbering as it was.
+        let remap = crate::boundary::boundary_remap(model, self)?;
         let charts = std::mem::take(&mut model.charts);
         let result = self.apply_to_diagram(model, &charts);
         model.charts = charts;
-        result
+        result?;
+        match &remap {
+            Some(remap) => crate::boundary::apply_remap(model, remap),
+            None => Ok(()),
+        }
     }
 
     fn apply_to_diagram(&self, model: &mut Model, charts: &[Chart]) -> Result<(), EditError> {
@@ -593,6 +588,14 @@ impl Edit {
                 }
             }
             Edit::SetParameter { name, value, .. } => {
+                // Renumbering an Inport/Outport moves it among its siblings,
+                // which shift to keep the numbers 1 to n.
+                if name == "Port" {
+                    let to = catalog::port_number(value).map_err(EditError::Invalid)?;
+                    if crate::boundary::move_port(sys, id, to)? {
+                        return Ok(());
+                    }
+                }
                 let block = &mut sys.blocks[index];
                 if let Some(descriptor) = native_descriptor(block) {
                     let edit = descriptor
@@ -619,11 +622,6 @@ impl Edit {
                     && sys.lines.iter().any(|l| touches(l, id))
                 {
                     return Err(EditError::Connected(id.clone()));
-                }
-                if !self.system().is_empty()
-                    && PORT_BLOCKS.contains(&sys.blocks[index].block_type.as_str())
-                {
-                    return Err(EditError::SubsystemPorts);
                 }
                 let removed = sys.blocks.remove(index);
                 close_port_gap(sys, &removed);
@@ -785,9 +783,6 @@ fn add_block(
     let descriptor = catalog::find(block_type)
         .filter(|d| d.creatable && d.source_block.is_none())
         .ok_or_else(|| EditError::Invalid(format!("{block_type:?} is not in the block palette")))?;
-    if !system.is_empty() && PORT_BLOCKS.contains(&descriptor.type_key) {
-        return Err(EditError::SubsystemPorts);
-    }
     let next = next_sid(model).ok_or_else(|| EditError::Invalid("no SIDs left".into()))?;
     let sid =
         id.0.parse::<u64>()
