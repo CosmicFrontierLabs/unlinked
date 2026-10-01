@@ -999,7 +999,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 };
                 match pasted {
                     Ok(group) => {
-                        clip.pastes += 1;
+                        clip.pastes = clip.pastes.saturating_add(1);
                         let added = group
                             .iter()
                             .filter_map(|edit| match edit {

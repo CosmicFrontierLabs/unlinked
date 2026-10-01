@@ -22,7 +22,7 @@ pub fn paste(
 ) -> Result<Vec<Edit>, EditError> {
     let next = |m: &Model| next_sid(m).ok_or_else(|| EditError::Invalid("no SIDs left".into()));
     let first_sid = next(target)?.max(next(source)?);
-    let step = PASTE_STEP * f64::from(nth + 1);
+    let step = PASTE_STEP * (f64::from(nth) + 1.0);
     let mut edits = duplicate(source, system, ids, Point::new(step, step), first_sid)?;
     let names = system_names(target, system).ok_or_else(|| EditError::NoSystem(system.clone()))?;
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
