@@ -1077,7 +1077,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 false,
                 dialog(
                     "Timing",
-                    "Sample period in seconds; -1 inherits timing, 0 is continuous where supported, and inf denotes a constant sample time.",
+                    "Discrete sample period in seconds, or -1 to inherit. Zero is not a continuous mode for this block; multirate simulation requires an explicit positive period.",
                     Some("s"),
                 ),
             ),
@@ -1100,7 +1100,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                     false,
                     dialog(
                         "Timing",
-                        "Sample period in seconds; -1 inherits timing, 0 is continuous where supported, and inf denotes a constant sample time.",
+                        "Discrete sample period in seconds, or -1 to inherit. Unlinked requires an explicit positive period; zero is not a continuous mode for this block.",
                         Some("s"),
                     ),
                 )
@@ -1369,7 +1369,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
             ),
             param(
                 "Frequency",
-                "Frequency (rad/s)",
+                "Frequency",
                 Expr,
                 "1",
                 false,
@@ -1385,7 +1385,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
             ),
             param(
                 "Phase",
-                "Phase (rad)",
+                "Phase",
                 Expr,
                 "0",
                 false,
@@ -1439,7 +1439,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 false,
                 dialog(
                     "Timing",
-                    "Sample period in seconds; -1 inherits timing, 0 is continuous where supported, and inf denotes a constant sample time.",
+                    "Sample period in seconds. Time-based mode permits zero for continuous output; sample-based mode requires a positive period.",
                     Some("s"),
                 ),
             ),
@@ -1486,7 +1486,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 false,
                 dialog(
                     "Distribution",
-                    "Seed expression used to initialize the random sequence; the same seed makes runs reproducible.",
+                    "Seed expression for reproducible runs; Unlinked requires an integer from 0 through 4294967295 (u32::MAX).",
                     None,
                 ),
             ),
@@ -1498,7 +1498,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 false,
                 dialog(
                     "Timing",
-                    "Sample period in seconds; -1 inherits timing, 0 is continuous where supported, and inf denotes a constant sample time.",
+                    "Discrete sample period in seconds. Unlinked requires an explicit positive period for random sources.",
                     Some("s"),
                 ),
             ),

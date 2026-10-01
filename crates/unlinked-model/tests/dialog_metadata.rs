@@ -217,3 +217,24 @@ fn mode_dependent_bounds_and_sample_settings_are_available() {
     assert_eq!(ports.inputs, 0);
     assert!(parameter(sine, "SineType").affects_ports);
 }
+
+#[test]
+fn controller_fields_are_unconditional_and_units_are_separate() {
+    for block in BLOCKS {
+        for field in block.parameters {
+            if let Some(units) = field.dialog.units {
+                assert!(!field.label.contains(&format!("({units})")));
+            }
+            let name = match field.dialog.visible_when {
+                Visibility::Always => continue,
+                Visibility::Equals { parameter, .. } | Visibility::NotEquals { parameter, .. } => {
+                    parameter
+                }
+            };
+            assert_eq!(
+                parameter(block, name).dialog.visible_when,
+                Visibility::Always
+            );
+        }
+    }
+}
