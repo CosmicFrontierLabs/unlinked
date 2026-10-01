@@ -1186,6 +1186,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         [sid] => s.blocks.iter().find(|b| &b.id.0 == sid),
         _ => None,
     });
+    let selected_line = system.zip(selected_wire.as_ref()).and_then(|(s, dst)| {
+        s.lines
+            .iter()
+            .find(|l| unlinked_model::edit::drives(l, dst))
+    });
     let selected_chart = selected_block.and_then(|b| {
         let mut p = refs.clone();
         p.push(&b.name);
@@ -1355,6 +1360,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
                 </div>
+                if let Some(line) = selected_line {
+                    <LineInspector line={Rc::new(line.clone())} system={system_ref.clone()}
+                        blocks={Rc::new(system.map(|s| s.blocks.clone()).unwrap_or_default())}
+                        on_edit={on_edit.clone()} />
+                }
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
                         system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
@@ -1456,6 +1466,76 @@ fn block_palette() -> Html {
             <p class="hint">{ "Drag onto the diagram. Drag from a port to another to connect; select a line and press Delete to remove it." }</p>
             { for groups }
         </div>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+struct LineInspectorProps {
+    line: Rc<Line>,
+    /// The system containing the line.
+    system: SystemRef,
+    /// Blocks of that system, to name the line's ends.
+    blocks: Rc<Vec<Block>>,
+    on_edit: Option<Callback<Edit>>,
+}
+
+/// The selected line: where it runs, and its signal name (editable).
+#[function_component(LineInspector)]
+fn line_inspector(props: &LineInspectorProps) -> Html {
+    let line = &props.line;
+    let describe = |ep: &Endpoint| {
+        let block = props
+            .blocks
+            .iter()
+            .find(|b| b.id == ep.block)
+            .map_or(ep.block.0.as_str(), |b| b.name.as_str());
+        format!(
+            "{} ({} {})",
+            block.replace('\n', " "),
+            ep.port.kind.token(),
+            ep.port.index
+        )
+    };
+    let mut ends = Vec::new();
+    let mut pending = vec![(line.dst.as_ref(), &line.branches)];
+    while let Some((dst, branches)) = pending.pop() {
+        ends.extend(dst);
+        pending.extend(branches.iter().map(|b| (b.dst.as_ref(), &b.branches)));
+    }
+    let name = line.name.clone().unwrap_or_default();
+    let name_field = match (&props.on_edit, &line.src) {
+        (Some(on_edit), Some(src)) => {
+            let (on_edit, system, src, current) = (
+                on_edit.clone(),
+                props.system.clone(),
+                src.clone(),
+                name.clone(),
+            );
+            // An empty name removes the label.
+            let onchange = Callback::from(move |e: Event| {
+                let name = e.target_unchecked_into::<HtmlInputElement>().value();
+                if name != current {
+                    on_edit.emit(Edit::SetSignalName {
+                        system: system.clone(),
+                        src: src.clone(),
+                        name,
+                    });
+                }
+            });
+            html! { <input class="param signal-name" value={name} placeholder="unnamed" {onchange} /> }
+        }
+        _ if name.is_empty() => html! { <span class="muted">{ "unnamed" }</span> },
+        _ => html! { <code>{ name }</code> },
+    };
+    html! {
+        <aside class="inspector">
+            <h3>{ "Line" }</h3>
+            <table>
+                <tr><th>{ "Signal name" }</th><td>{ name_field }</td></tr>
+                <tr><th>{ "From" }</th><td>{ line.src.as_ref().map(describe).unwrap_or_else(|| "(none)".into()) }</td></tr>
+                { for ends.iter().map(|ep| html! { <tr><th>{ "To" }</th><td>{ describe(ep) }</td></tr> }) }
+            </table>
+        </aside>
     }
 }
 

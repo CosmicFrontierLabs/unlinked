@@ -591,7 +591,7 @@ fn prune(dst: &mut Option<Endpoint>, branches: &mut Vec<Branch>, hit: &dyn Fn(&E
 }
 
 /// Whether `dst` is a destination anywhere in `line`.
-fn drives(line: &Line, dst: &Endpoint) -> bool {
+pub fn drives(line: &Line, dst: &Endpoint) -> bool {
     fn branches(bs: &[Branch], dst: &Endpoint) -> bool {
         bs.iter()
             .any(|b| b.dst.as_ref() == Some(dst) || branches(&b.branches, dst))
