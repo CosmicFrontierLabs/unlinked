@@ -285,12 +285,10 @@ fn split_root_grouping_preserves_other_parts() {
             .id
             .clone(),
     };
-    apply_batch(&mut expected, std::slice::from_ref(&expand)).unwrap();
-    let output = unlinked_import::patch::apply_edits("split.slx", &output, &[expand]).unwrap();
-    assert_eq!(
-        unlinked_import::import("split.slx", &output).unwrap(),
-        expected
-    );
+    // Expansion currently supports inline children only. The UI dry-runs
+    // this writer before accepting an expansion into the pending edit batch.
+    let error = unlinked_import::patch::apply_edits("split.slx", &output, &[expand]).unwrap_err();
+    assert!(error.to_string().contains("referenced"), "{error}");
     let mut archive = zip::ZipArchive::new(Cursor::new(output)).unwrap();
     let mut after = String::new();
     std::io::Read::read_to_string(
