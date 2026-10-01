@@ -437,6 +437,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let select_box = use_state(|| None::<(Point, Point)>);
     // A selected connection, by the input it drives.
     let selected_wire = use_state(|| None::<Endpoint>);
+    // A selected branched line, by the source of its trunk.
+    let selected_trunk = use_state(|| None::<Endpoint>);
     // A connection being dragged: from its first port to the pointer.
     let wire_preview = use_state(|| None::<(Point, Point)>);
     // The outline of a block being resized.
@@ -499,8 +501,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
 
     // A selected connection belongs to the level it was picked on.
     {
-        let selected_wire = selected_wire.clone();
-        use_effect_with((*path).clone(), move |_| selected_wire.set(None));
+        let (selected_wire, selected_trunk) = (selected_wire.clone(), selected_trunk.clone());
+        use_effect_with((*path).clone(), move |_| {
+            selected_wire.set(None);
+            selected_trunk.set(None);
+        });
     }
 
     // Wheel zoom around the cursor. Registered by hand so the listener is
@@ -960,7 +965,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onclick = {
         let drag = drag.clone();
-        let (selected, selected_wire) = (selected.clone(), selected_wire.clone());
+        let (selected, selected_wire, selected_trunk) = (
+            selected.clone(),
+            selected_wire.clone(),
+            selected_trunk.clone(),
+        );
         Callback::from(move |e: MouseEvent| {
             let moved = matches!(drag.borrow_mut().take(), Some(Drag::Ended { moved: true }));
             if moved {
@@ -968,8 +977,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
             let wire =
                 closest(e.target(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"));
+            let trunk =
+                closest(e.target(), "polyline.trunk-hit").and_then(|w| endpoint_of(&w, "src-"));
             let block = block_group(e.target()).and_then(|g| g.get_attribute("data-sid"));
-            selected.set(match (wire.is_some(), block) {
+            selected_trunk.set(trunk.clone());
+            selected.set(match (wire.is_some() || trunk.is_some(), block) {
                 (true, _) => Vec::new(),
                 // Shift-click adds or removes a block.
                 (false, Some(id)) if e.shift_key() => {
@@ -1188,15 +1200,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     });
     // Only an input driven by exactly one line identifies it; imported models
     // may drive an input twice, and then which line was clicked is unknown.
-    let selected_line = system.zip(selected_wire.as_ref()).and_then(|(s, dst)| {
-        let mut driving = s
-            .lines
-            .iter()
-            .filter(|l| unlinked_model::edit::drives(l, dst));
-        match (driving.next(), driving.next()) {
-            (Some(line), None) => Some(line),
-            _ => None,
-        }
+    // A line selected by the input it drives or the source of its trunk;
+    // ends shared by several lines (in imported models) select none.
+    let selected_line = system.and_then(|s| match (&*selected_wire, &*selected_trunk) {
+        (Some(dst), _) => unlinked_model::edit::line_into(s, dst),
+        (None, Some(src)) => unlinked_model::edit::line_from(s, src),
+        (None, None) => None,
     });
     let selected_chart = selected_block.and_then(|b| {
         let mut p = refs.clone();
@@ -1273,7 +1282,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 dst.port.index
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+        + &selected_trunk
+            .as_ref()
+            .map(|src| {
+                format!(
+                    ".diagram polyline.trunk-hit[data-src-sid=\"{}\"][data-src-kind=\"{}\"][data-src-index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
+                    css_string(&src.block.0),
+                    src.port.kind.token(),
+                    src.port.index
+                )
+            })
+            .unwrap_or_default();
     let highlight = match &props.diff {
         Some(d) => diff_css(d, &path, system) + &highlight + &wire_highlight,
         None => highlight + &wire_highlight,
