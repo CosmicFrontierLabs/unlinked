@@ -9,6 +9,7 @@
 //! renamed, including earlier in the same batch.
 
 use crate::catalog::{self, PortResolution};
+pub use crate::duplicate::duplicate;
 use crate::validation::{validate_structure, DiagnosticTarget, Severity};
 use crate::{
     Block, BlockId, BlockStyle, Branch, Chart, Endpoint, Line, Model, Orientation, PortKind, Rect,
