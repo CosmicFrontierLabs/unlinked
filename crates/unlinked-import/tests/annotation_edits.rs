@@ -219,3 +219,25 @@ fn slx_text_precedence_and_body_fallback_are_preserved() {
         roundtrip("a.slx", &bytes, &[text, moved]);
     }
 }
+
+#[test]
+fn legacy_mdl_point_positions_stay_points_while_boxes_stay_boxes() {
+    for (position, expected) in [("[1, 2]", "[11, 12]"), ("[1, 2, 1, 2]", "[11, 12, 11, 12]")] {
+        let source = format!("Model {{\n Name m\n System {{\n Annotation {{\n Name note\n Position {position}\n }}\n }}\n}}\n");
+        let model = unlinked_import::import("a.mdl", source.as_bytes()).unwrap();
+        let edit = Edit::MoveAnnotation {
+            system: vec![],
+            target: target(&model, 0),
+            position: Rect::new(11., 12., 11., 12.),
+        };
+        let out = roundtrip("a.mdl", source.as_bytes(), &[edit]);
+        let text = String::from_utf8(out).unwrap();
+        let stored = text
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("Position"))
+            .unwrap()
+            .trim();
+        assert_eq!(stored, expected);
+    }
+}
