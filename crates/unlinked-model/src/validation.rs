@@ -1,9 +1,9 @@
 //! Bounded structural diagnostics. These do not execute expressions or certify
 //! simulation support. Targets use subsystem IDs, so renames do not move them.
-//! InterfaceData for bus-element ports is not yet retained by the importer.
-//! Shared/missing interface numbers are therefore warnings, not proof of invalid
-//! numbering. Parent subsystem counts are not checked against child blocks until
-//! that metadata is available. Masked/linked blocks use declared ports.
+//! Plain interface ports default to number one; bus elements use InterfaceData
+//! and may share numbers within the same named port. Parent subsystem counts
+//! and execution-dependent interface variants are not inferred here.
+//! Masked/linked blocks use declared ports.
 use crate::{catalog, BlockId, Endpoint, Model, Point, PortKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,8 +93,7 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
         let mut blocks = BTreeMap::new();
         let mut names = BTreeSet::new();
         let mut effective_ports = BTreeMap::new();
-        let mut numbered = BTreeMap::<&str, BTreeSet<u32>>::new();
-        let mut unresolved_numbering = BTreeSet::new();
+        let mut numbered = BTreeMap::<&str, BTreeMap<u32, &crate::Block>>::new();
         for block in &system.blocks {
             spend!();
             let target = || DiagnosticTarget::Block {
@@ -146,33 +145,24 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
                 }
             }
             if native && matches!(block.block_type.as_str(), "Inport" | "Outport") {
-                if let Some(raw) = block.param("Port") {
-                    match catalog::port_number(raw) {
-                        Ok(n) => {
-                            if !numbered.entry(&block.block_type).or_default().insert(n) {
-                                report.emit(
-                                    Severity::Warning,
-                                    "duplicate_port_number",
-                                    parameter_target("Port"),
-                                    "port number is shared; bus-element metadata is required to determine whether this is valid",
-                                );
+                match catalog::interface_port_number(block) {
+                    Ok(n) => {
+                        if let Some(previous) = numbered
+                            .entry(&block.block_type)
+                            .or_default()
+                            .insert(n, block)
+                        {
+                            if !catalog::share_interface(previous, block) {
+                                report.emit(Severity::Error, "duplicate_port_number", parameter_target("Port"), "interface number is shared by different named ports or ordinary ports");
                             }
                         }
-                        Err(message) => report.emit(
-                            Severity::Error,
-                            "invalid_port_number",
-                            parameter_target("Port"),
-                            &message,
-                        ),
                     }
-                } else {
-                    unresolved_numbering.insert(block.block_type.as_str());
-                    report.emit(
-                        Severity::Warning,
-                        "unresolved_interface_number",
+                    Err(message) => report.emit(
+                        Severity::Error,
+                        "invalid_port_number",
                         parameter_target("Port"),
-                        "interface number is not explicit; bus-element metadata may be required",
-                    );
+                        &message,
+                    ),
                 }
             }
             let p = block.position;
@@ -200,9 +190,7 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
             }
         }
         for (kind, numbers) in numbered {
-            if !unresolved_numbering.contains(kind)
-                && numbers.iter().copied().ne(1..=numbers.len() as u32)
-            {
+            if numbers.keys().copied().ne(1..=numbers.len() as u32) {
                 // Point at an affected interface block rather than an unrelated model error.
                 if let Some(block) = system.blocks.iter().find(|b| b.block_type == kind) {
                     report.emit(
@@ -351,6 +339,7 @@ mod tests {
             library_source: None,
             subsystem: None,
             style: Default::default(),
+            interface: None,
         }
     }
     fn model() -> Model {
@@ -465,11 +454,11 @@ mod tests {
         m.root.blocks[1]
             .parameters
             .insert("Inputs".into(), "**".into());
-        // This Mux parameter needs expression resolution, not a guessed count.
+        // An operator-only Mux specification is malformed.
         assert!(validate_structure(&m)
             .diagnostics
             .iter()
-            .any(|d| d.code == "unresolved_ports"));
+            .any(|d| d.code == "invalid_port_parameter"));
     }
     #[test]
     fn port_numbers_are_allocated_contextually_and_validated() {
@@ -523,5 +512,41 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.message.contains("FutureOption")));
+    }
+    #[test]
+    fn plain_default_one_and_bus_sharing_have_distinct_numbering() {
+        let mut m = model();
+        m.root.blocks[0].block_type = "Inport".into();
+        assert_eq!(
+            catalog::find("Inport")
+                .unwrap()
+                .creation_parameters_in(&m.root)
+                .unwrap()["Port"],
+            "2"
+        );
+        assert!(validate_structure(&m).is_valid());
+        m.root.blocks[1].block_type = "Inport".into();
+        assert!(!validate_structure(&m).is_valid());
+        for b in &mut m.root.blocks[..2] {
+            b.interface = Some(crate::PortInterface::from_properties(BTreeMap::from([
+                ("PortNumber".into(), "1".into()),
+                ("PortName".into(), "Sensors".into()),
+                ("Element".into(), b.name.clone()),
+            ])));
+        }
+        assert!(validate_structure(&m).is_valid());
+        assert_eq!(
+            catalog::find("Inport")
+                .unwrap()
+                .creation_parameters_in(&m.root)
+                .unwrap()["Port"],
+            "2"
+        );
+        m.root.blocks[1].interface.as_mut().unwrap().port_name = Some("Different".into());
+        assert!(!validate_structure(&m).is_valid());
+        assert!(catalog::find("Inport")
+            .unwrap()
+            .creation_parameters_in(&m.root)
+            .is_err());
     }
 }

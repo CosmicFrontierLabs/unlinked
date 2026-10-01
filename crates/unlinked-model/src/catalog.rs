@@ -10,7 +10,7 @@
 //! simulation may require the user to choose an explicit period.
 //! This module never evaluates MATLAB, runs callbacks, or certifies simulation
 //! support. Unknown imported types and parameters must remain preservable.
-use crate::{PortCounts, System};
+use crate::{Block, PortCounts, System};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -120,27 +120,29 @@ impl BlockDescriptor {
         self.ports.resolve(&effective)
     }
     /// Allocate an Inport/Outport number without changing existing blocks.
-    /// Unresolved, shared (possibly bus-element), or malformed existing numbering
-    /// prevents guessing a free slot until interface metadata is available.
+    /// Plain ports default to one. Bus elements reserve their shared interface
+    /// number; malformed or conflicting numbering prevents allocation.
     pub fn creation_parameters_in(
         &self,
         system: &System,
     ) -> Result<BTreeMap<String, String>, String> {
         let mut parameters = self.creation_parameters();
         if matches!(self.type_key, "Inport" | "Outport") {
-            let mut used = std::collections::BTreeSet::new();
+            let mut used = BTreeMap::new();
             for block in system
                 .blocks
                 .iter()
                 .filter(|b| b.block_type == self.type_key)
             {
-                let number = port_number(block.param("Port").ok_or("existing interface numbering is absent; resolve interface metadata before allocating a port")?)?;
-                if !used.insert(number) {
-                    return Err("existing interface number is shared; resolve bus-element metadata before allocating a port".into());
+                let number = interface_port_number(block)?;
+                if let Some(previous) = used.insert(number, block) {
+                    if !share_interface(previous, block) {
+                        return Err("conflicting interface port number".into());
+                    }
                 }
             }
             let number = (1..=MAX_PORTS)
-                .find(|n| !used.contains(n))
+                .find(|n| !used.contains_key(n))
                 .ok_or("no free port number")?;
             parameters.insert("Port".into(), number.to_string());
         }
@@ -156,37 +158,56 @@ impl BlockDescriptor {
         name: &str,
         value: &str,
     ) -> Result<ParameterEdit, String> {
-        let descriptor = self
-            .parameters
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or("parameter has no catalog schema")?;
-        validate_parameter(descriptor, value)?;
-        if name == "Port" {
+        if name.is_empty()
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || value.len() > 64 * 1024
+        {
+            return Err("invalid parameter name or value exceeds 64 KiB".into());
+        }
+        let descriptor = self.parameters.iter().find(|p| p.name == name);
+        if let Some(descriptor) = descriptor {
+            validate_parameter(descriptor, value)?;
+        }
+        if name == "Port" && matches!(self.type_key, "Inport" | "Outport") {
             port_number(value)?;
         }
+        let previous_ports = self.resolve_ports(current);
+        if !descriptor.is_some_and(|p| p.affects_ports) {
+            return Ok(ParameterEdit {
+                ports: previous_ports.clone(),
+                previous_ports,
+                changes_ports: Some(false),
+            });
+        }
         let mut edited = BTreeMap::new();
-        for p in self.parameters {
+        for p in self.parameters.iter().filter(|p| p.affects_ports) {
             if let Some(v) = current.get(p.name) {
                 edited.insert(p.name.to_string(), v.clone());
             }
         }
         edited.insert(name.into(), value.into());
         let ports = self.resolve_ports(&edited);
-        if let PortResolution::Invalid { message, .. } = &ports {
-            return Err(message.clone());
+        if let PortResolution::Invalid { parameter, message } = &ports {
+            return Err(format!("{parameter}: {message}"));
         }
+        let changes_ports = match (&previous_ports, &ports) {
+            (PortResolution::Known(before), PortResolution::Known(after)) => Some(before != after),
+            _ => None,
+        };
         Ok(ParameterEdit {
+            previous_ports,
             ports,
-            changes_ports: descriptor.affects_ports,
+            changes_ports,
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterEdit {
+    pub previous_ports: PortResolution,
     pub ports: PortResolution,
-    pub changes_ports: bool,
+    /// None when a port-affecting edit cannot compare fully resolved counts.
+    pub changes_ports: Option<bool>,
 }
 
 pub fn port_number(value: &str) -> Result<u32, String> {
@@ -198,6 +219,42 @@ pub fn port_number(value: &str) -> Result<u32, String> {
         return Err(format!("port number must be between 1 and {MAX_PORTS}"));
     }
     Ok(number)
+}
+
+/// Effective interface number without conflating plain and bus-element ports.
+pub fn interface_port_number(block: &Block) -> Result<u32, String> {
+    if let Some(interface) = &block.interface {
+        let number = interface
+            .port_number
+            .filter(|n| (1..=MAX_PORTS).contains(n))
+            .ok_or("invalid or missing interface PortNumber")?;
+        if interface
+            .port_name
+            .as_deref()
+            .is_none_or(|name| name.trim().is_empty())
+        {
+            return Err("missing interface PortName".into());
+        }
+        if let Some(explicit) = block.param("Port") {
+            if port_number(explicit)? != number {
+                return Err("Port disagrees with interface PortNumber".into());
+            }
+        }
+        Ok(number)
+    } else {
+        port_number(block.param("Port").unwrap_or("1"))
+    }
+}
+
+/// Different bus elements may share a number only within the same named port.
+pub fn share_interface(a: &Block, b: &Block) -> bool {
+    match (&a.interface, &b.interface) {
+        (Some(a), Some(b)) => a
+            .port_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty() && b.port_name.as_deref() == Some(name)),
+        _ => false,
+    }
 }
 
 impl PortRule {
@@ -282,7 +339,6 @@ impl PortRule {
             None
         };
         if count.is_none()
-            && signs.is_some()
             && raw
                 .chars()
                 .all(|c| c.is_whitespace() || "+-*/|".contains(c))
@@ -319,7 +375,9 @@ impl PortRule {
                         return invalid();
                     }
                 }
-                row_lengths.push(row_len);
+                if row_len > 0 {
+                    row_lengths.push(row_len);
+                }
             }
             if row_lengths.len() > 1 && row_lengths.iter().any(|&n| n != 1) {
                 return invalid();
@@ -766,8 +824,49 @@ mod tests {
             .unwrap()
             .check_edit(&empty, "Inputs", "3")
             .unwrap();
-        assert!(edit.changes_ports);
+        assert_eq!(edit.changes_ports, Some(true));
         assert_eq!(edit.ports, known(3, 1));
         assert!(empty.is_empty());
+    }
+    #[test]
+    fn edit_reports_compare_counts_and_allow_unrelated_repairs() {
+        let sum = find("Sum").unwrap();
+        let current = BTreeMap::from([("Inputs".into(), "++".into())]);
+        assert_eq!(
+            sum.check_edit(&current, "Inputs", "-+")
+                .unwrap()
+                .changes_ports,
+            Some(false)
+        );
+        assert_eq!(
+            sum.check_edit(&current, "Inputs", "+++")
+                .unwrap()
+                .changes_ports,
+            Some(true)
+        );
+        assert_eq!(
+            sum.check_edit(&current, "Inputs", "n")
+                .unwrap()
+                .changes_ports,
+            None
+        );
+        let invalid = BTreeMap::from([("Inputs".into(), "|".into())]);
+        for (name, value) in [("IconShape", "round"), ("OutDataTypeStr", "double")] {
+            let edit = sum.check_edit(&invalid, name, value).unwrap();
+            assert_eq!(edit.changes_ports, Some(false));
+            assert_eq!(edit.previous_ports, edit.ports);
+        }
+        let mux = find("Mux").unwrap();
+        assert_eq!(
+            mux.check_edit(&BTreeMap::new(), "Inputs", "[2 3]")
+                .unwrap()
+                .changes_ports,
+            Some(false)
+        );
+        assert_eq!(ports("Mux", "Inputs", "[1;]"), known(1, 1));
+        assert!(matches!(
+            ports("Mux", "Inputs", "**"),
+            PortResolution::Invalid { .. }
+        ));
     }
 }
