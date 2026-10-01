@@ -95,6 +95,15 @@ CI. Per-model import, render and simulation coverage is tracked in
     action. Arrow keys nudge the selection by a grid step (Shift for one
     unit); a toolbar and a right-click menu offer the same actions as the
     shortcuts.
+  - Model settings: solver, start/stop time, step sizes and tolerances,
+    written verbatim to the active configuration set's solver component
+    (with `SolverName`/`SolverType` kept in step). Unrecognized solvers and
+    expressions are kept, never replaced. Files whose active configuration
+    is a reference, ambiguous or duplicated are refused.
+  - Problems: a static check (structure, settings, simulator support)
+    reruns after every edit; problems are listed, outlined on the diagram,
+    and shown in the block inspector and next to settings. It runs no
+    simulation and says nothing about numerical results.
   - Every batch is refused if it adds a structural error, both in the
     preview and when saving.
   - Not yet: copying masked, linked, styled or subsystem blocks; editing

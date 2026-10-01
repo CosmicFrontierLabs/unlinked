@@ -104,16 +104,19 @@ pub fn model_editor(props: &EditorProps) -> Html {
             base.clone(),
         );
         Callback::from(move |group: Vec<Edit>| {
-            // Grouping and expanding move raw file records the IR does not
-            // model, so the file may refuse what the preview accepts: try
-            // saving first, so a refusal shows now rather than at Save.
-            let hierarchy = group.iter().any(|e| {
+            // Grouping, expanding and solver settings depend on raw file
+            // records the IR does not model, so the file may refuse what
+            // the preview accepts: try saving first, so a refusal shows now
+            // rather than at Save.
+            let raw = group.iter().any(|e| {
                 matches!(
                     e,
-                    Edit::CreateSubsystem { .. } | Edit::ExpandSubsystem { .. }
+                    Edit::CreateSubsystem { .. }
+                        | Edit::ExpandSubsystem { .. }
+                        | Edit::SetConfig { .. }
                 )
             });
-            if hierarchy {
+            if raw {
                 let mut all = pending.concat();
                 all.extend(group.iter().cloned());
                 if let Err(e) = unlinked_import::patch::apply_edits(&base.path, &base.bytes, &all) {

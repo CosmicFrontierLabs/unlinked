@@ -277,3 +277,17 @@ fn configuration_sets_without_a_single_active_one_are_refused() {
     let src = "Model {\nName m\nObject {\nClassName Simulink.ConfigSetRef\nSourceName shared\n}\nSystem {\nName m\n}\n}\n";
     assert!(apply_edits("m.mdl", src.as_bytes(), &edit).is_err());
 }
+
+/// A stored solver type follows the kind of a recognized solver, and is
+/// left alone for one it does not recognize.
+#[test]
+fn solver_type_follows_the_solver() {
+    let src = "Model {\n  Name \"m\"\n  Simulink.SolverCC {\n    Solver \"ode45\"\n    SolverType \"Variable-step\"\n  }\n  System {\n    Name \"m\"\n  }\n}\n";
+    let out = roundtrip("m.mdl", src.as_bytes(), &[set("Solver", "ode4")]);
+    let model = unlinked_import::import("m.mdl", &out).unwrap();
+    assert_eq!(model.config.raw["SolverType"], "Fixed-step");
+    assert!(unlinked_model::config::validate_config(&model.config).is_valid());
+    let out = roundtrip("m.mdl", src.as_bytes(), &[set("Solver", "odeFuture")]);
+    let model = unlinked_import::import("m.mdl", &out).unwrap();
+    assert_eq!(model.config.raw["SolverType"], "Variable-step");
+}

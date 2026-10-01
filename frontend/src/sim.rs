@@ -19,6 +19,7 @@ use shared::{
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use unlinked_model::config::solver_descriptor;
 use unlinked_model::SimConfig;
 use uuid::Uuid;
 use wasm_bindgen_futures::spawn_local;
@@ -267,18 +268,24 @@ fn parse_time(s: &Option<String>, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-/// Initial options from the model's solver configuration.
+/// The simulator solver matching the model's, if it implements that one.
+fn model_solver(config: &SimConfig) -> Option<Solver> {
+    let descriptor = config.solver.as_deref().and_then(solver_descriptor)?;
+    match descriptor.simulation_solver? {
+        "euler" => Some(Solver::Euler),
+        "rk4" => Some(Solver::Rk4),
+        "rk45" => Some(Solver::Rk45),
+        _ => None,
+    }
+}
+
+/// Initial options from the model's solver configuration. Values the model
+/// does not give as plain numbers, and solvers the simulator lacks, start
+/// from editable placeholders; [`differences`] lists them.
 fn defaults(config: &SimConfig) -> SimulationOptions {
     let start = parse_time(&config.start_time, 0.0);
     let stop = parse_time(&config.stop_time, 10.0).max(start + 1e-9);
-    let solver = match config.solver.as_deref().map(str::trim) {
-        Some("ode1") => Solver::Euler,
-        Some(
-            "ode2" | "ode3" | "ode4" | "ode5" | "ode8" | "ode14x" | "FixedStepAuto"
-            | "FixedStepDiscrete",
-        ) => Solver::Rk4,
-        _ => Solver::Rk45,
-    };
+    let solver = model_solver(config).unwrap_or(Solver::Rk45);
     let step = parse_time(&config.fixed_step, (stop - start) / 1000.0);
     SimulationOptions {
         start,
@@ -291,6 +298,31 @@ fn defaults(config: &SimConfig) -> SimulationOptions {
         solver,
         ..SimulationOptions::default()
     }
+}
+
+/// Where the initial run options do not come from the model's settings.
+fn differences(config: &SimConfig) -> Vec<String> {
+    let mut notes = Vec::new();
+    match (config.solver.as_deref(), model_solver(config)) {
+        (_, Some(_)) => {}
+        (None, None) => notes.push("The model stores no solver.".to_string()),
+        (Some(s), None) => notes.push(format!(
+            "The simulator does not implement the model's solver {s}."
+        )),
+    }
+    for (label, value) in [
+        ("start time", &config.start_time),
+        ("stop time", &config.stop_time),
+        ("fixed step", &config.fixed_step),
+    ] {
+        match value.as_deref().map(str::trim) {
+            Some(v) if v.parse::<f64>().is_ok_and(f64::is_finite) => {}
+            Some(v) => notes.push(format!("The model's {label} {v} is not a plain number.")),
+            None if label == "fixed step" => {}
+            None => notes.push(format!("The model stores no {label}.")),
+        }
+    }
+    notes
 }
 
 fn solver_name(s: Solver) -> &'static str {
@@ -400,6 +432,7 @@ async fn stream(
 #[function_component(SimulationPanel)]
 pub fn simulation_panel(props: &SimProps) -> Html {
     let options = use_state(|| defaults(&props.config));
+    let differences = differences(&props.config);
     let workspace = use_state(String::new);
     let inputs = use_state(BTreeMap::<String, String>::new);
     let state = use_state(|| RunState::Idle);
@@ -723,6 +756,12 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         <div class="sim-panel">
             if props.has_random_sources {
                 <p class="sim-notice">{ "Random sources are reproducible in Unlinked, but use a different random sequence from Simulink." }</p>
+            }
+            if !differences.is_empty() {
+                <p class="sim-notice">
+                    { differences.join(" ") }
+                    { " Check the run settings below; they are what the run uses." }
+                </p>
             }
             <div class="sim-form">
                 <label>{ "Start" }<input type="number" step="any" value={o.start.to_string()} oninput={set_num(|o, v| o.start = v)} /></label>

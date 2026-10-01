@@ -165,30 +165,48 @@ pub const CONFIG_KEYS: [&str; 9] = [
     "AbsTol",
 ];
 
-/// The properties setting `key` writes, given which properties the file's
-/// solver settings already have: `Solver` and `SolverName` mirror each
-/// other, so setting the solver updates whichever exist.
-pub fn config_writes(key: &str, present: impl Fn(&str) -> bool) -> Vec<&'static str> {
+/// Settings derived from the solver, kept in step with it by
+/// [`config_writes`].
+pub const CONFIG_MIRRORS: [&str; 2] = ["SolverName", "SolverType"];
+
+/// The properties, and their values, that setting `key` to `value` writes,
+/// given which properties the file's solver settings already have.
+/// `Solver` and `SolverName` mirror each other, so setting the solver
+/// updates whichever exist, and a stored `SolverType` follows the kind of a
+/// recognized solver.
+pub fn config_writes(
+    key: &str,
+    value: &str,
+    present: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, String)> {
     let Some(&key) = CONFIG_KEYS.iter().find(|k| **k == key) else {
         return Vec::new();
     };
     if key != "Solver" {
-        return vec![key];
+        return vec![(key, value.to_string())];
     }
-    let mirrored: Vec<_> = ["Solver", "SolverName"]
+    let mut writes: Vec<_> = ["Solver", "SolverName"]
         .into_iter()
         .filter(|k| present(k))
+        .map(|k| (k, value.to_string()))
         .collect();
-    if mirrored.is_empty() {
-        vec!["Solver"]
-    } else {
-        mirrored
+    if writes.is_empty() {
+        writes.push(("Solver", value.to_string()));
     }
+    let kind = crate::config::solver_descriptor(value).map(|d| d.kind);
+    if let (true, Some(kind)) = (present("SolverType"), kind) {
+        let kind = match kind {
+            crate::config::SolverKind::FixedStep => "Fixed-step",
+            crate::config::SolverKind::VariableStep => "Variable-step",
+        };
+        writes.push(("SolverType", kind.to_string()));
+    }
+    writes
 }
 
 fn set_config(config: &mut crate::SimConfig, key: &str, value: &str) {
-    for k in config_writes(key, |k| config.raw.contains_key(k)) {
-        config.raw.insert(k.to_string(), value.to_string());
+    for (k, v) in config_writes(key, value, |k| config.raw.contains_key(k)) {
+        config.raw.insert(k.to_string(), v);
     }
     let typed = match key {
         "Solver" => &mut config.solver,
