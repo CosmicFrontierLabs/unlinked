@@ -134,3 +134,51 @@ fn refuses_moving_opaque_part_relative_references() {
     let err = unlinked_import::patch::apply_edits("m.slx", &input, &[create()]).unwrap_err();
     assert!(err.to_string().contains("part-relative"), "{err}");
 }
+
+fn repack(parts: BTreeMap<String, String>) -> Vec<u8> {
+    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, text) in parts {
+        z.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        z.write_all(text.as_bytes()).unwrap();
+    }
+    z.finish().unwrap().into_inner()
+}
+
+#[test]
+fn relationship_part_overrides_nonstandard_extension_default() {
+    let mut parts = entries(&package(false));
+    let types = parts.get_mut("[Content_Types].xml").unwrap();
+    *types = types.replace(
+        "application/vnd.openxmlformats-package.relationships+xml",
+        "application/xml",
+    );
+    let after = unlinked_import::patch::apply_edits("m.slx", &repack(parts), &[create()]).unwrap();
+    let saved = entries(&after);
+    let types = &saved["[Content_Types].xml"];
+    assert!(types.contains("Extension=\"rels\" ContentType=\"application/xml\""));
+    assert!(types.contains("PartName=\"/simulink/systems/_rels/system_root.xml.rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\""));
+}
+
+#[test]
+fn orphan_relationship_content_type_reserves_its_system_name() {
+    let mut parts = entries(&package(false));
+    let types = parts.get_mut("[Content_Types].xml").unwrap();
+    *types = types.replace("</Types>", "<Override PartName=\"/simulink/systems/_rels/system_10.xml.rels\" ContentType=\"opaque\"/></Types>");
+    let after = unlinked_import::patch::apply_edits("m.slx", &repack(parts), &[create()]).unwrap();
+    let saved = entries(&after);
+    assert!(saved["simulink/systems/system_root.xml"].contains("Ref=\"system_10_1\""));
+    assert!(saved["[Content_Types].xml"].contains("ContentType=\"opaque\""));
+}
+
+#[test]
+fn conflicting_explicit_relationship_content_type_is_rejected() {
+    let mut parts = entries(&package(false));
+    let types = parts.get_mut("[Content_Types].xml").unwrap();
+    *types = types.replace("</Types>", "<Override PartName=\"/simulink/systems/_rels/system_root.xml.rels\" ContentType=\"opaque\"/></Types>");
+    let error =
+        unlinked_import::patch::apply_edits("m.slx", &repack(parts), &[create()]).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("conflicting relationship content type"));
+}

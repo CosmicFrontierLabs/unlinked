@@ -794,6 +794,7 @@ fn split_created_system(
             && !occupied.contains(&format!("simulink/systems/_rels/{reference}.xml.rels"))
             && !ids.contains(&reference)
             && !declared_parts.contains(&format!("/{name}"))
+            && !declared_parts.contains(&format!("/simulink/systems/_rels/{reference}.xml.rels"))
         {
             break (reference, name);
         }
@@ -886,6 +887,35 @@ fn split_created_system(
     {
         let mut content = XElem::new("Default");
         content.set_attr("Extension", "rels");
+        content.set_attr("ContentType", REL_CONTENT);
+        types.children.push(XNode::Element(content));
+    }
+    // OPC permits a nonstandard extension default when each relationship
+    // part has an explicit override. Preserve it and type our part explicitly.
+    let rel_part = format!("/{rel_name}");
+    let overrides: Vec<_> = types
+        .elements()
+        .filter(|e| e.name == "Override" && e.attr("PartName").as_deref() == Some(&rel_part))
+        .collect();
+    if overrides.len() > 1
+        || overrides
+            .first()
+            .is_some_and(|e| e.attr("ContentType").as_deref() != Some(REL_CONTENT))
+    {
+        return Err(ImportError::Edit(format!(
+            "conflicting relationship content type for {rel_name}"
+        )));
+    }
+    if overrides.is_empty()
+        && types
+            .elements()
+            .find(|e| e.name == "Default" && e.attr("Extension").as_deref() == Some("rels"))
+            .and_then(|e| e.attr("ContentType"))
+            .as_deref()
+            != Some(REL_CONTENT)
+    {
+        let mut content = XElem::new("Override");
+        content.set_attr("PartName", &rel_part);
         content.set_attr("ContentType", REL_CONTENT);
         types.children.push(XNode::Element(content));
     }
