@@ -77,32 +77,6 @@ fn graft(node: &mut Section, target: &Port<'_>, donor: &Section) -> usize {
     }
     count
 }
-fn remap_ids(line: &mut Section, map: &[(unlinked_model::BlockId, unlinked_model::BlockId)]) {
-    for (key, kind) in [("Src", PortKind::Out), ("Dst", PortKind::In)] {
-        if let Some(value) = line.prop(key) {
-            if let Some((sid, port)) = parse_endpoint(&value, kind) {
-                if let Some((_, new)) = map.iter().find(|(old, _)| old.0 == sid) {
-                    line.set_prop(
-                        key,
-                        &unlinked_model::Endpoint {
-                            block: new.clone(),
-                            port,
-                        }
-                        .to_string(),
-                        false,
-                    );
-                }
-            }
-        }
-    }
-    for item in &mut line.items {
-        if let Item::Section(b) = item {
-            if b.tag == "Branch" {
-                remap_ids(b, map);
-            }
-        }
-    }
-}
 fn removable(s: &Section, system: bool) -> Result<(), ImportError> {
     if system && s.sections().filter(|s| s.tag == "System").count() != 1 {
         return Err(fail("ambiguous raw child systems"));
@@ -214,7 +188,7 @@ pub(super) fn expand(
         if recipe.clear_points {
             clear_points(&mut line);
         }
-        remap_ids(&mut line, &plan.id_remap);
+        super::hierarchy::remap_sids(&mut line, &plan.id_remap);
         lines.push(line);
     }
     let mut moved = Vec::new();
