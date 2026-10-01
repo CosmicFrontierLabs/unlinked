@@ -9,9 +9,10 @@ use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
 use unlinked_model::edit::{
-    system_ids, touches, AnnotationTarget, DisconnectPolicy, Edit, SystemRef,
+    system_ids, system_names, touches, AnnotationTarget, DisconnectPolicy, Edit, SystemRef,
 };
 use unlinked_model::scope::ScopeConfig;
+use unlinked_model::validation::{Diagnostic, DiagnosticTarget, Severity};
 use unlinked_model::{catalog, geometry};
 use unlinked_model::{
     Annotation, Block, BlockId, Chart, Endpoint, Line, Model, Point, PortKind, PortRef, Rect,
@@ -43,6 +44,13 @@ pub struct DiagramProps {
     /// changes. Editors pass a stable key so edits keep the current view.
     #[prop_or_default]
     pub fit_key: Option<AttrValue>,
+    /// Problems found in the model: outlined on the diagram, listed by the
+    /// toolbar's problems button and shown in the block inspector.
+    #[prop_or_default]
+    pub problems: Rc<Vec<Diagnostic>>,
+    /// Opens the model settings, for problems with them.
+    #[prop_or_default]
+    pub on_settings: Option<Callback<()>>,
 }
 
 /// Grid block positions snap to when dragged.
@@ -325,6 +333,78 @@ fn diff_css(diff: &ModelDiff, path: &[String], system: Option<&System>) -> Strin
         }
     }
     css
+}
+
+/// Outline the shown system's blocks that have problems, and the subsystems
+/// holding blocks that do; errors win over warnings.
+fn problems_css(problems: &[Diagnostic], system: &[BlockId]) -> String {
+    let mut worst: std::collections::BTreeMap<&str, (Severity, bool)> = Default::default();
+    for d in problems {
+        let DiagnosticTarget::Block { system: at, id, .. } = &d.target else {
+            continue;
+        };
+        let (sid, inside) = match at.strip_prefix(system) {
+            Some([]) => (id.0.as_str(), false),
+            Some([sub, ..]) => (sub.0.as_str(), true),
+            None => continue,
+        };
+        let entry = worst.entry(sid).or_insert((d.severity, inside));
+        if d.severity == Severity::Error {
+            entry.0 = Severity::Error;
+        }
+    }
+    worst
+        .into_iter()
+        .map(|(sid, (severity, inside))| {
+            format!(
+                ".diagram g.block[data-sid=\"{}\"] > :is(rect, polygon, ellipse) {{ stroke: {}; stroke-width: 2.5px;{} }}\n",
+                css_string(sid),
+                match severity {
+                    Severity::Error => "#f7768e",
+                    Severity::Warning => "#e0af68",
+                },
+                if inside { " stroke-dasharray: 6 3;" } else { "" }
+            )
+        })
+        .collect()
+}
+
+/// Where a problem is, in words.
+fn problem_place(model: &Model, target: &DiagnosticTarget) -> String {
+    match target {
+        DiagnosticTarget::Model => "Model".into(),
+        DiagnosticTarget::Config { parameter } => format!("Model settings · {parameter}"),
+        DiagnosticTarget::Block {
+            system,
+            id,
+            parameter,
+        } => {
+            let mut place = system_names(model, system).unwrap_or_default();
+            let path: Vec<&str> = place.iter().map(String::as_str).collect();
+            let name = model
+                .system_at(&path)
+                .and_then(|s| s.block(id))
+                .map_or_else(|| format!("SID {id}"), |b| b.name.clone());
+            place.push(name);
+            let mut text = place.join(" / ").replace('\n', " ");
+            if let Some(p) = parameter {
+                text.push_str(&format!(" · {p}"));
+            }
+            text
+        }
+        DiagnosticTarget::Line { system, .. } => {
+            let mut place = system_names(model, system).unwrap_or_default();
+            place.push("line".into());
+            place.join(" / ").replace('\n', " ")
+        }
+    }
+}
+
+fn problem_class(d: &Diagnostic) -> &'static str {
+    match d.severity {
+        Severity::Error => "problem error",
+        Severity::Warning => "problem warning",
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]

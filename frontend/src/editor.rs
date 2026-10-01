@@ -9,6 +9,7 @@
 
 use crate::api;
 use crate::diagram::DiagramView;
+use crate::settings::ModelSettings;
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::edit::{apply_batch, Edit};
@@ -85,6 +86,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
     let stale = use_state(|| None::<String>);
     let message = use_state(String::new);
     let busy = use_state(|| false);
+    let settings = use_state(|| false);
     // Cleared on unmount so a request finishing afterwards neither updates
     // state nor navigates.
     let mounted = use_mut_ref(|| true);
@@ -397,12 +399,22 @@ pub fn model_editor(props: &EditorProps) -> Html {
     };
 
     let count = pending.len();
-    let toolbar = if !props.can_edit {
-        html! {}
-    } else if !*editing {
+    let settings_button = {
+        let settings = settings.clone();
+        html! {
+            <button class={classes!((*settings).then_some("active"))}
+                onclick={Callback::from(move |_: MouseEvent| settings.set(!*settings))}>
+                { "Model settings" }
+            </button>
+        }
+    };
+    let toolbar = if !*editing {
         html! {
             <div class="edit-bar">
-                <button onclick={start}>{ "Edit" }</button>
+                { settings_button }
+                if props.can_edit {
+                    <button onclick={start}>{ "Edit" }</button>
+                }
             </div>
         }
     } else {
@@ -411,6 +423,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 <strong>{ format!("Editing v{}", base.version) }</strong>
                 <span class="muted">{ "Drag on empty space or Shift-click to select; Ctrl+C/Ctrl+V copies, Ctrl+G groups into a subsystem (Ctrl+Shift+G expands), Ctrl+R rotates, Ctrl+I flips, Delete removes; middle-drag pans." }</span>
                 <span class="spacer" />
+                { settings_button }
                 <span>{ format!("{count} change{}", if count == 1 { "" } else { "s" }) }</span>
                 <button onclick={undo.reform(|_: MouseEvent| ())} disabled={count == 0 || *busy} title="Ctrl+Z">{ "Undo" }</button>
                 <button onclick={redo.reform(|_: MouseEvent| ())} disabled={redo_stack.is_empty() || *busy} title="Ctrl+Shift+Z">{ "Redo" }</button>
@@ -439,6 +452,10 @@ pub fn model_editor(props: &EditorProps) -> Html {
             }
             if let Some(e) = &*error {
                 <div class="edit-bar error">{ e }</div>
+            }
+            if *settings {
+                <ModelSettings config={model.config.clone()}
+                    on_edit={(*editing && !*busy).then(|| on_edit.clone())} />
             }
             <DiagramView {model} fit_key={props.fit_key.clone()}
                 on_edit={(*editing && !*busy).then(|| on_edit.clone())}

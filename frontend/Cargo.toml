@@ -30,3 +30,4 @@ rizzma = { version = "1.13.0", default-features = false, features = ["wasm"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 
 zip = { version = "8.6.0", default-features = false }
+unlinked-sim = { version = "0.1.0", path = "../crates/unlinked-sim" }

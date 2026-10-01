@@ -6,6 +6,7 @@ mod fetch;
 mod local_viewer;
 mod pages;
 mod plot;
+mod settings;
 mod sim;
 mod transpiler;
 
