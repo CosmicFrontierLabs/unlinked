@@ -7,7 +7,7 @@
 mod expand;
 #[path = "mdl_hierarchy.rs"]
 mod hierarchy;
-use super::expansion::property as expansion_property;
+use unlinked_model::expand::removable_property as expansion_property;
 
 use super::{format_ports, parse_endpoint};
 use super::{Boundary, Resolved};

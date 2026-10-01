@@ -348,37 +348,48 @@ fn old_files_use_factory_defaults_without_new_release_parameters() {
 fn expansion_grafts_raw_branches_and_preserves_moved_block_metadata() {
     for (name, bytes) in fixtures() {
         let original = unlinked_import::import(name, &bytes).unwrap();
-        let create = group(&original);
-        let mut expected = original.clone();
-        create.apply(&mut expected).unwrap();
-        let id = expected
-            .root
-            .block_by_name("controller")
-            .unwrap()
-            .id
-            .clone();
-        let expand = Edit::ExpandSubsystem { system: vec![], id };
-        apply_batch(&mut expected, std::slice::from_ref(&expand)).unwrap();
-        let output = unlinked_import::patch::apply_edits(name, &bytes, &[create, expand]).unwrap();
-        assert_eq!(
-            unlinked_import::import(name, &output).unwrap(),
-            expected,
-            "{name}"
-        );
-        if name.ends_with("mdl") {
-            let text = String::from_utf8(output).unwrap();
-            assert_eq!(text.matches("ClassName OpaqueMetadata").count(), 4);
-            assert!(text.contains("preserve_branch"));
-        } else {
-            let mut archive = zip::ZipArchive::new(Cursor::new(output)).unwrap();
-            let mut text = String::new();
-            std::io::Read::read_to_string(
-                &mut archive.by_name("simulink/blockdiagram.xml").unwrap(),
-                &mut text,
-            )
-            .unwrap();
-            assert_eq!(text.matches("<Unknown flag=\"preserved\"/>").count(), 4);
-            assert!(text.contains("preserve_branch"));
+        for selected in [vec!["g"], vec!["c", "g"], vec!["c"], vec!["scope"]] {
+            let create = Edit::CreateSubsystem {
+                system: vec![],
+                ids: selected
+                    .iter()
+                    .map(|name| original.root.block_by_name(name).unwrap().id.clone())
+                    .collect(),
+                id: BlockId(next_sid(&original).unwrap().to_string()),
+                name: "controller".into(),
+            };
+            let mut expected = original.clone();
+            create.apply(&mut expected).unwrap();
+            let id = expected
+                .root
+                .block_by_name("controller")
+                .unwrap()
+                .id
+                .clone();
+            let expand = Edit::ExpandSubsystem { system: vec![], id };
+            apply_batch(&mut expected, std::slice::from_ref(&expand)).unwrap();
+            let output =
+                unlinked_import::patch::apply_edits(name, &bytes, &[create, expand]).unwrap();
+            assert_eq!(
+                unlinked_import::import(name, &output).unwrap(),
+                expected,
+                "{name}"
+            );
+            if name.ends_with("mdl") {
+                let text = String::from_utf8(output).unwrap();
+                assert_eq!(text.matches("ClassName OpaqueMetadata").count(), 4);
+                assert!(text.contains("preserve_branch"));
+            } else {
+                let mut archive = zip::ZipArchive::new(Cursor::new(output)).unwrap();
+                let mut text = String::new();
+                std::io::Read::read_to_string(
+                    &mut archive.by_name("simulink/blockdiagram.xml").unwrap(),
+                    &mut text,
+                )
+                .unwrap();
+                assert_eq!(text.matches("<Unknown flag=\"preserved\"/>").count(), 4);
+                assert!(text.contains("preserve_branch"));
+            }
         }
     }
 }
@@ -437,4 +448,45 @@ fn standalone_expansion_allocates_legacy_child_ids_and_preserves_parent_order() 
             > 100
     );
     assert_eq!(expected.root.blocks.last().unwrap().name, "tail");
+}
+
+#[test]
+fn expansion_remaps_combined_legacy_sid_references() {
+    let (name, bytes) = fixtures().remove(0);
+    let original = unlinked_import::import(name, &bytes).unwrap();
+    let grouped = unlinked_import::patch::apply_edits(name, &bytes, &[group(&original)]).unwrap();
+    let text = String::from_utf8(grouped)
+        .unwrap()
+        .replace(" SID 2\n", " SID legacyGain\n")
+        .replace(" DstBlock g\n DstPort 1\n", " Dst \"legacyGain#in:1\"\n")
+        .replace("SrcBlock\t\"g\"\n   SrcPort\t1", "Src \"legacyGain#out:1\"");
+    assert!(text.contains("legacyGain#in:1"));
+    assert!(text.contains("legacyGain#out:1"));
+    let model = unlinked_import::import(name, text.as_bytes()).unwrap();
+    let edit = Edit::ExpandSubsystem {
+        system: vec![],
+        id: model.root.block_by_name("controller").unwrap().id.clone(),
+    };
+    let mut expected = model.clone();
+    apply_batch(&mut expected, std::slice::from_ref(&edit)).unwrap();
+    let output = unlinked_import::patch::apply_edits(name, text.as_bytes(), &[edit]).unwrap();
+    assert_eq!(unlinked_import::import(name, &output).unwrap(), expected);
+    assert!(!String::from_utf8(output).unwrap().contains("legacyGain#"));
+}
+
+#[test]
+fn expansion_rejects_opaque_defaults_on_removed_interfaces() {
+    let (name, bytes) = fixtures().remove(0);
+    let original = unlinked_import::import(name, &bytes).unwrap();
+    let grouped = unlinked_import::patch::apply_edits(name, &bytes, &[group(&original)]).unwrap();
+    let text=String::from_utf8(grouped).unwrap().replacen("Model {", "Model {\n BlockParameterDefaults {\n Block {\n BlockType Inport\n UserData opaque_default\n }\n }",1);
+    let model = unlinked_import::import(name, text.as_bytes()).unwrap();
+    let edit = Edit::ExpandSubsystem {
+        system: vec![],
+        id: model.root.block_by_name("controller").unwrap().id.clone(),
+    };
+    let mut unchanged = model.clone();
+    assert!(edit.apply(&mut unchanged).is_err());
+    assert_eq!(unchanged, model);
+    assert!(unlinked_import::patch::apply_edits(name, text.as_bytes(), &[edit]).is_err());
 }

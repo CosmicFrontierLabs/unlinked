@@ -41,6 +41,51 @@ pub struct ExpandPlan {
     pub parent_line_count: usize,
     pub child_line_count: usize,
 }
+/// Known properties that may disappear with an ordinary boundary block.
+pub fn removable_property(key: &str) -> bool {
+    matches!(
+        key,
+        "BlockType"
+            | "Name"
+            | "SID"
+            | "Position"
+            | "Ports"
+            | "Port"
+            | "Orientation"
+            | "BlockRotation"
+            | "BlockMirror"
+            | "ZOrder"
+            | "ForegroundColor"
+            | "BackgroundColor"
+            | "ShowName"
+            | "NamePlacement"
+            | "DropShadow"
+            | "FontSize"
+            | "FontName"
+            | "FontWeight"
+            | "FontAngle"
+            | "TreatAsAtomicUnit"
+            | "SystemSampleTime"
+            | "SFBlockType"
+            | "SimViewingDevice"
+            | "PermitHierarchicalResolution"
+            | "Commented"
+            | "SampleTime"
+            | "PortDimensions"
+            | "OutDataTypeStr"
+            | "SignalType"
+            | "SamplingMode"
+            | "VarSizeSig"
+            | "Unit"
+            | "OutMin"
+            | "OutMax"
+            | "BusOutputAsStruct"
+            | "OutputFunctionCall"
+            | "LatchInputForFeedbackSignals"
+            | "LatchByDelayingOutsideSignal"
+    )
+}
+
 fn invalid(message: impl Into<String>) -> EditError {
     EditError::Invalid(message.into())
 }
@@ -87,6 +132,11 @@ fn plain_wrapper(block: &Block) -> Result<(), EditError> {
     Ok(())
 }
 fn inherited_port(block: &Block) -> Result<u32, EditError> {
+    if block.parameters.keys().any(|key| !removable_property(key)) {
+        return Err(invalid(
+            "expansion would discard unsupported port parameters",
+        ));
+    }
     if scoped(block) || block.subsystem.is_some() || !ordinary_ports(block.ports) {
         return Err(invalid(
             "only inherited ordinary subsystem ports can be removed",
@@ -206,6 +256,16 @@ pub fn plan_expand(model: &Model, path: &SystemRef, id: &BlockId) -> Result<Expa
         .get(id)
         .ok_or_else(|| EditError::NoBlock(id.clone()))?;
     plain_wrapper(wrapper)?;
+    if wrapper
+        .parameters
+        .keys()
+        .any(|key| !removable_property(key))
+    {
+        return Err(invalid(
+            "expansion would discard unsupported wrapper parameters",
+        ));
+    }
+
     if wrapper.orientation != Orientation::Right || wrapper.mirrored {
         return Err(invalid(
             "expansion requires an unmirrored right-facing wrapper",

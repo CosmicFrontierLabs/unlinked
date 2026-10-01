@@ -8,7 +8,7 @@
 mod expand;
 #[path = "slx_hierarchy.rs"]
 mod hierarchy;
-use super::expansion::property as expansion_property;
+use unlinked_model::expand::removable_property as expansion_property;
 
 use super::dom::{self, Document, XElem, XNode};
 use super::{format_ports, parse_endpoint};
