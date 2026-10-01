@@ -65,12 +65,12 @@ impl AppState {
     }
 }
 
-/// All `/api` routes except health. Every handler authenticates through
-/// `CurrentUser` or authorizes through `OrgAccess`/`ProjectAccess`.
 async fn api_not_found() -> error::ApiError {
     error::ApiError::NotFound
 }
 
+/// All `/api` routes except health. Every handler authenticates through
+/// `CurrentUser` or authorizes through `OrgAccess`/`ProjectAccess`.
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/auth/providers", get(auth::providers))
