@@ -755,6 +755,20 @@ fn shape(args: &[Value]) -> ArrayResult<(usize, usize)> {
         _ => Err("expected one size or two dimensions".into()),
     }
 }
+// Rust's scientific formatter omits '+' and leading exponent zeros.
+// Canonical MATLAB/C spelling is e±NN (or E±NN), with more digits as needed.
+fn scientific_exponent(text: String, uppercase: bool) -> String {
+    let Some((mantissa, exponent)) = text.split_once('e') else {
+        return text;
+    };
+    let (sign, digits) = if let Some(digits) = exponent.strip_prefix('-') {
+        ('-', digits)
+    } else {
+        ('+', exponent.strip_prefix('+').unwrap_or(exponent))
+    };
+    let marker = if uppercase { 'E' } else { 'e' };
+    format!("{mantissa}{marker}{sign}{digits:0>2}")
+}
 fn significant(x: f64, precision: usize) -> String {
     if !x.is_finite() {
         return if x.is_nan() {
@@ -773,10 +787,13 @@ fn significant(x: f64, precision: usize) -> String {
     if exp < -4 || exp >= p as i32 {
         let s = format!("{:.*e}", p - 1, x);
         let (mantissa, exponent) = s.split_once('e').unwrap();
-        format!(
-            "{}e{}",
-            mantissa.trim_end_matches('0').trim_end_matches('.'),
-            exponent
+        scientific_exponent(
+            format!(
+                "{}e{}",
+                mantissa.trim_end_matches('0').trim_end_matches('.'),
+                exponent
+            ),
+            false,
         )
     } else {
         let decimals = (p as i32 - 1 - exp).max(0) as usize;
@@ -896,22 +913,16 @@ fn formatted(args: &[Value]) -> ArrayResult<String> {
                             if has_width || precision.is_some() {
                                 return Err("noninteger %d/%i with width or precision is unsupported; use an explicit %e conversion".into());
                             }
-                            // MATLAB overrides a bare integer conversion with %e.
-                            // Rust omits the positive sign and zero-padded exponent.
-                            let scientific = format!("{n:.6e}");
-                            let (mantissa, exponent) = scientific
-                                .split_once('e')
-                                .ok_or("invalid scientific format")?;
-                            let exponent: i32 = exponent
-                                .parse()
-                                .map_err(|_| "invalid scientific exponent")?;
-                            format!("{mantissa}e{exponent:+03}")
+                            scientific_exponent(format!("{n:.6e}"), false)
                         } else {
                             format!("{}", n as i64)
                         }
                     }
                     'f' => format!("{:.*}", precision.unwrap_or(6), value.number()?),
-                    'e' => format!("{:.*e}", precision.unwrap_or(6), value.number()?),
+                    'e' | 'E' => scientific_exponent(
+                        format!("{:.*e}", precision.unwrap_or(6), value.number()?),
+                        spec == 'E',
+                    ),
                     'g' => significant(value.number()?, precision.unwrap_or(6)),
                     _ => return Err(format!("unsupported format specifier %{spec}")),
                 };
