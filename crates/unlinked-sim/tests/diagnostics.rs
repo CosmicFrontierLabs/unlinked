@@ -160,3 +160,21 @@ fn report_and_context_have_worker_safe_json_contracts() {
         serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
     assert_eq!(decoded.simulation, SimulationCheck::Compiled);
 }
+
+#[test]
+fn invalid_explicit_run_options_use_the_simulators_checks() {
+    let mut context = compile_context();
+    context.options.as_mut().unwrap().max_samples = 0;
+    assert_eq!(
+        diagnose(&model("1"), &context).simulation,
+        SimulationCheck::Rejected
+    );
+    let mut context = compile_context();
+    let options = context.options.as_mut().unwrap();
+    options.solver = unlinked_sim::Solver::Rk45;
+    options.relative_tolerance = 2.0;
+    assert_eq!(
+        diagnose(&model("1"), &context).simulation,
+        SimulationCheck::Rejected
+    );
+}

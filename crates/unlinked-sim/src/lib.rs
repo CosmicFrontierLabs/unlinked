@@ -573,15 +573,8 @@ pub fn simulate_with_observer(
     )
 }
 
-/// As `simulate_with_observer`, with one function-execution budget shared across
-/// all blocks, samples and solver stages. The budget may carry a deadline check.
-pub fn simulate_with_observer_and_budget(
-    graph: &Graph,
-    options: &Options,
-    budget: unlinked_matlab::ArrayBudget,
-    mut observer: impl FnMut(Sample<'_>) -> bool,
-) -> Result<Trace, Error> {
-    let o = options;
+/// Validate explicit options without evaluating any model or advancing time.
+fn sample_count(o: &Options) -> Result<usize, Error> {
     if !o.start.is_finite()
         || !o.stop.is_finite()
         || !o.step.is_finite()
@@ -615,7 +608,19 @@ pub fn simulate_with_observer_and_budget(
             "sample budget exceeded (hard limit 1,000,001)".into(),
         ));
     }
-    let count = intervals as usize + 1;
+    Ok(intervals as usize + 1)
+}
+
+/// As `simulate_with_observer`, with one function-execution budget shared across
+/// all blocks, samples and solver stages. The budget may carry a deadline check.
+pub fn simulate_with_observer_and_budget(
+    graph: &Graph,
+    options: &Options,
+    budget: unlinked_matlab::ArrayBudget,
+    mut observer: impl FnMut(Sample<'_>) -> bool,
+) -> Result<Trace, Error> {
+    let o = options;
+    let count = sample_count(o)?;
     if graph.nodes.len() > 100_000 || graph.wires.len() > 1_000_000 {
         return Err(Error::Options("graph budget exceeded".into()));
     }

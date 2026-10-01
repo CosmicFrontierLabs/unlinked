@@ -151,50 +151,7 @@ fn identifier(s: &str) -> bool {
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
-fn native_type(kind: &str) -> bool {
-    matches!(
-        kind,
-        "Constant"
-            | "Ground"
-            | "Clock"
-            | "DigitalClock"
-            | "Step"
-            | "Sin"
-            | "RandomNumber"
-            | "UniformRandomNumber"
-            | "Gain"
-            | "Bias"
-            | "Sum"
-            | "Add"
-            | "Product"
-            | "Integrator"
-            | "UnitDelay"
-            | "ZeroOrderHold"
-            | "Saturate"
-            | "Saturation"
-            | "TransferFcn"
-            | "DiscreteTransferFcn"
-            | "StateSpace"
-            | "Switch"
-            | "Logic"
-            | "RelationalOperator"
-            | "Abs"
-            | "Trigonometry"
-            | "Math"
-            | "Mux"
-            | "Demux"
-            | "Scope"
-            | "Display"
-            | "Inport"
-            | "Outport"
-            | "Terminator"
-            | "ToWorkspace"
-            | "Goto"
-            | "From"
-            | "GotoTagVisibility"
-            | "MatlabFunction"
-    )
-}
+
 fn remember(
     map: &mut BTreeMap<String, Option<DiagnosticTarget>>,
     key: String,
@@ -251,7 +208,9 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
             if block.mask.is_some() || block.library_source.is_some() {
                 report.emit(Severity::Warning, "simulation_link_or_mask", location.clone(),
                     "Masks and library links require supported explicit lowering before simulation.".into());
-            } else if block.subsystem.is_none() && !native_type(&block.block_type) {
+            } else if block.subsystem.is_none()
+                && !crate::vector::supported_native_type(&block.block_type)
+            {
                 report.emit(
                     Severity::Warning,
                     "simulation_block_type",
@@ -339,15 +298,14 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
             "Compile checking requires explicit run settings; imported solver settings are not substituted.".into());
         return report;
     };
-    if !options.start.is_finite()
-        || !options.stop.is_finite()
-        || options.stop < options.start
-        || !options.step.is_finite()
-        || options.step <= 0.0
-    {
+    if let Err(error) = crate::sample_count(options) {
         report.simulation = SimulationCheck::Rejected;
-        report.emit(Severity::Error, "simulation_options", DiagnosticTarget::Model,
-            "Explicit run settings require finite start <= stop and a positive finite observation step.".into());
+        report.emit(
+            Severity::Error,
+            "simulation_options",
+            DiagnosticTarget::Model,
+            error.to_string(),
+        );
         return report;
     }
     let mut model = model.clone();
