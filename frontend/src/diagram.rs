@@ -696,6 +696,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let select_created = use_mut_ref(|| None::<BlockId>);
     // The open context menu's client position.
     let menu = use_state(|| None::<(i32, i32)>);
+    let show_problems = use_state(|| false);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -1811,6 +1812,80 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         Some(d) => diff_css(d, &path, system) + &highlight,
         None => highlight,
     };
+    // Inside a chart there are no blocks to outline.
+    let highlight = match system.and(system_ids(&props.model, &path)) {
+        Some(ids) => problems_css(&props.problems, &ids) + &highlight,
+        None => highlight,
+    };
+    let block_problems: Vec<Diagnostic> = selected_block
+        .map(|b| {
+            props
+                .problems
+                .iter()
+                .filter(|d| {
+                    matches!(&d.target, DiagnosticTarget::Block { system, id, .. }
+                        if *system == system_ref && *id == b.id)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let errors = props
+        .problems
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    let warnings = props.problems.len() - errors;
+    let toggle_problems = {
+        let show_problems = show_problems.clone();
+        Callback::from(move |_: MouseEvent| show_problems.set(!*show_problems))
+    };
+    // Show where a problem is: open its system and select its block.
+    let go_to = |d: &Diagnostic| {
+        let (path, selection, model, on_settings) = (
+            path.clone(),
+            selection.clone(),
+            props.model.clone(),
+            props.on_settings.clone(),
+        );
+        let target = d.target.clone();
+        Callback::from(move |_: MouseEvent| match &target {
+            DiagnosticTarget::Model => {}
+            DiagnosticTarget::Config { .. } => {
+                if let Some(on_settings) = &on_settings {
+                    on_settings.emit(());
+                }
+            }
+            DiagnosticTarget::Block { system, id, .. } => {
+                if let Some(names) = system_names(&model, system) {
+                    path.set(names);
+                    selection.set(Selection::Blocks(vec![id.0.clone()]));
+                }
+            }
+            DiagnosticTarget::Line { system, .. } => {
+                if let Some(names) = system_names(&model, system) {
+                    path.set(names);
+                    selection.set(Selection::Nothing);
+                }
+            }
+        })
+    };
+    let problem_list = (*show_problems).then(|| {
+        html! {
+            <div class="problems-panel">
+                if props.problems.is_empty() {
+                    <div class="muted">{ "No problems found by the static check." }</div>
+                }
+                { for props.problems.iter().map(|d| html! {
+                    <button class={classes!("problem-row", problem_class(d))} onclick={go_to(d)}>
+                        <span class="problem-place">{ problem_place(&props.model, &d.target) }</span>
+                        <span>{ &d.message }</span>
+                    </button>
+                }) }
+                <div class="muted">{ "Static check: structure, settings and simulator support. No simulation was run." }</div>
+            </div>
+        }
+    });
 
     let canvas = match rendered.as_ref() {
         Ok(svg) => Html::from_html_unchecked(AttrValue::from(svg.clone())),
@@ -1883,6 +1958,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     </span>
                 }
                 <span class="spacer" />
+                <button class={classes!("problems-button", (errors > 0).then_some("has-errors"),
+                    (*show_problems).then_some("active"))} onclick={toggle_problems}
+                    title="Problems found by the static check">
+                    { format!("{errors} error{} · {warnings} warning{}",
+                        if errors == 1 { "" } else { "s" }, if warnings == 1 { "" } else { "s" }) }
+                </button>
                 <span class="zoom">{ format!("{:.0}%", v.scale * 100.0) }</span>
                 <button onclick={fit_view}>{ "Fit" }</button>
                 <button onclick={toggle_theme}>{ if *theme == Theme::Dark { "Light" } else { "Dark" } }</button>
@@ -1952,7 +2033,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
                         system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
-                        model={props.model.clone()}
+                        model={props.model.clone()} problems={Rc::new(block_problems)}
                         on_edit={on_edit.clone()} on_open={Callback::from({
                         let path = path.clone();
                         move |name: String| {
@@ -1963,6 +2044,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     })} />
                 }
             </div>
+            { for problem_list }
         </div>
     }
 }
@@ -2203,6 +2285,8 @@ struct InspectorProps {
     /// The whole model, to tell whether deleting a subsystem's port block
     /// cuts a connection outside it.
     model: Rc<Model>,
+    /// Problems found with the block.
+    problems: Rc<Vec<Diagnostic>>,
     on_open: Callback<String>,
     on_edit: Option<Callback<Edit>>,
 }
@@ -2308,6 +2392,13 @@ fn inspector(props: &InspectorProps) -> Html {
         <aside class="inspector">
             { title }
             <div class="muted">{ format!("{kind} · SID {}", b.id) }</div>
+            { for props.problems.iter().map(|d| {
+                let about = match &d.target {
+                    DiagnosticTarget::Block { parameter: Some(p), .. } => format!("{p}: "),
+                    _ => String::new(),
+                };
+                html! { <div class={problem_class(d)}>{ about }{ &d.message }</div> }
+            }) }
             { for open }
             { for expand }
             { for delete }
