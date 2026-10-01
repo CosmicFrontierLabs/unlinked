@@ -115,8 +115,10 @@ enum Selection {
     Wire(Endpoint),
     /// A branched line, by the source of its trunk.
     Trunk(Endpoint),
-    /// An annotation, by its index in the system.
-    Annotation(usize),
+    /// An annotation, by its index in the system and its content when
+    /// selected: the index alone could later name another annotation (after
+    /// a delete and an undo, say), and then the selection lapses.
+    Annotation(usize, Annotation),
 }
 
 impl Selection {
@@ -125,6 +127,18 @@ impl Selection {
         match self {
             Selection::Blocks(ids) => ids,
             _ => &[],
+        }
+    }
+
+    /// The selected annotation, if `sys` still holds it at its index.
+    fn annotation<'a>(&self, sys: &'a System) -> Option<(usize, &'a Annotation)> {
+        match self {
+            Selection::Annotation(i, expected) => sys
+                .annotations
+                .get(*i)
+                .filter(|a| *a == expected)
+                .map(|a| (*i, a)),
+            _ => None,
         }
     }
 }
@@ -992,19 +1006,23 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     {
                         let (dx, dy) = offset;
                         let p = a.position;
+                        let position =
+                            Rect::new(p.left + dx, p.top + dy, p.right + dx, p.bottom + dy);
                         on_edit.emit(Edit::MoveAnnotation {
                             system: system_ref.clone(),
                             target: AnnotationTarget {
                                 index,
                                 expected: a.clone(),
                             },
-                            position: Rect::new(
-                                p.left + dx,
-                                p.top + dy,
-                                p.right + dx,
-                                p.bottom + dy,
-                            ),
+                            position,
                         });
+                        // A selected annotation stays selected where it went.
+                        if matches!(&*selection, Selection::Annotation(i, s) if *i == index && s == a)
+                        {
+                            let mut moved = a.clone();
+                            moved.position = position;
+                            selection.set(Selection::Annotation(index, moved));
+                        }
                     }
                     moved
                 }
@@ -1074,6 +1092,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let onclick = {
         let drag = drag.clone();
         let selection = selection.clone();
+        let annotations: Vec<Annotation> =
+            system.map(|s| s.annotations.clone()).unwrap_or_default();
         Callback::from(move |e: MouseEvent| {
             let moved = matches!(drag.borrow_mut().take(), Some(Drag::Ended { moved: true }));
             if moved {
@@ -1111,8 +1131,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 } else {
                     Selection::Blocks(vec![id])
                 }
-            } else if let Some(index) = annotation() {
-                Selection::Annotation(index)
+            } else if let Some((index, a)) =
+                annotation().and_then(|i| Some((i, annotations.get(i)?)))
+            {
+                Selection::Annotation(index, a.clone())
             } else {
                 Selection::Nothing
             });
@@ -1246,16 +1268,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     });
                     selection.set(Selection::Nothing);
                 }
-                Selection::Annotation(index) => {
-                    let Some(a) = annotations.get(*index) else {
+                Selection::Annotation(index, expected) => {
+                    // Only the annotation that was selected, if it is still
+                    // where it was.
+                    if annotations.get(*index) != Some(expected) {
+                        selection.set(Selection::Nothing);
                         return;
-                    };
+                    }
                     e.prevent_default();
                     on_edit.emit(Edit::DeleteAnnotation {
                         system: system_ref.clone(),
                         target: AnnotationTarget {
                             index: *index,
-                            expected: a.clone(),
+                            expected: expected.clone(),
                         },
                     });
                     selection.set(Selection::Nothing);
@@ -1332,13 +1357,21 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if let (Some(at), Some(sid)) = (at, sid) {
                     let snap = |v: f64| (v / SNAP).round() * SNAP;
                     let (x, y) = (snap(at.x), snap(at.y));
+                    let (text, position) = ("Annotation".to_string(), Rect::new(x, y, x, y));
                     on_edit.emit(Edit::AddAnnotation {
                         system: system_ref.clone(),
                         id: sid.to_string(),
-                        text: "Annotation".into(),
-                        position: Rect::new(x, y, x, y),
+                        text: text.clone(),
+                        position,
                     });
-                    selection.set(Selection::Annotation(annotation_count));
+                    // As AddAnnotation records it.
+                    let added = Annotation {
+                        text,
+                        position,
+                        rich_text: false,
+                        properties: [("SID".to_string(), sid.to_string())].into(),
+                    };
+                    selection.set(Selection::Annotation(annotation_count, added));
                 }
                 return;
             }
@@ -1371,10 +1404,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         Selection::Trunk(src) => unlinked_model::edit::line_from(s, src),
         _ => None,
     });
-    let selected_annotation = match &*selection {
-        Selection::Annotation(i) => system.and_then(|s| s.annotations.get(*i)).map(|a| (*i, a)),
-        _ => None,
-    };
+    let selected_annotation = system.and_then(|s| selection.annotation(s));
     let selected_chart = selected_block.and_then(|b| {
         let mut p = refs.clone();
         p.push(&b.name);
@@ -1447,9 +1477,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             .collect(),
         Selection::Wire(dst) => line_end("wire-hit", "dst-", dst),
         Selection::Trunk(src) => line_end("trunk-hit", "src-", src),
-        Selection::Annotation(i) => {
-            format!(".diagram .annotation[data-annotation=\"{i}\"] {{ fill: #ff9e64; }}")
-        }
+        Selection::Annotation(..) => selected_annotation
+            .map(|(i, _)| format!(".diagram .annotation[data-annotation=\"{i}\"] {{ fill: #ff9e64; }}"))
+            .unwrap_or_default(),
     };
     let highlight = match &props.diff {
         Some(d) => diff_css(d, &path, system) + &highlight,
@@ -1555,8 +1585,20 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         system={system_ref.clone()} on_edit={on_edit.clone().map(|on_edit| {
                             let selection = selection.clone();
                             Callback::from(move |edit: Edit| {
-                                if matches!(edit, Edit::DeleteAnnotation { .. }) {
-                                    selection.set(Selection::Nothing);
+                                match (&edit, &*selection) {
+                                    (Edit::DeleteAnnotation { .. }, _) => {
+                                        selection.set(Selection::Nothing)
+                                    }
+                                    // Keep it selected with its new text.
+                                    (
+                                        Edit::SetAnnotationText { text, .. },
+                                        Selection::Annotation(i, expected),
+                                    ) => {
+                                        let mut edited = expected.clone();
+                                        edited.text = text.clone();
+                                        selection.set(Selection::Annotation(*i, edited));
+                                    }
+                                    _ => {}
                                 }
                                 on_edit.emit(edit);
                             })
