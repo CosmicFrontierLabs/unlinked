@@ -720,10 +720,10 @@ fn typed_integer_format_validation(projects: &Projects) {
         unlinked_matlab::array_runtime::builtin("sprintf", args, 1).map(|v| v[0].text().unwrap())
     };
     // The integer subset must neither truncate fractions nor saturate casts.
-    // MATLAB's automatic conversion override is deliberately not emulated;
-    // Octave uses different text for fractions, so it is not an oracle here.
+    // Modifiers on fractional integer conversions remain unsupported until
+    // their MATLAB override behavior can be verified.
     for (i, (format, value, message)) in [
-        ("%d", "1.5", "noninteger %d/%i"),
+        ("%20d", "1.5", "noninteger %d/%i with width or precision"),
         ("%8.2i", "-1.5", "noninteger %d/%i"),
         ("%d", "NaN", "outside supported range"),
         ("%i", "Inf", "outside supported range"),
@@ -745,14 +745,51 @@ fn typed_integer_format_validation(projects: &Projects) {
         let error = projects.run_failure(&format!("integer-format-bad-{i}"), &source);
         assert!(error.contains(message), "{error}");
     }
-    let source = "s=sprintf('<%d><%8i><%d><%d><%d>',12,-12,0,-2^63,2^63-1024);";
-    let expected = "<12><     -12><0><-9223372036854775808><9223372036854774784>";
+    // MATLAB's documented bare %e override differs from Octave's general
+    // formatting: assert MATLAB text directly, and record Octave's divergence.
+    for (i, (value, expected)) in [
+        (1.5, "1.500000e+00"),
+        (std::f64::consts::PI, "3.141593e+00"),
+        (-1.5, "-1.500000e+00"),
+        (0.015, "1.500000e-02"),
+        (1.5e-100, "1.500000e-100"),
+        (-1.5e-100, "-1.500000e-100"),
+        (1e12 + 0.25, "1.000000e+12"),
+        (-1e12 - 0.25, "-1.000000e+12"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for spec in ["d", "i"] {
+            let text = sprintf(&format!("%{spec}"), vec![Value::scalar(value)]).unwrap();
+            assert_eq!(text, expected);
+            let output = projects.run(
+                &format!("fraction-integer-{i}-{spec}"),
+                &format!("fprintf('%{spec}',{value:.17e});"),
+                false,
+                None,
+            );
+            assert_eq!(output, expected);
+        }
+    }
+    if let Some(reference) = octave("s=sprintf('%d',1.5);fprintf('%d ',double(s));") {
+        assert_eq!(reference, vec![49., 46., 53.]); // Octave gives '1.5'.
+    }
+    let source = "s=sprintf('<%d><%8i><%d><%d><%d><%d>',12,-12,0,-2^63,2^63-1024,-0);";
+    let expected = "<12><     -12><0><-9223372036854775808><9223372036854774784><0>";
     let text = sprintf(
-        "<%d><%8i><%d><%d><%d>",
-        [12., -12., 0., -9223372036854775808., 9223372036854774784.]
-            .into_iter()
-            .map(Value::scalar)
-            .collect(),
+        "<%d><%8i><%d><%d><%d><%d>",
+        [
+            12.,
+            -12.,
+            0.,
+            -9223372036854775808.,
+            9223372036854774784.,
+            -0.,
+        ]
+        .into_iter()
+        .map(Value::scalar)
+        .collect(),
     )
     .unwrap();
     assert_eq!(text, expected);

@@ -756,6 +756,7 @@ fn formatted(args: &[Value]) -> ArrayResult<String> {
                     width.push(chars[i]);
                     i += 1;
                 }
+                let has_width = !width.is_empty();
                 let width = if width.is_empty() {
                     0
                 } else {
@@ -790,11 +791,22 @@ fn formatted(args: &[Value]) -> ArrayResult<String> {
                             return Err("integer formatting outside supported range".into());
                         }
                         if n.fract() != 0.0 {
-                            return Err(
-                                "noninteger %d/%i formatting is unsupported; use %g or %e".into()
-                            );
+                            if has_width || precision.is_some() {
+                                return Err("noninteger %d/%i with width or precision is unsupported; use an explicit %e conversion".into());
+                            }
+                            // MATLAB overrides a bare integer conversion with %e.
+                            // Rust omits the positive sign and zero-padded exponent.
+                            let scientific = format!("{n:.6e}");
+                            let (mantissa, exponent) = scientific
+                                .split_once('e')
+                                .ok_or("invalid scientific format")?;
+                            let exponent: i32 = exponent
+                                .parse()
+                                .map_err(|_| "invalid scientific exponent")?;
+                            format!("{mantissa}e{exponent:+03}")
+                        } else {
+                            format!("{}", n as i64)
                         }
-                        format!("{}", n as i64)
                     }
                     'f' | 'e' => {
                         decimal_format(value.number()?, precision.unwrap_or(6), spec == 'e')?

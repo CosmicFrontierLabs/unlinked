@@ -196,12 +196,14 @@ Production evaluation never strips statements.
 
 ### Integer formatting subset
 
-`fprintf`/`sprintf` `%d` and `%i` require finite, integral doubles in
-`[-2^63, 2^63)`. Fractional values produce a diagnostic suggesting explicit
-`%g` or `%e`; they are never silently truncated. Nonfinite and out-of-range
-values also return errors instead of saturating the integer conversion.
-MATLAB can [override unsuitable formatting conversions](https://www.mathworks.com/help/matlab/ref/string.sprintf.html)
-with floating-point formatting; that automatic override is not implemented.
-Octave uses different fractional integer-format output, so this restricted
-subset deliberately does not claim parity for those cases. Full override
-semantics remain tracked in issue #25.
+`fprintf`/`sprintf` bare `%d` and `%i` print integral doubles in decimal.
+Finite fractional doubles use MATLAB's scientific fallback: `%d` with `1.5`
+prints `1.500000e+00` (six decimal places, signed exponent with at least two
+digits). This intentionally differs from Octave, which prints `1.5`.
+See MathWorks' [conversion override rule](https://www.mathworks.com/help/matlab/ref/string.compose.html).
+
+Fractional `%d`/`%i` with explicit width or precision return a diagnostic to
+use an explicit `%e`: MATLAB's modifier behavior during automatic override
+has not been verified. Inputs must still be finite and in `[-2^63, 2^63)`;
+nonfinite and out-of-range values return errors instead of saturating an integer
+conversion. Remaining formatting compatibility is tracked in issue #25.
