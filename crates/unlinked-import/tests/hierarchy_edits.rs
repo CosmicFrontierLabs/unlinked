@@ -475,11 +475,31 @@ fn expansion_remaps_combined_legacy_sid_references() {
 }
 
 #[test]
-fn expansion_rejects_opaque_defaults_on_removed_interfaces() {
+fn expansion_preserves_shared_defaults_but_refuses_instance_overrides() {
     let (name, bytes) = fixtures().remove(0);
     let original = unlinked_import::import(name, &bytes).unwrap();
     let grouped = unlinked_import::patch::apply_edits(name, &bytes, &[group(&original)]).unwrap();
     let text=String::from_utf8(grouped).unwrap().replacen("Model {", "Model {\n BlockParameterDefaults {\n Block {\n BlockType Inport\n UserData opaque_default\n }\n }",1);
+    let inherited = unlinked_import::import(name, text.as_bytes()).unwrap();
+    let inherited_edit = Edit::ExpandSubsystem {
+        system: vec![],
+        id: inherited
+            .root
+            .block_by_name("controller")
+            .unwrap()
+            .id
+            .clone(),
+    };
+    let output =
+        unlinked_import::patch::apply_edits(name, text.as_bytes(), &[inherited_edit]).unwrap();
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("opaque_default"));
+    let text = text.replacen(
+        "Name\t\"In1\"",
+        "Name\t\"In1\"\n UserData instance_override",
+        1,
+    );
     let model = unlinked_import::import(name, text.as_bytes()).unwrap();
     let edit = Edit::ExpandSubsystem {
         system: vec![],

@@ -27,6 +27,8 @@ pub struct ExpandedLineRecipe {
 #[derive(Debug, Clone)]
 pub struct ExpandPlan {
     pub wrapper_index: usize,
+    pub wrapper_parameters: BTreeMap<String, String>,
+    pub port_parameters: BTreeMap<usize, BTreeMap<String, String>>,
     /// Original child block indices, in original order.
     pub moved_indices: Vec<usize>,
     /// Final remapped IDs and translated geometry, aligned with moved_indices.
@@ -86,6 +88,69 @@ pub fn removable_property(key: &str) -> bool {
     )
 }
 
+/// View state disappears with the subsystem window, not model behavior.
+pub fn view_property(key: &str) -> bool {
+    matches!(
+        key,
+        "Name"
+            | "Location"
+            | "ZoomFactor"
+            | "Open"
+            | "SIDHighWatermark"
+            | "ScreenColor"
+            | "ReportName"
+    )
+}
+fn discardable_parameter(model: &Model, kind: &str, key: &str, value: &str) -> bool {
+    if removable_property(key)
+        || model
+            .type_defaults
+            .get(kind)
+            .and_then(|p| p.get(key))
+            .is_some_and(|v| v == value)
+    {
+        return true;
+    }
+    match key {
+        "Variant"
+        | "LockScale"
+        | "EnsureOutportIsVirtual"
+        | "OutputWhenUnConnected"
+        | "MinAlgLoopOccurrences"
+        | "Opaque"
+        | "CheckFcnCallInpInsideContextMsg"
+        | "FunctionWithSeparateData"
+        | "GeneratePreprocessorConditionals"
+        | "IsWebBlock"
+        | "MaskHideContents"
+        | "PropExecContextOutsideSubsystem"
+        | "RequestExecContextInheritance"
+        | "MustResolveToSignalObject" => value == "off",
+        "Permissions" => value == "ReadWrite",
+        "RTWFcnNameOpts" | "RTWFileNameOpts" | "RTWSystemCode" => value == "Auto",
+        "RTWMemSecDataConstants"
+        | "RTWMemSecDataInternal"
+        | "RTWMemSecDataParameters"
+        | "RTWMemSecFuncExecute"
+        | "RTWMemSecFuncInitTerm" => value == "Inherit from model",
+        "DataTypeOverride" | "MinMaxOverflowLogging" => value == "UseLocalSettings",
+        "DataTypeOverrideAppliesTo" => value == "AllNumericTypes",
+        "FunctionInterfaceSpec" => value == "void_void",
+        "ShowPortLabels" => value == "FromPortIcon",
+        "ContentPreviewEnabled" | "TreatAsGroupedWhenPropagatingVariantConditions" => {
+            matches!(value, "on" | "off")
+        }
+        "IconDisplay" => value == "Port number",
+        "Interpolate" => value == "on",
+        "SourceOfInitialOutputValue" => value == "Dialog",
+        "InitialOutput" => matches!(value, "0" | "[]"),
+        "OutputWhenDisabled" => value == "held",
+        "VariantControlMode" => value == "expression",
+        "VariantActivationTime" => value == "update diagram",
+        _ => false,
+    }
+}
+
 fn invalid(message: impl Into<String>) -> EditError {
     EditError::Invalid(message.into())
 }
@@ -133,11 +198,15 @@ fn plain_wrapper(block: &Block) -> Result<(), EditError> {
     }
     Ok(())
 }
-fn inherited_port(block: &Block) -> Result<u32, EditError> {
-    if block.parameters.keys().any(|key| !removable_property(key)) {
-        return Err(invalid(
-            "expansion would discard unsupported port parameters",
-        ));
+fn inherited_port(model: &Model, block: &Block) -> Result<u32, EditError> {
+    if let Some((key, _)) = block
+        .parameters
+        .iter()
+        .find(|(key, value)| !discardable_parameter(model, &block.block_type, key, value))
+    {
+        return Err(invalid(format!(
+            "expansion would discard unsupported port parameter {key}"
+        )));
     }
     if scoped(block) || block.subsystem.is_some() || !ordinary_ports(block.ports) {
         return Err(invalid(
@@ -173,7 +242,6 @@ fn inherited_port(block: &Block) -> Result<u32, EditError> {
         ("LatchInputForFeedbackSignals", "off"),
         ("LatchByDelayingOutsideSignal", "off"),
         ("MustResolveToSignalObject", "off"),
-        ("InitialOutput", "[]"),
         ("OutputWhenDisabled", "held"),
     ] {
         if block.param(key).is_some_and(|v| v.trim() != allowed) {
@@ -258,14 +326,14 @@ pub fn plan_expand(model: &Model, path: &SystemRef, id: &BlockId) -> Result<Expa
         .get(id)
         .ok_or_else(|| EditError::NoBlock(id.clone()))?;
     plain_wrapper(wrapper)?;
-    if wrapper
+    if let Some((key, _)) = wrapper
         .parameters
-        .keys()
-        .any(|key| !removable_property(key))
+        .iter()
+        .find(|(key, value)| !discardable_parameter(model, "SubSystem", key, value))
     {
-        return Err(invalid(
-            "expansion would discard unsupported wrapper parameters",
-        ));
+        return Err(invalid(format!(
+            "expansion would discard unsupported wrapper parameter {key}"
+        )));
     }
 
     if wrapper.orientation != Orientation::Right || wrapper.mirrored {
@@ -288,7 +356,7 @@ pub fn plan_expand(model: &Model, path: &SystemRef, id: &BlockId) -> Result<Expa
         return Err(invalid("chart-owning scope cannot be expanded"));
     }
     let child = wrapper.subsystem.as_deref().unwrap();
-    if !child.annotations.is_empty() || !child.properties.is_empty() {
+    if !child.annotations.is_empty() || child.properties.keys().any(|key| !view_property(key)) {
         return Err(invalid(
             "expansion of child annotations or system properties is unsupported",
         ));
@@ -316,7 +384,7 @@ pub fn plan_expand(model: &Model, path: &SystemRef, id: &BlockId) -> Result<Expa
     let mut bounds: Option<Rect> = None;
     for (i, b) in child.blocks.iter().enumerate() {
         if matches!(b.block_type.as_str(), "Inport" | "Outport") {
-            let number = inherited_port(b)?;
+            let number = inherited_port(model, b)?;
             let table = if b.block_type == "Inport" {
                 &mut inputs
             } else {
@@ -513,6 +581,14 @@ pub fn plan_expand(model: &Model, path: &SystemRef, id: &BlockId) -> Result<Expa
         })
         .collect();
     Ok(ExpandPlan {
+        wrapper_parameters: wrapper.parameters.clone(),
+        port_parameters: child
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !moved_indices.contains(i))
+            .map(|(i, b)| (i, b.parameters.clone()))
+            .collect(),
         wrapper_index: parent.blocks.iter().position(|b| b.id == *id).unwrap(),
         moved_indices,
         moved_blocks,

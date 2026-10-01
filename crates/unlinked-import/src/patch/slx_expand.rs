@@ -7,7 +7,7 @@ fn fail(message: &str) -> ImportError {
 fn endpoint_property(e: &XElem) -> bool {
     e.name == "P"
         && e.attr("Name")
-            .is_some_and(|k| matches!(k.as_str(), "Src" | "Dst" | "Points"))
+            .is_some_and(|k| matches!(k.as_str(), "Src" | "Dst" | "Points" | "ZOrder"))
 }
 fn metadata(e: &XElem) -> Vec<XNode> {
     e.children
@@ -60,7 +60,11 @@ fn graft(node: &mut XElem, target: &str, donor: &XElem) -> usize {
     }
     count
 }
-fn removable(e: &XElem, system: bool) -> Result<(), ImportError> {
+fn removable(
+    e: &XElem,
+    system: bool,
+    allowed: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ImportError> {
     if system && e.elements().filter(|s| s.name == "System").count() != 1 {
         return Err(fail("ambiguous raw child systems"));
     }
@@ -74,8 +78,10 @@ fn removable(e: &XElem, system: bool) -> Result<(), ImportError> {
         match c {
             XNode::Element(p)
                 if p.name == "P"
-                    && p.attr("Name")
-                        .is_some_and(|k| super::expansion_property(&k)) => {}
+                    && p.attr("Name").is_some_and(|k| {
+                        super::expansion_property(&k)
+                            || allowed.get(&k).is_some_and(|v| p.text() == *v)
+                    }) => {}
             XNode::Element(s) if system && s.name == "System" => {}
             XNode::Text(s) if s.trim().is_empty() => {}
             _ => {
@@ -94,7 +100,7 @@ pub(super) fn expand(parent: &mut XElem, plan: &ExpandPlan) -> Result<(), Import
         .nth(plan.wrapper_index)
         .ok_or_else(|| fail("raw subsystem missing"))?
         .clone();
-    removable(&wrapper, true)?;
+    removable(&wrapper, true, &plan.wrapper_parameters)?;
     let child = wrapper
         .elements()
         .find(|e| e.name == "System")
@@ -107,6 +113,7 @@ pub(super) fn expand(parent: &mut XElem, plan: &ExpandPlan) -> Result<(), Import
     if child.children.iter().any(|c| {
         !matches!(c,XNode::Element(e) if e.name=="Block"||e.name=="Line")
             && !matches!(c,XNode::Text(s) if s.trim().is_empty())
+            && !matches!(c,XNode::Element(p) if p.name=="P" && p.attr("Name").is_some_and(|k|unlinked_model::expand::view_property(&k)))
     }) {
         return Err(fail("expansion would discard child system metadata"));
     }
@@ -126,7 +133,7 @@ pub(super) fn expand(parent: &mut XElem, plan: &ExpandPlan) -> Result<(), Import
     let children: Vec<_> = child.elements().filter(|e| e.name == "Block").collect();
     for (index, b) in children.iter().enumerate() {
         if !plan.moved_indices.contains(&index) {
-            removable(b, false)?;
+            removable(b, false, &plan.port_parameters[&index])?;
         }
     }
     let raw = |r: RootRef| -> &XElem {

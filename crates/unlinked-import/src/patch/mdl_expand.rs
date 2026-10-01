@@ -6,7 +6,7 @@ fn fail(message: &str) -> ImportError {
     ImportError::Edit(message.into())
 }
 fn endpoints(key: &str) -> bool {
-    SRC_FORMS.contains(&key) || DST_FORMS.contains(&key) || key == "Points"
+    SRC_FORMS.contains(&key) || DST_FORMS.contains(&key) || matches!(key, "Points" | "ZOrder")
 }
 fn metadata(s: &Section) -> Vec<(String, String)> {
     s.items
@@ -38,53 +38,79 @@ fn weight(s: &Section) -> usize {
             })
             .sum::<usize>()
 }
-fn graft(node: &mut Section, target: &Port<'_>, donor: &Section) -> usize {
-    let mut count = 0;
-    for item in &mut node.items {
-        if let Item::Section(b) = item {
-            if b.tag == "Branch" {
-                count += graft(b, target, donor);
-            }
-        }
-    }
+fn target_paths(
+    node: &Section,
+    target: &Port<'_>,
+    path: &mut Vec<usize>,
+    out: &mut Vec<Vec<usize>>,
+) {
     if target.is_at(node, DST_FORMS) {
-        count += 1;
-        for key in DST_FORMS {
-            node.remove_prop(key);
-        }
-        if donor.prop("Dst").is_some() || donor.prop("DstBlock").is_some() {
-            let mut b = new_section(
-                "Branch",
-                &format!("{}  ", indent_of(&node.header)),
-                node.eol(),
-            );
-            for item in &donor.items {
-                if let Item::Prop { key, .. } = item {
-                    if DST_FORMS.contains(&key.as_str()) {
-                        b.items.push(item.clone());
-                    }
-                }
-            }
-            node.items.push(Item::Section(b));
-        }
-        node.items.extend(
+        out.push(path.clone());
+    }
+    for (i, branch) in node.sections().filter(|b| b.tag == "Branch").enumerate() {
+        path.push(i);
+        target_paths(branch, target, path, out);
+        path.pop();
+    }
+}
+fn graft_at(node: &mut Section, path: &[usize], donor: &Section) {
+    if let Some((&i, rest)) = path.split_first() {
+        let child = node
+            .items
+            .iter_mut()
+            .filter_map(|item| match item {
+                Item::Section(b) if b.tag == "Branch" => Some(b),
+                _ => None,
+            })
+            .nth(i)
+            .expect("original branch path retained");
+        graft_at(child, rest, donor);
+        return;
+    }
+    for key in DST_FORMS {
+        node.remove_prop(key);
+    }
+    if donor.prop("Dst").is_some() || donor.prop("DstBlock").is_some() {
+        let mut branch = new_section(
+            "Branch",
+            &format!("{}  ", indent_of(&node.header)),
+            node.eol(),
+        );
+        branch.items.extend(
             donor
                 .items
                 .iter()
-                .filter(|item| matches!(item,Item::Section(b) if b.tag=="Branch"))
+                .filter(
+                    |item| matches!(item,Item::Prop{key,..} if DST_FORMS.contains(&key.as_str())),
+                )
                 .cloned(),
         );
+        node.items.push(Item::Section(branch));
     }
-    count
+    node.items.extend(
+        donor
+            .items
+            .iter()
+            .filter(|item| matches!(item,Item::Section(b) if b.tag=="Branch"))
+            .cloned(),
+    );
 }
-fn removable(s: &Section, system: bool) -> Result<(), ImportError> {
+fn removable(
+    s: &Section,
+    system: bool,
+    allowed: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ImportError> {
     if system && s.sections().filter(|s| s.tag == "System").count() != 1 {
         return Err(fail("ambiguous raw child systems"));
     }
     for item in &s.items {
         match item {
             Item::Section(child) if system && child.tag == "System" => {}
-            Item::Prop { key, .. } if super::expansion_property(key) => {}
+            Item::Prop { key, lines }
+                if super::expansion_property(key)
+                    || allowed
+                        .get(key)
+                        .is_some_and(|value| *value == decode(lines)) => {}
             Item::Raw(raw) if raw.trim().is_empty() => {}
             _ => {
                 return Err(fail(
@@ -113,7 +139,7 @@ pub(super) fn expand(
         .nth(plan.wrapper_index)
         .ok_or_else(|| fail("raw subsystem missing"))?
         .clone();
-    removable(&wrapper, true)?;
+    removable(&wrapper, true, &plan.wrapper_parameters)?;
     let child = wrapper
         .sections()
         .find(|s| s.tag == "System")
@@ -121,7 +147,7 @@ pub(super) fn expand(
     if child.items.iter().any(|i| {
         !matches!(i,Item::Section(s) if s.tag=="Block" || s.tag=="Line")
             && !matches!(i,Item::Raw(s) if s.trim().is_empty())
-            && !matches!(i,Item::Prop{key,..} if key=="Name")
+            && !matches!(i,Item::Prop{key,..} if unlinked_model::expand::view_property(key))
     }) {
         return Err(fail("expansion would discard child system metadata"));
     }
@@ -141,7 +167,7 @@ pub(super) fn expand(
     let children: Vec<_> = child.sections().filter(|s| s.tag == "Block").collect();
     for (index, b) in children.iter().enumerate() {
         if !plan.moved_indices.contains(&index) {
-            removable(b, false)?;
+            removable(b, false, &plan.port_parameters[&index])?;
         }
     }
     let raw = |r: RootRef| -> &Section {
@@ -159,18 +185,11 @@ pub(super) fn expand(
             return Err(fail("physical expansion net unsupported"));
         }
         let base_metadata = metadata(&line);
+        // Resolve every target against the original scope before any donor
+        // introduces identically named blocks from the other scope.
+        let mut targets = Vec::new();
         for g in &recipe.grafts {
-            let donor = raw(g.donor);
-            super::super::expansion::charge(
-                &mut budget,
-                weight(&line) + weight(donor),
-                donor.items.len() + 1,
-            )?;
-            if !ordinary(donor, true)
-                || !super::super::expansion::subset(&metadata(donor), &base_metadata)
-            {
-                return Err(fail("incompatible boundary line metadata"));
-            }
+            super::super::expansion::charge(&mut budget, weight(&line), 1)?;
             let name = match recipe.base {
                 RootRef::Parent(_) => resolved.names.get(&g.destination.block),
                 RootRef::Child(_) => plan.child_names.get(&g.destination.block),
@@ -182,9 +201,26 @@ pub(super) fn expand(
                 port: g.destination.port,
                 default_kind: PortKind::In,
             };
-            if graft(&mut line, &target, donor) != 1 {
+            let mut paths = Vec::new();
+            target_paths(&line, &target, &mut Vec::new(), &mut paths);
+            if paths.len() != 1 {
                 return Err(fail("serialized boundary destination is ambiguous"));
             }
+            targets.push(paths.pop().unwrap());
+        }
+        for (g, path) in recipe.grafts.iter().zip(targets) {
+            let donor = raw(g.donor);
+            super::super::expansion::charge(
+                &mut budget,
+                weight(&line) + weight(donor),
+                donor.items.len() + 1,
+            )?;
+            if !ordinary(donor, true)
+                || !super::super::expansion::subset(&metadata(donor), &base_metadata)
+            {
+                return Err(fail("incompatible boundary line metadata"));
+            }
+            graft_at(&mut line, &path, donor);
         }
         if recipe.clear_points {
             clear_points(&mut line);
