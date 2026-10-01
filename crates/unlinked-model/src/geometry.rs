@@ -233,6 +233,38 @@ mod tests {
     use crate::{BlockStyle, PortCounts, Rect};
     use std::collections::BTreeMap;
 
+    #[test]
+    fn rotation_mapping_roundtrips_and_composes() {
+        let all = [
+            Orientation::Right,
+            Orientation::Left,
+            Orientation::Up,
+            Orientation::Down,
+        ];
+        for o in all {
+            for m in [false, true] {
+                let (r, mirror) = to_rotation(o, m);
+                assert_eq!(from_rotation(r, mirror), (o, m));
+                // Four turns or two flips are the identity.
+                let mut s = (o, m);
+                for _ in 0..4 {
+                    s = rotated(s.0, s.1);
+                }
+                assert_eq!(s, (o, m));
+                let f = flipped(o, m);
+                assert_eq!(flipped(f.0, f.1), (o, m));
+            }
+        }
+        assert_eq!(
+            rotated(Orientation::Right, false),
+            (Orientation::Down, false)
+        );
+        assert_eq!(
+            flipped(Orientation::Right, false),
+            (Orientation::Left, false)
+        );
+    }
+
     fn block(pos: Rect, ports: &[u32], orientation: Orientation, mirrored: bool) -> Block {
         Block {
             id: "1".into(),

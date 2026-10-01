@@ -328,6 +328,37 @@ mod tests {
     }
 
     #[test]
+    fn orientation_keeps_the_legacy_form_until_a_mirror_needs_rotation() {
+        use unlinked_model::Orientation;
+        let orient = |orientation, mirrored| {
+            [Edit::SetOrientation {
+                system: vec![],
+                id: gain_id(),
+                orientation,
+                mirrored,
+            }]
+        };
+        let left = apply_edits("m.mdl", MDL.as_bytes(), &orient(Orientation::Left, false)).unwrap();
+        let text = String::from_utf8(left.clone()).unwrap();
+        assert!(text.contains("Orientation\t\"left\"") && !text.contains("BlockRotation"));
+        let block = &import("m.mdl", &left).unwrap().root.blocks[0];
+        assert_eq!(
+            (block.orientation, block.mirrored),
+            (Orientation::Left, false)
+        );
+
+        let up = apply_edits("m.mdl", &left, &orient(Orientation::Up, true)).unwrap();
+        let text = String::from_utf8(up.clone()).unwrap();
+        assert!(
+            text.contains("BlockRotation\t90") && text.contains("BlockMirror\ton"),
+            "{text}"
+        );
+        assert!(!text.contains("Orientation\t"), "{text}");
+        let block = &import("m.mdl", &up).unwrap().root.blocks[0];
+        assert_eq!((block.orientation, block.mirrored), (Orientation::Up, true));
+    }
+
+    #[test]
     fn cp1252_roundtrips() {
         let bytes = b"\x80 caf\xe9 \x93q\x94";
         assert_eq!(encode_cp1252(&decode_text(bytes)).unwrap(), bytes);
