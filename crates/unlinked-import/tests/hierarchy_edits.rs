@@ -238,7 +238,7 @@ fn document_defaults_cannot_change_generated_boundary_semantics() {
 }
 
 #[test]
-fn split_root_grouping_writes_an_inline_child_and_preserves_other_parts() {
+fn split_root_grouping_preserves_other_parts() {
     let mut source = fixtures().pop().unwrap().1;
     let mut archive = zip::ZipArchive::new(Cursor::new(&source)).unwrap();
     let mut xml = String::new();

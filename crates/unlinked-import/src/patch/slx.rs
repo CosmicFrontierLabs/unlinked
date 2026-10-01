@@ -826,16 +826,19 @@ fn split_created_system(
         .elements()
         .filter_map(|e| e.attr("Id"))
         .collect();
-    let mut pending: Vec<_> = child.elements().filter(|e| e.name == "Block").collect();
+    let mut pending = vec![&child];
     while let Some(e) = pending.pop() {
-        if e.attrs.iter().any(|(key, value)| {
-            matches!(key.as_str(), "Ref" | "RelationshipId" | "r:id")
-                || key.ends_with(":id")
-                || relationship_ids.contains(&dom::unescape(value))
-        }) || (e.name == "P" && relationship_ids.contains(e.text().trim()))
+        if e.name.contains(':')
+            || e.attrs.iter().any(|(key, value)| {
+                key.contains(':')
+                    || matches!(key.as_str(), "Ref" | "RelationshipId" | "r:id")
+                    || key.ends_with(":id")
+                    || relationship_ids.contains(&dom::unescape(value))
+            })
+            || (e.name == "P" && relationship_ids.contains(e.text().trim()))
         {
             return Err(ImportError::Edit(
-                "moving part-relative block references into a split subsystem is unsupported"
+                "moving part-relative or namespace-dependent records into a split subsystem is unsupported"
                     .into(),
             ));
         }

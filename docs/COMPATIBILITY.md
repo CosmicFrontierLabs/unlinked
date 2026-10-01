@@ -25,3 +25,5 @@ Refresh the default model inventory with `unlinked coverage /path/to/unlinked-te
 Grouping supports ordinary native leaf blocks and unnamed ordinary crossing nets. It retains raw block records and partitions existing wire trees; it refuses masked, linked, chart-owning and scoped content. Tests compare the reimported file with the edited model and check simulation traces before and after grouping. They do not verify reopening in MathWorks Simulink.
 
 Moving a block changes its hierarchy path. Unmodeled path references, such as signal-logging lists or external tooling configuration, are preserved as source data but are not rewritten. Models that depend on those references require manual updates. New boundary parameters override document defaults only where those parameter names already exist, so older files are not populated with newer release-specific settings.
+
+Grouping preserves the package layout: inline systems stay inline; a new child of a split SLX system gets a separate system part, relationship and content-type entry. Opaque part-relative or namespace-dependent records that cannot be moved safely are refused.

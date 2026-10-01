@@ -182,3 +182,21 @@ fn conflicting_explicit_relationship_content_type_is_rejected() {
         .to_string()
         .contains("conflicting relationship content type"));
 }
+
+#[test]
+fn line_references_and_inherited_namespace_uses_are_not_moved_between_parts() {
+    for (old, replacement) in [
+        ("<Line>", "<Line><Unknown Ref=\"payload\"/>"),
+        (
+            "<P Name=\"Gain\">2</P>",
+            "<P Name=\"Gain\">2</P><vendor:Payload/>",
+        ),
+    ] {
+        let mut parts = entries(&package(false));
+        let root = parts.get_mut("simulink/systems/system_root.xml").unwrap();
+        *root = root.replace(old, replacement);
+        let error =
+            unlinked_import::patch::apply_edits("m.slx", &repack(parts), &[create()]).unwrap_err();
+        assert!(error.to_string().contains("part-relative"), "{error}");
+    }
+}
