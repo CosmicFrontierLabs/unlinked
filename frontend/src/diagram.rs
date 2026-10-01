@@ -32,6 +32,9 @@ pub struct DiagramProps {
     #[prop_or_default]
     /// Each call carries one user action, which undo treats as a unit.
     pub on_edit: Option<Callback<Vec<Edit>>>,
+    /// Why an editing action could not be turned into edits.
+    #[prop_or_default]
+    pub on_error: Option<Callback<String>>,
     /// The view re-fits when this changes; by default whenever the model
     /// changes. Editors pass a stable key so edits keep the current view.
     #[prop_or_default]
@@ -151,6 +154,16 @@ fn nearest_segment(points: &[Point], first: usize, at: Point) -> Option<usize> {
     (first..points.len().saturating_sub(1)).min_by(|&i, &j| {
         distance(points[i], points[i + 1]).total_cmp(&distance(points[j], points[j + 1]))
     })
+}
+
+/// Blocks copied with Ctrl+C, with the model as it was then; see
+/// [`unlinked_model::clipboard::paste`].
+struct Clipboard {
+    model: Rc<Model>,
+    system: SystemRef,
+    ids: Vec<BlockId>,
+    /// Pastes so far; each lands further down and right.
+    pastes: u32,
 }
 
 /// Smallest block side a resize leaves.
@@ -417,6 +430,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         y: 0.0,
     });
     let drag = use_mut_ref(|| None::<Drag>);
+    // Blocks copied with Ctrl+C.
+    let clipboard = use_mut_ref(|| None::<Clipboard>);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -941,13 +956,70 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
         let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
+        let (clipboard, model, on_error) = (
+            clipboard.clone(),
+            props.model.clone(),
+            props.on_error.clone(),
+        );
         Callback::from(move |e: KeyboardEvent| {
             let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
                 return;
             };
-            // Rotate (Ctrl+R) and flip (Ctrl+I), as in Simulink.
             let command = e.ctrl_key() || e.meta_key();
             let key = e.key().to_ascii_lowercase();
+            // Copy (Ctrl+C) the selected blocks; paste (Ctrl+V) duplicates
+            // them with their internal lines, offset from the originals.
+            if command && key == "c" && !selected.is_empty() {
+                e.prevent_default();
+                *clipboard.borrow_mut() = Some(Clipboard {
+                    model: model.clone(),
+                    system: system_ref.clone(),
+                    ids: selected.iter().cloned().map(BlockId).collect(),
+                    pastes: 0,
+                });
+                return;
+            }
+            if command && key == "v" {
+                let mut clip = clipboard.borrow_mut();
+                let Some(clip) = clip.as_mut() else {
+                    return;
+                };
+                e.prevent_default();
+                let pasted = if clip.system == system_ref {
+                    unlinked_model::clipboard::paste(
+                        &clip.model,
+                        &clip.system,
+                        &clip.ids,
+                        clip.pastes,
+                        &model,
+                    )
+                    .map_err(|e| e.to_string())
+                } else {
+                    Err("blocks paste only into the system they were copied from".into())
+                };
+                match pasted {
+                    Ok(group) => {
+                        clip.pastes = clip.pastes.saturating_add(1);
+                        let added = group
+                            .iter()
+                            .filter_map(|edit| match edit {
+                                Edit::AddBlock { id, .. } => Some(id.0.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        on_edits.emit(group);
+                        selected.set(added);
+                        selected_wire.set(None);
+                    }
+                    Err(message) => {
+                        if let Some(on_error) = &on_error {
+                            on_error.emit(format!("Cannot paste: {message}"));
+                        }
+                    }
+                }
+                return;
+            }
+            // Rotate (Ctrl+R) and flip (Ctrl+I), as in Simulink.
             if command && (key == "r" || key == "i") {
                 let chosen: Vec<&Block> = blocks
                     .iter()
