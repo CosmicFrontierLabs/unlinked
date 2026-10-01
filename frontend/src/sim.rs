@@ -879,6 +879,74 @@ pub fn simulation_panel(props: &SimProps) -> Html {
 mod tests {
     use super::*;
 
+    fn config(entries: &[(&str, &str)]) -> SimConfig {
+        let raw: BTreeMap<String, String> = entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        SimConfig {
+            solver: raw.get("Solver").cloned(),
+            start_time: raw.get("StartTime").cloned(),
+            stop_time: raw.get("StopTime").cloned(),
+            fixed_step: raw.get("FixedStep").cloned(),
+            raw,
+        }
+    }
+
+    #[test]
+    fn run_options_follow_valid_model_settings_silently() {
+        let (o, notes) = initial_options(&config(&[
+            ("Solver", "ode4"),
+            ("StartTime", "1"),
+            ("StopTime", "3"),
+            ("FixedStep", "0.5"),
+        ]));
+        assert_eq!(
+            (o.solver, o.start, o.stop, o.step),
+            (Solver::Rk4, 1.0, 3.0, 0.5)
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        let (o, notes) = initial_options(&config(&[
+            ("Solver", "ode45"),
+            ("StartTime", "0"),
+            ("StopTime", "2"),
+            ("RelTol", "1e-3"),
+            ("AbsTol", "1e-5"),
+        ]));
+        assert_eq!(o.solver, Solver::Rk45);
+        assert_eq!((o.relative_tolerance, o.absolute_tolerance), (1e-3, 1e-5));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn every_substituted_run_option_is_listed() {
+        let (o, notes) = initial_options(&config(&[
+            ("Solver", "ode15s"),
+            ("StartTime", "0"),
+            ("StopTime", "-1"),
+            ("RelTol", "auto"),
+        ]));
+        assert_eq!((o.solver, o.stop), (Solver::Rk45, 10.0));
+        for about in ["Solver", "Stop", "Rel tol", "Abs tol"] {
+            assert!(
+                notes.iter().any(|n| n.starts_with(about)),
+                "{about}: {notes:?}"
+            );
+        }
+        let (o, notes) = initial_options(&config(&[
+            ("Solver", "ode1"),
+            ("StartTime", "Tstart"),
+            ("StopTime", "1"),
+            ("FixedStep", "0"),
+        ]));
+        assert_eq!((o.solver, o.start, o.step), (Solver::Euler, 0.0, 1e-3));
+        assert!(notes.iter().any(|n| n.starts_with("Start")), "{notes:?}");
+        assert!(
+            notes.iter().any(|n| n.starts_with("Output step")),
+            "{notes:?}"
+        );
+    }
+
     fn sig(id: &str, name: &str) -> SimulationSignal {
         SimulationSignal {
             id: id.into(),
