@@ -3,39 +3,105 @@
 //! The same [`Edit`] values are applied to the in-memory IR (for an
 //! immediate preview) and, by `unlinked-import`'s patcher, to the original
 //! model file, so that everything the IR does not model survives a save.
+//!
+//! Edits address systems and blocks by [`BlockId`] as imported from the
+//! pinned base version, never by name: names change when blocks are
+//! renamed, including earlier in the same batch.
 
 use crate::{Block, BlockId, Branch, Chart, Endpoint, Line, Model, Rect, System};
 use serde::{Deserialize, Serialize};
+
+/// A diagram level: the IDs of the subsystem blocks from the root down.
+/// The root system is the empty path.
+pub type SystemRef = Vec<BlockId>;
+
+/// What deleting a block does with lines attached to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisconnectPolicy {
+    /// Refuse to delete a block that has any line attached.
+    Reject,
+    /// Delete attached lines and branches along with the block.
+    Disconnect,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Edit {
     /// Move and/or resize a block. Lines attached to it lose their stored
     /// vertices so they are routed afresh.
     MoveBlock {
-        system: Vec<String>,
+        system: SystemRef,
         id: BlockId,
         position: Rect,
     },
     /// Set a block parameter (dialog or mask parameter).
     SetParameter {
-        system: Vec<String>,
+        system: SystemRef,
         id: BlockId,
         name: String,
         value: String,
     },
     RenameBlock {
-        system: Vec<String>,
+        system: SystemRef,
         id: BlockId,
         name: String,
     },
-    /// Delete a block and every line or branch connected to it.
-    DeleteBlock { system: Vec<String>, id: BlockId },
+    DeleteBlock {
+        system: SystemRef,
+        id: BlockId,
+        disconnect: DisconnectPolicy,
+    },
+}
+
+/// An edit that could not be applied, and its position in the batch.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[error("edit {index}: {error}")]
+pub struct BatchError {
+    pub index: usize,
+    pub error: EditError,
+}
+
+/// Apply `edits` in order, all or nothing: on failure `model` is unchanged.
+pub fn apply_batch(model: &mut Model, edits: &[Edit]) -> Result<(), BatchError> {
+    let mut next = model.clone();
+    for (index, edit) in edits.iter().enumerate() {
+        edit.apply(&mut next)
+            .map_err(|error| BatchError { index, error })?;
+    }
+    *model = next;
+    Ok(())
+}
+
+/// Names of the subsystem blocks along `path`, as the model currently has
+/// them.
+pub fn system_names(model: &Model, path: &[BlockId]) -> Option<Vec<String>> {
+    let mut sys = &model.root;
+    let mut names = Vec::with_capacity(path.len());
+    for id in path {
+        let block = sys.blocks.iter().find(|b| &b.id == id)?;
+        names.push(block.name.clone());
+        sys = block.subsystem.as_deref()?;
+    }
+    Some(names)
+}
+
+/// IDs of the subsystem blocks along the name path `names`.
+pub fn system_ids(model: &Model, names: &[String]) -> Option<SystemRef> {
+    let mut sys = &model.root;
+    let mut ids = Vec::with_capacity(names.len());
+    for name in names {
+        let block = sys.blocks.iter().find(|b| &b.name == name)?;
+        ids.push(block.id.clone());
+        sys = block.subsystem.as_deref()?;
+    }
+    Some(ids)
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum EditError {
     #[error("no subsystem at {0:?}")]
-    NoSystem(Vec<String>),
+    NoSystem(SystemRef),
+    #[error("block {0} has connected lines")]
+    Connected(BlockId),
     #[error("no block {0} in that system")]
     NoBlock(BlockId),
     #[error("a block named {0:?} already exists in that system")]
@@ -47,7 +113,7 @@ pub enum EditError {
 }
 
 impl Edit {
-    pub fn system(&self) -> &[String] {
+    pub fn system(&self) -> &[BlockId] {
         match self {
             Edit::MoveBlock { system, .. }
             | Edit::SetParameter { system, .. }
@@ -107,6 +173,8 @@ impl Edit {
     }
 
     fn apply_to_diagram(&self, model: &mut Model, charts: &[Chart]) -> Result<(), EditError> {
+        let names = system_names(model, self.system())
+            .ok_or_else(|| EditError::NoSystem(self.system().to_vec()))?;
         let sys = system_mut(model, self.system())?;
         let id = self.block();
         let index = sys
@@ -117,7 +185,7 @@ impl Edit {
         // Chart records are keyed by block path; renaming or deleting a
         // block at or above a chart would orphan them.
         if matches!(self, Edit::RenameBlock { .. } | Edit::DeleteBlock { .. }) {
-            let mut prefix = self.system().to_vec();
+            let mut prefix = names;
             prefix.push(sys.blocks[index].name.clone());
             if charts
                 .iter()
@@ -142,7 +210,12 @@ impl Edit {
                 }
                 sys.blocks[index].name = name.clone();
             }
-            Edit::DeleteBlock { .. } => {
+            Edit::DeleteBlock { disconnect, .. } => {
+                if *disconnect == DisconnectPolicy::Reject
+                    && sys.lines.iter().any(|l| touches(l, id))
+                {
+                    return Err(EditError::Connected(id.clone()));
+                }
                 sys.blocks.remove(index);
                 // Lines not attached to the block are left alone, even if
                 // they were already dangling.
@@ -162,13 +235,13 @@ impl Edit {
     }
 }
 
-fn system_mut<'a>(model: &'a mut Model, path: &[String]) -> Result<&'a mut System, EditError> {
+fn system_mut<'a>(model: &'a mut Model, path: &[BlockId]) -> Result<&'a mut System, EditError> {
     let mut sys = &mut model.root;
-    for name in path {
+    for id in path {
         sys = sys
             .blocks
             .iter_mut()
-            .find(|b| &b.name == name)
+            .find(|b| &b.id == id)
             .and_then(|b| b.subsystem.as_deref_mut())
             .ok_or_else(|| EditError::NoSystem(path.to_vec()))?;
     }
@@ -297,24 +370,86 @@ mod tests {
         assert!(m.root.lines[0].points.is_empty());
     }
 
+    fn delete(id: &str, disconnect: DisconnectPolicy) -> Edit {
+        Edit::DeleteBlock {
+            system: vec![],
+            id: id.into(),
+            disconnect,
+        }
+    }
+
     #[test]
     fn delete_prunes_branches_and_orphan_lines() {
         let mut m = model();
-        Edit::DeleteBlock {
-            system: vec![],
-            id: "2".into(),
-        }
-        .apply(&mut m)
-        .unwrap();
+        delete("2", DisconnectPolicy::Disconnect)
+            .apply(&mut m)
+            .unwrap();
         assert_eq!(m.root.blocks.len(), 2);
         assert_eq!(m.root.lines[0].branches.len(), 1);
-        Edit::DeleteBlock {
-            system: vec![],
-            id: "1".into(),
-        }
-        .apply(&mut m)
-        .unwrap();
+        delete("1", DisconnectPolicy::Disconnect)
+            .apply(&mut m)
+            .unwrap();
         assert!(m.root.lines.is_empty());
+    }
+
+    #[test]
+    fn delete_rejects_connected_blocks_unless_disconnecting() {
+        let mut m = model();
+        assert_eq!(
+            delete("2", DisconnectPolicy::Reject).apply(&mut m),
+            Err(EditError::Connected("2".into()))
+        );
+        assert_eq!(m.root.blocks.len(), 3);
+        m.root.blocks.push(block("4", "free"));
+        delete("4", DisconnectPolicy::Reject).apply(&mut m).unwrap();
+    }
+
+    #[test]
+    fn batches_are_all_or_nothing() {
+        let mut m = model();
+        let before = m.clone();
+        let batch = [
+            Edit::RenameBlock {
+                system: vec![],
+                id: "1".into(),
+                name: "renamed".into(),
+            },
+            delete("missing", DisconnectPolicy::Disconnect),
+        ];
+        let err = apply_batch(&mut m, &batch).unwrap_err();
+        assert_eq!(err.index, 1);
+        assert_eq!(m, before);
+        apply_batch(&mut m, &batch[..1]).unwrap();
+        assert_eq!(m.root.blocks[0].name, "renamed");
+    }
+
+    #[test]
+    fn systems_are_addressed_by_id_across_renames() {
+        let mut m = model();
+        let mut sub = block("9", "Sub");
+        sub.subsystem = Some(Box::new(System {
+            blocks: vec![block("10", "inner")],
+            ..Default::default()
+        }));
+        m.root.blocks.push(sub);
+        let batch = [
+            Edit::RenameBlock {
+                system: vec![],
+                id: "9".into(),
+                name: "Renamed".into(),
+            },
+            Edit::RenameBlock {
+                system: vec!["9".into()],
+                id: "10".into(),
+                name: "x".into(),
+            },
+        ];
+        apply_batch(&mut m, &batch).unwrap();
+        assert_eq!(system_names(&m, &["9".into()]).unwrap(), vec!["Renamed"]);
+        assert_eq!(
+            system_ids(&m, &["Renamed".into()]).unwrap(),
+            vec![BlockId::from("9")]
+        );
     }
 
     #[test]
@@ -371,7 +506,7 @@ mod tests {
             sample_time: None,
         });
         let rename = |system: &[&str], id: &str| Edit::RenameBlock {
-            system: system.iter().map(|s| s.to_string()).collect(),
+            system: system.iter().map(|s| BlockId::from(*s)).collect(),
             id: id.into(),
             name: "x".into(),
         };
@@ -380,15 +515,11 @@ mod tests {
             Err(EditError::OwnsCharts(_))
         ));
         assert!(matches!(
-            rename(&["Sub"], "10").apply(&mut m),
+            rename(&["9"], "10").apply(&mut m),
             Err(EditError::OwnsCharts(_))
         ));
-        let delete = Edit::DeleteBlock {
-            system: vec![],
-            id: "9".into(),
-        };
         assert!(matches!(
-            delete.apply(&mut m),
+            delete("9", DisconnectPolicy::Disconnect).apply(&mut m),
             Err(EditError::OwnsCharts(_))
         ));
         // Unrelated blocks and non-structural edits still work.
@@ -415,6 +546,7 @@ mod tests {
         let missing = Edit::DeleteBlock {
             system: vec!["nope".into()],
             id: "1".into(),
+            disconnect: DisconnectPolicy::Disconnect,
         };
         assert!(matches!(missing.apply(&mut m), Err(EditError::NoSystem(_))));
     }

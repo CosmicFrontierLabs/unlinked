@@ -2,7 +2,7 @@
 
 use crate::api::{self, ApiError};
 use crate::diagram::DiagramView;
-use crate::editor::ModelEditor;
+use crate::editor::{Base, ModelEditor};
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
 use crate::sim::SimulationPanel;
 use crate::transpiler::Transpiler;
@@ -431,7 +431,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
                             break;
                         }
                     };
-                    if let Err(e) = api::upload(id, &path, &msg, &bytes).await {
+                    if let Err(e) = api::upload(id, &path, &msg, &bytes, None).await {
                         failure = Some(ApiError {
                             status: e.status,
                             message: format!("{path}: {}", e.message),
@@ -615,9 +615,9 @@ pub struct FileProps {
 }
 
 enum Content {
-    /// The imported model with the file's path and raw bytes (needed to
-    /// patch it when editing).
-    Model(Rc<unlinked_model::Model>, String, Rc<Vec<u8>>),
+    /// The imported model and the exact version it was read from (the
+    /// base edits are saved against).
+    Model(Rc<unlinked_model::Model>, Base),
     Text(String),
     Binary,
 }
@@ -650,10 +650,33 @@ pub fn file_page(props: &FileProps) -> Html {
         (project_id, file_id, version_id, reload.0),
         move |(p, f, v, _)| async move {
             let info = api::file(p, f).await?;
-            let bytes = api::content(p, f, v).await?;
+            // Read an explicit version so the bytes and the recorded base
+            // cannot disagree if someone saves meanwhile.
+            let (version_id, version) = match v {
+                Some(v) => {
+                    let versions = api::versions(p, f).await?;
+                    let found = versions.iter().find(|x| x.id == v).ok_or(ApiError {
+                        status: 404,
+                        message: "version not found".into(),
+                    })?;
+                    (v, found.version)
+                }
+                None => (info.latest.id, info.latest.version),
+            };
+            let bytes = api::content(p, f, Some(version_id)).await?;
             Ok(if is_model(&info.path) {
                 match unlinked_import::import(&info.path, &bytes) {
-                    Ok(m) => Content::Model(Rc::new(m), info.path, Rc::new(bytes)),
+                    Ok(m) => {
+                        let model = Rc::new(m);
+                        let base = Base {
+                            path: info.path,
+                            version_id,
+                            version,
+                            model: model.clone(),
+                            bytes: Rc::new(bytes),
+                        };
+                        Content::Model(model, base)
+                    }
                     Err(e) => {
                         return Err(ApiError {
                             status: 0,
@@ -697,7 +720,9 @@ pub fn file_page(props: &FileProps) -> Html {
             mutate(
                 async move {
                     let bytes = api::read_upload(f).await?;
-                    api::upload(project_id, &path, "", &bytes).await.map(|_| ())
+                    api::upload(project_id, &path, "", &bytes, None)
+                        .await
+                        .map(|_| ())
                 },
                 reload.clone(),
                 error.clone(),
@@ -784,7 +809,7 @@ pub fn file_page(props: &FileProps) -> Html {
     let body = view(&content, |c: &Content| match c {
         // Keyed by model identity so a new version remounts the viewer with
         // fresh navigation state instead of keeping a stale subsystem path.
-        Content::Model(m, path, bytes) => html! {
+        Content::Model(m, base) => html! {
             <>
                 <div class="tabs">
                     { tab_button(Tab::Diagram, "Diagram") }
@@ -793,8 +818,8 @@ pub fn file_page(props: &FileProps) -> Html {
                 if *tab == Tab::Diagram {
                     // Keyed by the loaded model so a different version
                     // remounts with fresh navigation and edit state.
-                    <ModelEditor key={format!("{:p}", Rc::as_ptr(m))} {project_id} path={path.clone()}
-                        model={m.clone()} bytes={bytes.clone()} can_edit={editor}
+                    <ModelEditor key={format!("{:p}", Rc::as_ptr(m))} {project_id} {file_id}
+                        base={base.clone()} can_edit={editor}
                         fit_key={AttrValue::from(format!("{:p}", Rc::as_ptr(m)))}
                         on_saved={on_saved.clone()} />
                 } else if let Some(version) = shown_version {

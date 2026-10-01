@@ -467,6 +467,54 @@ async fn last_owner_cannot_leave_or_be_demoted() {
 }
 
 #[tokio::test]
+async fn saves_from_a_stale_base_version_are_refused() {
+    let Some((state, app)) = db_app() else { return };
+    let owner = sign_up(&state, "owner");
+    let o = Client::new(&app, &owner);
+    let org = create_org(&o, "Org").await;
+    let project = create_project(&o, org.id, json!({ "name": "P" })).await;
+    let v1 = upload_ok(&o, project.id, "m.mdl", b"one").await.latest;
+
+    // Saving on top of the latest version succeeds.
+    let resp = o
+        .upload_from(project.id, "m.mdl", b"two".to_vec(), Some(v1.id))
+        .await;
+    assert_eq!(resp.status, StatusCode::CREATED);
+    let v2: FileInfo = resp.json();
+    assert_eq!(v2.latest.version, 2);
+
+    // Another edit that also started from v1 is refused, not stacked.
+    let stale = o
+        .upload_from(project.id, "m.mdl", b"three".to_vec(), Some(v1.id))
+        .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    let versions: Vec<FileVersionInfo> = o
+        .get(&format!(
+            "/api/projects/{}/files/{}/versions",
+            project.id, v2.id
+        ))
+        .await
+        .json();
+    assert_eq!(versions.len(), 2);
+
+    // A base for a file that no longer exists at the path is refused
+    // rather than creating a new file.
+    let absent = o
+        .upload_from(project.id, "gone.mdl", b"x".to_vec(), Some(v1.id))
+        .await;
+    assert_eq!(absent.status, StatusCode::CONFLICT);
+
+    // Two saves racing from the same base: exactly one wins.
+    let (a, b) = tokio::join!(
+        o.upload_from(project.id, "m.mdl", b"a".to_vec(), Some(v2.latest.id)),
+        o.upload_from(project.id, "m.mdl", b"b".to_vec(), Some(v2.latest.id)),
+    );
+    let mut statuses = [a.status, b.status];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::CREATED, StatusCode::CONFLICT]);
+}
+
+#[tokio::test]
 async fn upload_size_limit_is_enforced() {
     let Some((state, app)) = db_app() else { return };
     let owner = sign_up(&state, "owner");

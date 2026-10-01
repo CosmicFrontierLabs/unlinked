@@ -8,9 +8,9 @@
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
-use unlinked_model::edit::Edit;
+use unlinked_model::edit::{system_ids, touches, DisconnectPolicy, Edit, SystemRef};
 use unlinked_model::scope::ScopeConfig;
-use unlinked_model::{Block, BlockId, Chart, Model, Rect, System};
+use unlinked_model::{Block, BlockId, Chart, Line, Model, Rect, System};
 use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement, HtmlInputElement, KeyboardEvent, MouseEvent, WheelEvent};
@@ -159,6 +159,33 @@ fn closest(target: Option<web_sys::EventTarget>, selector: &str) -> Option<Eleme
         .flatten()
 }
 
+/// The edit deleting block `id`, or `None` if the user declines. A block
+/// with lines attached is only deleted, lines included, after confirming;
+/// otherwise the edit refuses to touch lines at all.
+fn confirm_delete(system: &SystemRef, id: BlockId, lines: &[Line]) -> Option<Edit> {
+    let attached = lines.iter().filter(|l| touches(l, &id)).count();
+    let disconnect = if attached == 0 {
+        DisconnectPolicy::Reject
+    } else {
+        let message = format!(
+            "Delete this block and the {attached} line{} connected to it?",
+            if attached == 1 { "" } else { "s" }
+        );
+        if !gloo_utils::window()
+            .confirm_with_message(&message)
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        DisconnectPolicy::Disconnect
+    };
+    Some(Edit::DeleteBlock {
+        system: system.clone(),
+        id,
+        disconnect,
+    })
+}
+
 fn block_group(target: Option<web_sys::EventTarget>) -> Option<Element> {
     closest(target, "g.block")
 }
@@ -280,6 +307,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
 
     let refs: Vec<&str> = path.iter().map(String::as_str).collect();
     let system = props.model.system_at(&refs);
+    // Edits address the shown system by block IDs, which survive renames.
+    let system_ref: SystemRef = system_ids(&props.model, &path).unwrap_or_default();
 
     let onmousedown = {
         let (drag, view, on_edit) = (drag.clone(), view.clone(), props.on_edit.clone());
@@ -368,7 +397,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
     let end_drag = {
-        let (drag, on_edit, path) = (drag.clone(), props.on_edit.clone(), path.clone());
+        let (drag, on_edit, system_ref) = (drag.clone(), props.on_edit.clone(), system_ref.clone());
         Callback::from(move |_: MouseEvent| {
             let mut d = drag.borrow_mut();
             let moved = match d.take() {
@@ -382,7 +411,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }) => {
                     if let (true, Some(on_edit)) = (moved && offset != (0.0, 0.0), &on_edit) {
                         on_edit.emit(Edit::MoveBlock {
-                            system: (*path).clone(),
+                            system: system_ref.clone(),
                             id: BlockId(id),
                             position: Rect::new(
                                 rect.left + offset.0,
@@ -412,18 +441,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
     let onkeydown = {
-        let (selected, on_edit, path) = (selected.clone(), props.on_edit.clone(), path.clone());
+        let (selected, on_edit, system_ref) =
+            (selected.clone(), props.on_edit.clone(), system_ref.clone());
+        let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
         Callback::from(move |e: KeyboardEvent| {
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
                 return;
             }
             if let (Some(on_edit), Some(sid)) = (&on_edit, (*selected).clone()) {
                 e.prevent_default();
-                on_edit.emit(Edit::DeleteBlock {
-                    system: (*path).clone(),
-                    id: BlockId(sid),
-                });
-                selected.set(None);
+                if let Some(edit) = confirm_delete(&system_ref, BlockId(sid), &lines) {
+                    on_edit.emit(edit);
+                    selected.set(None);
+                }
             }
         })
     };
@@ -560,7 +590,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 </div>
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
-                        system={(*path).clone()} on_edit={props.on_edit.clone()} on_open={Callback::from({
+                        system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
+                        on_edit={props.on_edit.clone()} on_open={Callback::from({
                         let path = path.clone();
                         let selected = selected.clone();
                         move |name: String| {
@@ -632,8 +663,10 @@ struct InspectorProps {
     block: Rc<Block>,
     /// Stateflow chart implementing the block.
     chart: Option<Rc<Chart>>,
-    /// Path of the system containing the block.
-    system: Vec<String>,
+    /// The system containing the block.
+    system: SystemRef,
+    /// Lines of that system, to tell whether deleting the block cuts any.
+    lines: Rc<Vec<Line>>,
     on_open: Callback<String>,
     on_edit: Option<Callback<Edit>>,
 }
@@ -704,12 +737,11 @@ fn inspector(props: &InspectorProps) -> Html {
         None => html! { <h3>{ b.name.replace('\n', " ") }</h3> },
     };
     let delete = props.on_edit.clone().map(|on_edit| {
-        let (system, id) = (props.system.clone(), b.id.clone());
+        let (system, id, lines) = (props.system.clone(), b.id.clone(), props.lines.clone());
         let onclick = Callback::from(move |_: MouseEvent| {
-            on_edit.emit(Edit::DeleteBlock {
-                system: system.clone(),
-                id: id.clone(),
-            })
+            if let Some(edit) = confirm_delete(&system, id.clone(), &lines) {
+                on_edit.emit(edit);
+            }
         });
         html! { <button class="danger" {onclick}>{ "Delete block" }</button> }
     });

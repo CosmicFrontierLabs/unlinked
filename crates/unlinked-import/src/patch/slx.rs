@@ -5,6 +5,7 @@
 //! other zip entry is copied raw.
 
 use super::dom::{self, Document, XElem, XNode};
+use super::Resolved;
 use crate::{ImportError, MAX_DEPTH, MAX_UNCOMPRESSED_BYTES};
 use std::io::{Cursor, Read, Write};
 use unlinked_model::edit::Edit;
@@ -284,7 +285,7 @@ fn apply_edit(parent: &mut XElem, edit: &Edit) -> Result<(), ImportError> {
     Ok(())
 }
 
-pub fn apply(bytes: &[u8], edits: &[Edit]) -> Result<Vec<u8>, ImportError> {
+pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportError> {
     let zip_err = |e: zip::result::ZipError| ImportError::Zip(e.to_string());
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(zip_err)?;
 
@@ -309,8 +310,8 @@ pub fn apply(bytes: &[u8], edits: &[Edit]) -> Result<Vec<u8>, ImportError> {
         parts.push((name, dom::parse(&buf)?, false));
     }
 
-    for edit in edits {
-        let at = locate(&parts, edit.system())?;
+    for Resolved { edit, system, .. } in edits {
+        let at = locate(&parts, system)?;
         let (_, doc, changed) = &mut parts[at.part];
         let root = doc
             .root_mut()
@@ -358,11 +359,17 @@ mod tests {
         s
     }
 
-    fn rename(system: &[&str], id: &str, name: &str) -> Edit {
-        Edit::RenameBlock {
+    /// Rename block `id` in the system at name path `system`. The SLX
+    /// patcher finds the block by SID, so its current name is not needed.
+    fn rename(system: &[&str], id: &str, name: &str) -> Resolved {
+        Resolved {
+            edit: Edit::RenameBlock {
+                system: vec![],
+                id: id.into(),
+                name: name.into(),
+            },
             system: system.iter().map(|s| s.to_string()).collect(),
-            id: id.into(),
-            name: name.into(),
+            block: String::new(),
         }
     }
 

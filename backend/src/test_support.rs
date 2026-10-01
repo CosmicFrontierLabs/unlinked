@@ -228,8 +228,23 @@ impl<'a> Client<'a> {
     }
 
     pub async fn upload(&self, project_id: Uuid, path: &str, bytes: Vec<u8>) -> TestResponse {
+        self.upload_from(project_id, path, bytes, None).await
+    }
+
+    /// Upload as a new version of `path` only if `base` is still its latest
+    /// version (when given).
+    pub async fn upload_from(
+        &self,
+        project_id: Uuid,
+        path: &str,
+        bytes: Vec<u8>,
+        base: Option<Uuid>,
+    ) -> TestResponse {
+        let base = base
+            .map(|b| format!("&base_version={b}"))
+            .unwrap_or_default();
         let uri = format!(
-            "/api/projects/{project_id}/files?path={}&message=test",
+            "/api/projects/{project_id}/files?path={}&message=test{base}",
             urlencode(path)
         );
         self.send(
