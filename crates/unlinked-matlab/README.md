@@ -193,3 +193,15 @@ function files directly; five files containing printing are asserted to reject.
 For numeric comparison only, test fixtures remove standalone printing statements
 from those five files and compare results to the unchanged originals in Octave.
 Production evaluation never strips statements.
+
+### Integer formatting subset
+
+`fprintf`/`sprintf` `%d` and `%i` require finite, integral doubles in
+`[-2^63, 2^63)`. Fractional values produce a diagnostic suggesting explicit
+`%g` or `%e`; they are never silently truncated. Nonfinite and out-of-range
+values also return errors instead of saturating the integer conversion.
+MATLAB can [override unsuitable formatting conversions](https://www.mathworks.com/help/matlab/ref/string.sprintf.html)
+with floating-point formatting; that automatic override is not implemented.
+Octave uses different fractional integer-format output, so this restricted
+subset deliberately does not claim parity for those cases. Full override
+semantics remain tracked in issue #25.

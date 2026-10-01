@@ -782,10 +782,19 @@ fn formatted(args: &[Value]) -> ArrayResult<String> {
                     's' => value.text()?,
                     'd' | 'i' => {
                         let n = value.number()?;
-                        if !n.is_finite() || n.abs() > i64::MAX as f64 {
+                        // i64::MAX rounds up to 2^63 as f64; the upper bound
+                        // must be exclusive to avoid Rust's saturating cast.
+                        if !n.is_finite()
+                            || !(-9223372036854775808.0..9223372036854775808.0).contains(&n)
+                        {
                             return Err("integer formatting outside supported range".into());
                         }
-                        format!("{}", n.trunc() as i64)
+                        if n.fract() != 0.0 {
+                            return Err(
+                                "noninteger %d/%i formatting is unsupported; use %g or %e".into()
+                            );
+                        }
+                        format!("{}", n as i64)
                     }
                     'f' | 'e' => {
                         decimal_format(value.number()?, precision.unwrap_or(6), spec == 'e')?

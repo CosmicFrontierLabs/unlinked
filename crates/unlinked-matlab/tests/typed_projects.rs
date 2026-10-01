@@ -170,6 +170,7 @@ fn typed_projects_match_interpreter_and_octave() {
     let projects = Projects::new();
     typed_first_multioutput_assignments(&projects);
     typed_vector_indexed_assignments(&projects);
+    typed_integer_format_validation(&projects);
     typed_library_exports_arrays_and_multiple_outputs_without_dynamic_environment(&projects);
     optional_typed_corpus(&projects);
     typed_codegen_edge_regressions(&projects);
@@ -708,6 +709,85 @@ fn typed_vector_indexed_assignments(projects: &Projects) {
         assert!(error.contains("shape mismatch"), "{error}");
         if let Some(result) = octave(&format!("try;{source}disp(0);catch;disp(1);end;")) {
             assert_eq!(result, vec![1.]);
+        }
+    }
+}
+
+fn typed_integer_format_validation(projects: &Projects) {
+    let sprintf = |format: &str, values: Vec<Value>| {
+        let mut args = vec![Value::string(format).unwrap()];
+        args.extend(values);
+        unlinked_matlab::array_runtime::builtin("sprintf", args, 1).map(|v| v[0].text().unwrap())
+    };
+    // The integer subset must neither truncate fractions nor saturate casts.
+    // MATLAB's automatic conversion override is deliberately not emulated;
+    // Octave uses different text for fractions, so it is not an oracle here.
+    for (i, (format, value, message)) in [
+        ("%d", "1.5", "noninteger %d/%i"),
+        ("%8.2i", "-1.5", "noninteger %d/%i"),
+        ("%d", "NaN", "outside supported range"),
+        ("%i", "Inf", "outside supported range"),
+        ("%d", "-Inf", "outside supported range"),
+        ("%d", "2^63", "outside supported range"),
+        ("%d", "-2^63-2048", "outside supported range"),
+        ("%d", "1e100", "outside supported range"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = sprintf(
+            format,
+            vec![eval_array_expr(value, &BTreeMap::new()).unwrap()],
+        )
+        .unwrap_err();
+        assert!(error.contains(message), "{error}");
+        let source = format!("fprintf('{format}',{value});");
+        let error = projects.run_failure(&format!("integer-format-bad-{i}"), &source);
+        assert!(error.contains(message), "{error}");
+    }
+    let source = "s=sprintf('<%d><%8i><%d><%d><%d>',12,-12,0,-2^63,2^63-1024);";
+    let expected = "<12><     -12><0><-9223372036854775808><9223372036854774784>";
+    let text = sprintf(
+        "<%d><%8i><%d><%d><%d>",
+        [12., -12., 0., -9223372036854775808., 9223372036854774784.]
+            .into_iter()
+            .map(Value::scalar)
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(text, expected);
+    let output = projects.run(
+        "integer-format-valid",
+        &format!("{source}fprintf('%s',s);"),
+        false,
+        None,
+    );
+    assert_eq!(output, expected);
+    // Compare ASCII codes to retain padding and exact integral boundary digits.
+    if let Some(reference) = octave(&format!("{source}fprintf('%d ',double(s));")) {
+        assert_eq!(
+            reference,
+            expected.bytes().map(f64::from).collect::<Vec<_>>()
+        );
+    }
+    // Explicit alternatives accept fractional values. %e currently uses Rust's
+    // exponent spelling, so compare numeric values rather than claim text parity.
+    for (i, (format, n)) in [("%g", 1.5), ("%.2e", -1.5)].into_iter().enumerate() {
+        let expression = format!("sprintf('{format}',{n})");
+        let text = sprintf(format, vec![Value::scalar(n)]).unwrap();
+        let output = projects.run(
+            &format!("fraction-format-{i}"),
+            &format!("s={expression};fprintf('%s',s);"),
+            false,
+            None,
+        );
+        assert_eq!(output, text);
+        assert_eq!(
+            output.parse::<f64>().unwrap(),
+            if i == 0 { 1.5 } else { -1.5 }
+        );
+        if let Some(reference) = octave(&format!("printf('%s',{expression});")) {
+            assert_eq!(reference, vec![output.parse::<f64>().unwrap()]);
         }
     }
 }
