@@ -88,22 +88,23 @@ pub fn flipped(orientation: Orientation, mirrored: bool) -> (Orientation, bool) 
 /// (between `points[segment]` and the next) across itself by `delta`.
 ///
 /// `points` is the wire as drawn: `fixed` leading points belong to its
-/// source or junction, and it ends at the destination port's anchor and
-/// outline point. Those stay put; an end of the segment that is fixed gains a
-/// connecting jog instead. Repeated and collinear vertices are dropped.
-/// `None` when the segment lies entirely within the fixed ends.
+/// source or junction, and `fixed_end` trailing ones to where it ends (a
+/// destination port's anchor and outline point, or a trunk's junction).
+/// Those stay put; an end of the segment that is fixed gains a connecting jog
+/// instead. Repeated and collinear vertices are dropped. `None` when the
+/// segment lies entirely within the fixed ends.
 pub fn drag_segment(
     points: &[Point],
     fixed: usize,
+    fixed_end: usize,
     segment: usize,
     delta: f64,
 ) -> Option<Vec<Point>> {
-    const FIXED_END: usize = 2;
     let n = points.len();
-    if fixed == 0 || n < fixed + FIXED_END || segment + 1 >= n {
+    if fixed == 0 || fixed_end == 0 || n < fixed + fixed_end || segment + 1 >= n {
         return None;
     }
-    if segment + 1 < fixed || segment >= n - FIXED_END {
+    if segment + 1 < fixed || segment + fixed_end > n - 1 {
         return None;
     }
     let (a, b) = (points[segment], points[segment + 1]);
@@ -121,7 +122,7 @@ pub fn drag_segment(
     }
     out.push(shift(a));
     out.push(shift(b));
-    if segment + 1 >= n - FIXED_END {
+    if segment + 1 >= n - fixed_end {
         out.push(b);
     }
     out.extend_from_slice(&points[segment + 2..]);
@@ -129,7 +130,7 @@ pub fn drag_segment(
     // judged against the last one kept and the one after it.
     let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
     let mut kept: Vec<Point> = out[..fixed].to_vec();
-    for i in fixed..out.len() - FIXED_END {
+    for i in fixed..out.len() - fixed_end {
         let (prev, here, next) = (kept[kept.len() - 1], out[i], out[i + 1]);
         let repeated = close(prev.x, here.x) && close(prev.y, here.y);
         let collinear = (close(prev.x, here.x) && close(here.x, next.x))
@@ -344,24 +345,31 @@ mod tests {
         ];
         // The vertical middle segment moves right by 10.
         assert_eq!(
-            drag_segment(&wire, 2, 2, 10.0),
+            drag_segment(&wire, 2, 2, 2, 10.0),
             Some(vec![p(80.0, 20.0), p(80.0, 60.0)])
         );
         // The first horizontal segment leaves the source anchor: the anchor
         // stays and a jog joins it to the moved segment.
         assert_eq!(
-            drag_segment(&wire, 2, 1, -10.0),
+            drag_segment(&wire, 2, 2, 1, -10.0),
             Some(vec![p(45.0, 10.0), p(70.0, 10.0), p(70.0, 60.0)])
         );
         // The last segment into the port ends above the anchor; the jog down
         // to the anchor is drawn by the router.
         assert_eq!(
-            drag_segment(&wire, 2, 3, 5.0),
+            drag_segment(&wire, 2, 2, 3, 5.0),
             Some(vec![p(70.0, 20.0), p(70.0, 65.0), p(95.0, 65.0)])
         );
         // Port stubs cannot be dragged.
-        assert_eq!(drag_segment(&wire, 2, 0, 5.0), None);
-        assert_eq!(drag_segment(&wire, 2, 4, 5.0), None);
+        assert_eq!(drag_segment(&wire, 2, 2, 0, 5.0), None);
+        assert_eq!(drag_segment(&wire, 2, 2, 4, 5.0), None);
+        // A trunk ends at its junction, the one fixed end point: dragging
+        // its last segment keeps the junction and adds a jog to it.
+        let trunk = [p(40.0, 20.0), p(45.0, 20.0), p(70.0, 20.0), p(70.0, 60.0)];
+        assert_eq!(
+            drag_segment(&trunk, 2, 1, 2, 10.0),
+            Some(vec![p(80.0, 20.0), p(80.0, 60.0)])
+        );
         // Dragging onto the source's line merges the collinear vertices,
         // leaving one corner above the port.
         let straight = [
@@ -373,7 +381,7 @@ mod tests {
             p(100.0, 30.0),
         ];
         assert_eq!(
-            drag_segment(&straight, 2, 3, -10.0),
+            drag_segment(&straight, 2, 2, 3, -10.0),
             Some(vec![p(95.0, 20.0)])
         );
     }
@@ -397,7 +405,7 @@ mod tests {
         wire.push(Point::new(last.x, last.y + 5.0));
         wire.push(Point::new(last.x, last.y + 10.0));
         let start = std::time::Instant::now();
-        let route = drag_segment(&wire, 2, n / 2, 5.0).unwrap();
+        let route = drag_segment(&wire, 2, 2, n / 2, 5.0).unwrap();
         assert!(route.len() > n / 2);
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }

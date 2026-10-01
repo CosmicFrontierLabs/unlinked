@@ -66,11 +66,12 @@ enum Drag {
     /// across itself, from diagram point `start`; see
     /// [`geometry::drag_segment`].
     Segment {
-        dst: Endpoint,
+        target: RouteTarget,
         points: Vec<Point>,
         fixed: usize,
         segment: usize,
         start: Point,
+        /// The new stored vertices once the drag has moved anything.
         route: Option<Vec<Point>>,
     },
     /// Dragging a new connection out of port `from`.
@@ -87,6 +88,25 @@ enum Drag {
     },
     /// Released; kept so the following click knows whether it was a drag.
     Ended { moved: bool },
+}
+
+/// A wire whose route is being dragged.
+enum RouteTarget {
+    /// The final leg into input `0`, ending at the port's anchor and outline.
+    Leaf(Endpoint),
+    /// The trunk of the branched line from output `0`, ending at the
+    /// junction, which stays where it is.
+    Trunk(Endpoint),
+}
+
+impl RouteTarget {
+    /// Trailing drawn points that are not free to move.
+    fn fixed_end(&self) -> usize {
+        match self {
+            RouteTarget::Leaf(_) => 2,
+            RouteTarget::Trunk(_) => 1,
+        }
+    }
 }
 
 /// `dataTransfer` type carrying a palette block's catalog key.
@@ -582,8 +602,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             // Pressing on a wire may start dragging its nearest segment; a
             // press without movement still selects the wire on click.
             let segment = on_edit.as_ref().and_then(|_| {
-                let hit = closest(e.target(), "polyline.wire-hit")?;
-                let dst = endpoint_of(&hit, "dst-")?;
+                let hit = closest(e.target(), "polyline.wire-hit, polyline.trunk-hit")?;
+                let target = match endpoint_of(&hit, "dst-") {
+                    Some(dst) => RouteTarget::Leaf(dst),
+                    None => RouteTarget::Trunk(endpoint_of(&hit, "src-")?),
+                };
                 let fixed: usize = hit.get_attribute("data-fixed")?.parse().ok()?;
                 let points = polyline_points(&hit);
                 let start = (*rendered)
@@ -592,7 +615,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .and_then(|svg| to_diagram(&e, &container, &view, svg))?;
                 let segment = nearest_segment(&points, fixed.saturating_sub(1), start)?;
                 Some(Drag::Segment {
-                    dst,
+                    target,
                     points,
                     fixed,
                     segment,
@@ -741,12 +764,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     }
                 }
                 Some(Drag::Segment {
+                    target,
                     points,
                     fixed,
                     segment,
                     start,
                     route,
-                    ..
                 }) => {
                     let Some(to) = (*rendered)
                         .as_ref()
@@ -762,14 +785,25 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         to.x - start.x
                     };
                     let delta = (across / SNAP).round() * SNAP;
+                    let end = target.fixed_end();
                     *route = (delta != 0.0)
-                        .then(|| geometry::drag_segment(points, *fixed, *segment, delta))
-                        .flatten();
-                    // Preview as drawn: fixed start, new vertices, port end.
+                        .then(|| geometry::drag_segment(points, *fixed, end, *segment, delta))
+                        .flatten()
+                        .map(|mut r| {
+                            // A trunk's stored vertices end at its junction.
+                            if let RouteTarget::Trunk(_) = target {
+                                r.extend(points.last());
+                            }
+                            r
+                        });
+                    // Preview as drawn: the fixed start, then the new
+                    // vertices, then a leaf's port end.
                     route_preview.set(route.as_ref().map(|r| {
                         let mut drawn = points[..*fixed].to_vec();
                         drawn.extend(r);
-                        drawn.extend(&points[points.len() - 2..]);
+                        if let RouteTarget::Leaf(_) = target {
+                            drawn.extend(&points[points.len() - end..]);
+                        }
                         drawn
                     }));
                 }
@@ -840,14 +874,22 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     true
                 }
                 Some(Drag::Pan { moved, .. }) => moved,
-                Some(Drag::Segment { dst, route, .. }) => {
+                Some(Drag::Segment { target, route, .. }) => {
                     route_preview.set(None);
                     let moved = route.is_some();
                     if let (Some(points), Some(on_edit)) = (route, &on_edit) {
-                        on_edit.emit(Edit::SetRoute {
-                            system: system_ref.clone(),
-                            dst,
-                            points,
+                        let system = system_ref.clone();
+                        on_edit.emit(match target {
+                            RouteTarget::Leaf(dst) => Edit::SetRoute {
+                                system,
+                                dst,
+                                points,
+                            },
+                            RouteTarget::Trunk(src) => Edit::SetTrunkRoute {
+                                system,
+                                src,
+                                points,
+                            },
                         });
                     }
                     moved

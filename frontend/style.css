@@ -624,11 +624,11 @@ a.compare {
     fill: rgba(122, 162, 247, 0.45);
 }
 
-.diagram.editing polyline.wire-hit {
+.diagram.editing :is(polyline.wire-hit, polyline.trunk-hit) {
     cursor: pointer;
 }
 
-.diagram.editing polyline.wire-hit:hover {
+.diagram.editing :is(polyline.wire-hit, polyline.trunk-hit):hover {
     stroke: rgba(122, 162, 247, 0.3);
 }
 

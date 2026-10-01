@@ -38,8 +38,11 @@ pub struct RenderOptions {
     /// Largest font used for icon text.
     pub max_icon_font: f64,
     /// Add invisible pointer targets for editing: `circle.port-hit` on every
-    /// signal port (`data-sid`, `data-kind`, `data-index`) and a wide
-    /// `polyline.wire-hit` over each wire ending at a port (`data-dst-*`).
+    /// signal port (`data-sid`, `data-kind`, `data-index`), a wide
+    /// `polyline.wire-hit` over each wire ending at a port (`data-dst-*`) and
+    /// a `polyline.trunk-hit` over each branched line's trunk (`data-src-*`).
+    /// Both wire kinds carry `data-fixed`, the leading points owned by their
+    /// source or junction.
     pub hit_targets: bool,
 }
 
@@ -587,13 +590,15 @@ fn draw_hit_targets(
         ],
     );
     for w in routed.iter().flat_map(|r| &r.wires) {
-        let Some(dst) = &w.dst else {
-            continue;
+        // A leaf names the port it drives; a branched line's trunk, its source.
+        let (class, data) = match (&w.dst, &w.src) {
+            (Some(dst), _) => ("wire-hit", endpoint_attrs("dst-", dst)),
+            (None, Some(src)) => ("trunk-hit", endpoint_attrs("src-", src)),
+            (None, None) => continue,
         };
         let pts: Vec<(f64, f64)> = w.points.iter().map(|p| (p.x, p.y)).collect();
-        let data = endpoint_attrs("dst-", dst);
         let mut attrs = vec![
-            ("class", "wire-hit".to_string()),
+            ("class", class.to_string()),
             ("points", points_attr(&pts)),
             ("data-fixed", w.fixed.to_string()),
         ];
