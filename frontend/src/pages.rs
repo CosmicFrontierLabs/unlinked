@@ -929,6 +929,13 @@ fn change_label(change: &BlockChange) -> (&'static str, String) {
             if m.subsystem_changed {
                 parts.push("contents added or removed".into());
             }
+            for (name, old, new) in &m.interface {
+                parts.push(format!(
+                    "bus port {name}: {} → {}",
+                    old.as_deref().unwrap_or("∅"),
+                    new.as_deref().unwrap_or("∅")
+                ));
+            }
             if m.appearance_changed {
                 parts.push("appearance changed".into());
             }

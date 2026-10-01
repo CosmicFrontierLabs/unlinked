@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 use unlinked_model::geometry::port_anchor;
 use unlinked_model::{
     Annotation, Block, BlockId, BlockStyle, Branch, Endpoint, Line, Mask, MaskParameter,
-    NamePlacement, Orientation, Point, PortCounts, PortKind, PortRef, Rect, SimConfig, System,
+    NamePlacement, Orientation, Point, PortCounts, PortInterface, PortKind, PortRef, Rect,
+    SimConfig, System,
 };
 
 /// Block properties that map onto dedicated IR fields rather than being
@@ -168,12 +169,11 @@ impl<'a> Converter<'a> {
                 parameters.insert(k.clone(), v.clone());
             }
         }
-        // Bus element ports keep `PortName`/`Element` in an interface list.
-        for list in node.children_named("List") {
-            for (k, v) in &list.props {
-                parameters.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-        }
+        // Bus element ports describe their interface in a list.
+        let interface = node
+            .children_named("List")
+            .find(|l| l.get("ListType") == Some("InterfaceData"))
+            .map(|l| PortInterface::from_properties(l.props.iter().cloned().collect()));
         if let Some(defaults) = self.defaults.get(&block_type) {
             for (k, v) in defaults {
                 if !CONSUMED_BLOCK_KEYS.contains(&k.as_str()) {
@@ -212,6 +212,7 @@ impl<'a> Converter<'a> {
             library_source: node.get("SourceBlock").map(str::to_string),
             subsystem,
             style,
+            interface,
         })
     }
 }

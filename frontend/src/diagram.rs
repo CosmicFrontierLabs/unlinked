@@ -758,6 +758,18 @@ fn inspector(props: &InspectorProps) -> Html {
             if let Some(src) = &b.library_source {
                 <div class="muted">{ format!("Library: {}", src.replace('\n', " ")) }</div>
             }
+            if let Some(i) = &b.interface {
+                <h4>{ "Bus element port" }</h4>
+                <table>
+                    <tr><td>{ "Port" }</td><td>{ i.port_number.map_or("?".to_string(), |n| n.to_string()) }</td></tr>
+                    if let Some(name) = &i.port_name {
+                        <tr><td>{ "Port name" }</td><td>{ name }</td></tr>
+                    }
+                    if let Some(element) = &i.element {
+                        <tr><td>{ "Element" }</td><td><code>{ element }</code></td></tr>
+                    }
+                </table>
+            }
             if let Some(mask) = &b.mask {
                 <h4>{ "Mask parameters" }</h4>
                 <table>

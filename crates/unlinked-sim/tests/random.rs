@@ -176,6 +176,7 @@ fn source_model(kind: &str, parameters: &[(&str, &str)]) -> unlinked_model::Mode
                 library_source: None,
                 subsystem: None,
                 style: BlockStyle::default(),
+                interface: None,
                 parameters: parameters
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))

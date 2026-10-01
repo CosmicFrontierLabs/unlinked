@@ -516,6 +516,7 @@ mod tests {
             library_source: None,
             subsystem: None,
             style: Default::default(),
+            interface: None,
         }
     }
 

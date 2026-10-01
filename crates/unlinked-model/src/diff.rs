@@ -34,6 +34,9 @@ pub struct Modification {
     pub library_changed: Option<(Option<String>, Option<String>)>,
     /// The block gained or lost its contained system.
     pub subsystem_changed: bool,
+    /// Bus element port interface properties (`PortNumber`, `Element`, ...).
+    #[serde(default)]
+    pub interface: Vec<Change>,
 }
 
 impl Modification {
@@ -51,6 +54,7 @@ impl Modification {
             && !self.ports_changed
             && self.library_changed.is_none()
             && !self.subsystem_changed
+            && self.interface.is_empty()
     }
 }
 
@@ -186,6 +190,15 @@ fn compare_block(old: &Block, new: &Block) -> Modification {
         library_changed: (old.library_source != new.library_source)
             .then(|| (old.library_source.clone(), new.library_source.clone())),
         subsystem_changed: old.subsystem.is_some() != new.subsystem.is_some(),
+        interface: {
+            let raw = |b: &Block| {
+                b.interface
+                    .as_ref()
+                    .map(|i| i.raw.clone())
+                    .unwrap_or_default()
+            };
+            map_diff(&raw(old), &raw(new), &[])
+        },
     }
 }
 
@@ -354,6 +367,7 @@ mod tests {
             library_source: None,
             subsystem: None,
             style: BlockStyle::default(),
+            interface: None,
         }
     }
 
@@ -453,6 +467,31 @@ mod tests {
         assert_eq!(d.blocks[0].system, vec!["Sub".to_string()]);
         assert!(d.touches(&["Sub".to_string()]));
         assert!(d.touches(&[]));
+    }
+
+    #[test]
+    fn bus_element_interface_changes_are_reported() {
+        let mut old = block("1", "In", 0.0);
+        old.block_type = "Inport".into();
+        let interface = |port: &str, element: &str| {
+            Some(PortInterface::from_properties(BTreeMap::from([
+                ("PortNumber".to_string(), port.to_string()),
+                ("Element".to_string(), element.to_string()),
+            ])))
+        };
+        old.interface = interface("1", "bus.a");
+        let mut new = old.clone();
+        new.interface = interface("2", "bus.b");
+        let m = compare_block(&old, &new);
+        assert_eq!(
+            m.interface,
+            vec![
+                ("Element".into(), Some("bus.a".into()), Some("bus.b".into())),
+                ("PortNumber".into(), Some("1".into()), Some("2".into())),
+            ]
+        );
+        assert!(!m.is_empty() && !m.layout_only());
+        assert!(compare_block(&old, &old).is_empty());
     }
 
     #[test]

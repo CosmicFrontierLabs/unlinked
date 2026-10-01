@@ -99,6 +99,45 @@ pub struct Block {
     pub library_source: Option<String>,
     pub subsystem: Option<Box<System>>,
     pub style: BlockStyle,
+    /// Bus element port interface (`InterfaceData`), for In/Out Bus
+    /// Element blocks. Several such blocks can share one port number.
+    #[serde(default)]
+    pub interface: Option<PortInterface>,
+}
+
+/// The interface of a bus element port, as the file records it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PortInterface {
+    /// Port of the parent subsystem this block belongs to.
+    pub port_number: Option<u32>,
+    pub port_name: Option<String>,
+    /// Bus element path within the port, e.g. `motorsensors.Iabc`.
+    pub element: Option<String>,
+    pub is_composite: Option<bool>,
+    pub is_client_server: Option<bool>,
+    /// Every property as written, including the ones above.
+    pub raw: BTreeMap<String, String>,
+}
+
+impl PortInterface {
+    /// Read the properties of an `InterfaceData` list. Unparsable values
+    /// stay `None` here and remain available in `raw`.
+    pub fn from_properties(raw: BTreeMap<String, String>) -> Self {
+        let text = |k: &str| raw.get(k).filter(|v| !v.is_empty()).cloned();
+        let flag = |k: &str| match raw.get(k).map(|v| v.trim()) {
+            Some("1" | "on" | "true") => Some(true),
+            Some("0" | "off" | "false") => Some(false),
+            _ => None,
+        };
+        PortInterface {
+            port_number: raw.get("PortNumber").and_then(|v| v.trim().parse().ok()),
+            port_name: text("PortName"),
+            element: text("Element"),
+            is_composite: flag("IsComposite"),
+            is_client_server: flag("IsClientServer"),
+            raw,
+        }
+    }
 }
 
 impl Block {
@@ -543,6 +582,7 @@ mod tests {
             library_source: None,
             subsystem: None,
             style: BlockStyle::default(),
+            interface: None,
         }
     }
 
