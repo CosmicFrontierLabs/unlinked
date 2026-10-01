@@ -379,6 +379,7 @@ mod tests {
             config: SimConfig::default(),
             root,
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: Vec::new(),
         }
     }

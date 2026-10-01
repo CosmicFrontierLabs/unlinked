@@ -374,6 +374,7 @@ mod tests {
                 ..Default::default()
             },
             workspace: Default::default(),
+            type_defaults: Default::default(),
             charts: vec![],
         }
     }

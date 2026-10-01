@@ -490,6 +490,7 @@ mod tests {
             },
             workspace: BTreeMap::new(),
             charts: Vec::new(),
+            type_defaults: Default::default(),
         }
     }
 

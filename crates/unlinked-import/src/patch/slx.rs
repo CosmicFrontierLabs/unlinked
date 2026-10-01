@@ -4,6 +4,9 @@
 //! within that system only. Only parts that change are rewritten; every
 //! other zip entry is copied raw.
 
+#[path = "slx_hierarchy.rs"]
+mod hierarchy;
+
 use super::dom::{self, Document, XElem, XNode};
 use super::{format_ports, parse_endpoint};
 use super::{Boundary, Resolved};
@@ -264,6 +267,13 @@ fn set_parameter(block: &mut XElem, name: &str, value: &str) {
 /// Apply an edit to the system element `parent`.
 fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError> {
     let edit = &resolved.edit;
+    if let Edit::CreateSubsystem { .. } = edit {
+        let plan = resolved
+            .hierarchy
+            .as_ref()
+            .ok_or_else(|| ImportError::Edit("missing hierarchy plan".into()))?;
+        return hierarchy::create(parent, resolved, plan);
+    }
     if let Edit::AddAnnotation {
         id, text, position, ..
     } = edit
@@ -321,7 +331,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         return Ok(());
     }
     let sid = match edit {
-        Edit::AddAnnotation { .. }
+        Edit::CreateSubsystem { .. }
+        | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
         | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
@@ -444,7 +455,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
                 _ => true,
             });
         }
-        Edit::AddAnnotation { .. }
+        Edit::CreateSubsystem { .. }
+        | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
         | Edit::DeleteAnnotation { .. }
@@ -739,17 +751,229 @@ fn connect(sys: &mut XElem, src: &Endpoint, dst: &Endpoint) {
     insert_child(line, at, branch, &indent);
 }
 
+/// Keep split packages split: a child system gets its own part and an OPC
+/// relationship owned by the parent system part (as in the corpus packages).
+fn split_created_system(
+    parts: &mut Vec<(String, Document, bool)>,
+    occupied: &mut std::collections::BTreeSet<String>,
+    at: &SystemAt,
+    id: &str,
+) -> Result<(), ImportError> {
+    let parent_name = parts[at.part].0.clone();
+    if !parent_name.starts_with("simulink/systems/") {
+        return Ok(());
+    }
+    const REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    const CT_NS: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
+    const REL_TYPE: &str = "http://schemas.mathworks.com/simulink/2010/relationships/system";
+    const REL_CONTENT: &str = "application/vnd.openxmlformats-package.relationships+xml";
+    let filename = parent_name.rsplit('/').next().unwrap();
+    let rel_name = format!("simulink/systems/_rels/{filename}.rels");
+    let rel_index = ensure_package_part(parts, occupied, &rel_name, "Relationships", REL_NS)?;
+    // Build reservation sets once, not once per collision candidate.
+    let mut ids = std::collections::BTreeSet::new();
+    let mut declared_parts = std::collections::BTreeSet::new();
+    for (part, doc, _) in parts.iter() {
+        if let Some(root) = doc.root() {
+            if part.ends_with(".rels") {
+                ids.extend(root.elements().filter_map(|e| e.attr("Id")));
+            } else if part == "[Content_Types].xml" {
+                declared_parts.extend(root.elements().filter_map(|e| e.attr("PartName")));
+            }
+        }
+    }
+    let mut suffix = 0usize;
+    let (reference, part_name) = loop {
+        let reference = if suffix == 0 {
+            format!("system_{id}")
+        } else {
+            format!("system_{id}_{suffix}")
+        };
+        let name = format!("simulink/systems/{reference}.xml");
+        if !occupied.contains(&name)
+            && !occupied.contains(&format!("simulink/systems/_rels/{reference}.xml.rels"))
+            && !ids.contains(&reference)
+            && !declared_parts.contains(&format!("/{name}"))
+            && !declared_parts.contains(&format!("/simulink/systems/_rels/{reference}.xml.rels"))
+        {
+            break (reference, name);
+        }
+        suffix += 1;
+    };
+    let sys = system_at(parts, at).ok_or_else(|| ImportError::Xml("missing system".into()))?;
+    let wrapper_index = only_child(sys, "created subsystem", |b| {
+        b.name == "Block" && b.attr("SID").as_deref() == Some(id)
+    })?;
+    let wrapper = element_mut(sys, wrapper_index);
+    let child_index = only_child(wrapper, "created child system", |e| e.name == "System")?;
+    let mut placeholder = XElem::new("System");
+    placeholder.set_attr("Ref", &reference);
+    placeholder.empty = true;
+    let child = std::mem::replace(
+        &mut wrapper.children[child_index],
+        XNode::Element(placeholder),
+    );
+    let mut doc = dom::parse("<?xml version=\"1.0\" encoding=\"UTF-8\"?><System/>")?;
+    let XNode::Element(child) = child else {
+        unreachable!()
+    };
+    // A native block can still carry opaque metadata with a relationship
+    // owned by its old part. Do not move such references into a new owner.
+    let relationship_ids: std::collections::BTreeSet<_> = parts[rel_index]
+        .1
+        .root()
+        .unwrap()
+        .elements()
+        .filter_map(|e| e.attr("Id"))
+        .collect();
+    let mut pending = vec![&child];
+    while let Some(e) = pending.pop() {
+        if e.name.contains(':')
+            || e.attrs.iter().any(|(key, value)| {
+                key.contains(':')
+                    || matches!(key.as_str(), "Ref" | "RelationshipId" | "r:id")
+                    || key.ends_with(":id")
+                    || relationship_ids.contains(&dom::unescape(value))
+            })
+            || (e.name == "P" && relationship_ids.contains(e.text().trim()))
+        {
+            return Err(ImportError::Edit(
+                "moving part-relative or namespace-dependent records into a split subsystem is unsupported"
+                    .into(),
+            ));
+        }
+        pending.extend(e.elements());
+    }
+    *doc.root_mut().unwrap() = child;
+    occupied.insert(part_name.clone());
+    parts.push((part_name.clone(), doc, true));
+    let rel = parts[rel_index].1.root_mut().unwrap();
+    let mut edge = XElem::new("Relationship");
+    edge.set_attr("Id", &reference);
+    edge.set_attr("Target", &format!("{reference}.xml"));
+    edge.set_attr("Type", REL_TYPE);
+    rel.children.push(XNode::Element(edge));
+    rel.empty = false;
+    parts[rel_index].2 = true;
+
+    let content_index =
+        ensure_package_part(parts, occupied, "[Content_Types].xml", "Types", CT_NS)?;
+    let types = parts[content_index].1.root_mut().unwrap();
+    let parent_part = format!("/{parent_name}");
+    let content_type = types
+        .elements()
+        .find(|e| e.name == "Override" && e.attr("PartName").as_deref() == Some(&parent_part))
+        .and_then(|e| e.attr("ContentType"))
+        .or_else(|| {
+            types
+                .elements()
+                .find(|e| e.name == "Default" && e.attr("Extension").as_deref() == Some("xml"))
+                .and_then(|e| e.attr("ContentType"))
+        })
+        .unwrap_or_else(|| "application/vnd.mathworks.simulink.mdl+xml".into());
+    if !types
+        .elements()
+        .any(|e| e.name == "Default" && e.attr("Extension").as_deref() == Some("xml"))
+    {
+        let mut default = XElem::new("Default");
+        default.set_attr("Extension", "xml");
+        default.set_attr("ContentType", "application/vnd.mathworks.simulink.mdl+xml");
+        types.children.push(XNode::Element(default));
+    }
+    let mut content = XElem::new("Override");
+    content.set_attr("PartName", &format!("/{part_name}"));
+    content.set_attr("ContentType", &content_type);
+    types.children.push(XNode::Element(content));
+    if !types
+        .elements()
+        .any(|e| e.name == "Default" && e.attr("Extension").as_deref() == Some("rels"))
+    {
+        let mut content = XElem::new("Default");
+        content.set_attr("Extension", "rels");
+        content.set_attr("ContentType", REL_CONTENT);
+        types.children.push(XNode::Element(content));
+    }
+    // OPC permits a nonstandard extension default when each relationship
+    // part has an explicit override. Preserve it and type our part explicitly.
+    let rel_part = format!("/{rel_name}");
+    let overrides: Vec<_> = types
+        .elements()
+        .filter(|e| e.name == "Override" && e.attr("PartName").as_deref() == Some(&rel_part))
+        .collect();
+    if overrides.len() > 1
+        || overrides
+            .first()
+            .is_some_and(|e| e.attr("ContentType").as_deref() != Some(REL_CONTENT))
+    {
+        return Err(ImportError::Edit(format!(
+            "conflicting relationship content type for {rel_name}"
+        )));
+    }
+    if overrides.is_empty()
+        && types
+            .elements()
+            .find(|e| e.name == "Default" && e.attr("Extension").as_deref() == Some("rels"))
+            .and_then(|e| e.attr("ContentType"))
+            .as_deref()
+            != Some(REL_CONTENT)
+    {
+        let mut content = XElem::new("Override");
+        content.set_attr("PartName", &rel_part);
+        content.set_attr("ContentType", REL_CONTENT);
+        types.children.push(XNode::Element(content));
+    }
+    types.empty = false;
+    parts[content_index].2 = true;
+    Ok(())
+}
+
+fn ensure_package_part(
+    parts: &mut Vec<(String, Document, bool)>,
+    occupied: &mut std::collections::BTreeSet<String>,
+    name: &str,
+    root: &str,
+    namespace: &str,
+) -> Result<usize, ImportError> {
+    if let Some(index) = parts.iter().position(|(n, ..)| n == name) {
+        let e = parts[index]
+            .1
+            .root()
+            .ok_or_else(|| ImportError::Xml("empty package metadata".into()))?;
+        if e.name != root || e.attr("xmlns").as_deref() != Some(namespace) {
+            return Err(ImportError::Edit(format!(
+                "unsupported package metadata {name}"
+            )));
+        }
+        return Ok(index);
+    }
+    let doc = dom::parse(&format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><{root} xmlns=\"{namespace}\"/>"
+    ))?;
+    occupied.insert(name.into());
+    parts.push((name.into(), doc, true));
+    Ok(parts.len() - 1)
+}
+
 pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportError> {
     let zip_err = |e: zip::result::ZipError| ImportError::Zip(e.to_string());
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(zip_err)?;
 
     // Parse every part that can hold blocks.
     let mut parts: Vec<(String, Document, bool)> = Vec::new();
+    let package_metadata = edits
+        .iter()
+        .any(|r| matches!(r.edit, Edit::CreateSubsystem { .. }));
     let mut read = 0u64;
+    let mut occupied = std::collections::BTreeSet::new();
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(zip_err)?;
         let name = file.name().to_string();
-        if !is_block_part(&name) {
+        occupied.insert(name.clone());
+        if !is_block_part(&name)
+            && !(package_metadata
+                && (name.starts_with("simulink/systems/_rels/") && name.ends_with(".rels")
+                    || name == "[Content_Types].xml"))
+        {
             continue;
         }
         let mut buf = String::new();
@@ -769,6 +993,9 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
         system_at(&mut parts, &at)
             .map(|sys| apply_edit(sys, resolved))
             .ok_or_else(|| ImportError::Xml("empty document".into()))??;
+        if let Edit::CreateSubsystem { id, .. } = &resolved.edit {
+            split_created_system(&mut parts, &mut occupied, &at, &id.0)?;
+        }
         if let Some(boundary) = &resolved.boundary {
             let at = locate(&parts, &boundary.system)?;
             system_at(&mut parts, &at)
@@ -776,20 +1003,24 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
                 .ok_or_else(|| ImportError::Xml("empty document".into()))??;
         }
         let allocated = match &resolved.edit {
-            Edit::AddAnnotation { id, .. } => Some(id.as_str()),
-            _ => resolved.added.as_ref().map(|block| block.id.0.as_str()),
+            Edit::CreateSubsystem { .. } => resolved
+                .hierarchy
+                .as_ref()
+                .map(|plan| plan.watermark.to_string()),
+            Edit::AddAnnotation { id, .. } => Some(id.clone()),
+            _ => resolved.added.as_ref().map(|block| block.id.0.clone()),
         };
         if let Some(sid) = allocated {
             let at = locate(&parts, &[])?;
             let root = system_at(&mut parts, &at)
                 .ok_or_else(|| ImportError::Xml("empty document".into()))?;
             match root.prop_mut(SID_WATERMARK) {
-                Some(watermark) => watermark.set_text(sid),
+                Some(watermark) => watermark.set_text(&sid),
                 // With the system's other properties, ahead of its blocks.
                 None => {
                     let mut p = XElem::new("P");
                     p.set_attr("Name", SID_WATERMARK);
-                    p.set_text(sid);
+                    p.set_text(&sid);
                     let (at, indent) = (after_last(root, &["P"]), indent_in(root));
                     insert_child(root, at, p, &indent);
                 }
@@ -811,6 +1042,18 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
             None => out
                 .raw_copy_file(archive.by_index_raw(i).map_err(zip_err)?)
                 .map_err(zip_err)?,
+        }
+    }
+    let existing: std::collections::BTreeSet<_> = archive.file_names().map(str::to_owned).collect();
+    for (name, doc, _) in &parts {
+        if !existing.contains(name) {
+            out.start_file(
+                name,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            )
+            .map_err(zip_err)?;
+            out.write_all(doc.to_xml().as_bytes())
+                .map_err(|e| ImportError::Zip(e.to_string()))?;
         }
     }
     Ok(out.finish().map_err(zip_err)?.into_inner())
@@ -872,6 +1115,8 @@ mod tests {
             names: Default::default(),
             added: None,
             route: None,
+            hierarchy: None,
+            source_line_count: 0,
             ports: None,
             renumbered: Vec::new(),
             boundary: None,
@@ -937,6 +1182,8 @@ mod tests {
             names: Default::default(),
             added: None,
             route: None,
+            hierarchy: None,
+            source_line_count: 0,
             ports: None,
             renumbered: Vec::new(),
             boundary: None,

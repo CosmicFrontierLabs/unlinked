@@ -88,6 +88,7 @@ fn model() -> Model {
             lines: vec![line("source", 1, "f", 1)],
             ..System::default()
         },
+        type_defaults: Default::default(),
         charts: vec![Chart {
             id: "chart".into(),
             name: "f//escaped".into(),

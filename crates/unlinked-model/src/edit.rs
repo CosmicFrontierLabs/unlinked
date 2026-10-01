@@ -136,6 +136,13 @@ pub enum Edit {
         system: SystemRef,
         target: AnnotationTarget,
     },
+    /// Move native leaf blocks into a plain virtual subsystem.
+    CreateSubsystem {
+        system: SystemRef,
+        ids: Vec<BlockId>,
+        id: BlockId,
+        name: String,
+    },
 }
 
 /// An edit that could not be applied, and its position in the batch.
@@ -348,7 +355,8 @@ impl Edit {
             | Edit::AddAnnotation { system, .. }
             | Edit::MoveAnnotation { system, .. }
             | Edit::SetAnnotationText { system, .. }
-            | Edit::DeleteAnnotation { system, .. } => system,
+            | Edit::DeleteAnnotation { system, .. }
+            | Edit::CreateSubsystem { system, .. } => system,
         }
     }
 
@@ -369,7 +377,8 @@ impl Edit {
             | Edit::AddAnnotation { .. }
             | Edit::MoveAnnotation { .. }
             | Edit::SetAnnotationText { .. }
-            | Edit::DeleteAnnotation { .. } => None,
+            | Edit::DeleteAnnotation { .. }
+            | Edit::CreateSubsystem { .. } => None,
         }
     }
 
@@ -386,6 +395,7 @@ impl Edit {
             Edit::MoveAnnotation { position, .. } => check_annotation_rect(position)?,
             Edit::SetAnnotationText { text, .. } => check_annotation_text(text)?,
             Edit::DeleteAnnotation { .. } => {}
+            Edit::CreateSubsystem { name, .. } => check_name(name)?,
             Edit::MoveBlock { position, .. } => check_rect(position)?,
             Edit::SetSignalName { name, .. } => {
                 if name.len() > 4096
@@ -426,6 +436,15 @@ impl Edit {
 
     pub fn apply(&self, model: &mut Model) -> Result<(), EditError> {
         self.validate()?;
+        if let Edit::CreateSubsystem {
+            system,
+            ids,
+            id,
+            name,
+        } = self
+        {
+            return crate::hierarchy::apply_create(model, system, ids, id, name);
+        }
         // Worked out before the edit: it needs the port numbering as it was.
         let remap = crate::boundary::boundary_remap(model, self)?;
         let charts = std::mem::take(&mut model.charts);
@@ -440,6 +459,7 @@ impl Edit {
 
     fn apply_to_diagram(&self, model: &mut Model, charts: &[Chart]) -> Result<(), EditError> {
         let id = match self {
+            Edit::CreateSubsystem { .. } => unreachable!("handled before chart extraction"),
             Edit::AddAnnotation {
                 system,
                 id,
@@ -647,7 +667,8 @@ impl Edit {
             | Edit::AddAnnotation { .. }
             | Edit::MoveAnnotation { .. }
             | Edit::SetAnnotationText { .. }
-            | Edit::DeleteAnnotation { .. } => {
+            | Edit::DeleteAnnotation { .. }
+            | Edit::CreateSubsystem { .. } => {
                 unreachable!("applied above")
             }
         }
@@ -971,6 +992,7 @@ mod tests {
                 ..Default::default()
             },
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: Vec::new(),
         }
     }
@@ -1422,6 +1444,7 @@ mod annotation_tests {
             config: SimConfig::default(),
             root: System::default(),
             workspace: BTreeMap::new(),
+            type_defaults: Default::default(),
             charts: vec![],
         }
     }

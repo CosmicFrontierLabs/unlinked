@@ -161,6 +161,7 @@ fn source_model(kind: &str, parameters: &[(&str, &str)]) -> unlinked_model::Mode
         source: SourceFormat::Mdl,
         simulink_version: None,
         config: SimConfig::default(),
+        type_defaults: Default::default(),
         charts: vec![],
         workspace: Default::default(),
         root: System {

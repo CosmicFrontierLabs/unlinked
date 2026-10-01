@@ -20,6 +20,8 @@ use unlinked_model::{Block, BlockId, PortCounts, PortKind};
 struct Resolved {
     edit: Edit,
     route: Option<RouteUpdate>,
+    hierarchy: Option<unlinked_model::hierarchy::CreatePlan>,
+    source_line_count: usize,
     /// Subsystem block names from the root.
     system: Vec<String>,
     /// Names of the system's blocks before the edit.
@@ -106,6 +108,19 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
                 Ok::<_, ImportError>((outer, name))
             })
             .transpose()?;
+        let source_line_count = sys.lines.len();
+        let hierarchy = match edit {
+            Edit::CreateSubsystem {
+                system,
+                ids,
+                id,
+                name,
+            } => Some(
+                unlinked_model::hierarchy::plan_create(&model, system, ids, id, name)
+                    .map_err(|e| failed(e.to_string()))?,
+            ),
+            _ => None,
+        };
         edit.apply(&mut model).map_err(|e| failed(e.to_string()))?;
         let sys = system_names(&model, edit.system())
             .and_then(|names| {
@@ -158,6 +173,8 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
         resolved.push(Resolved {
             edit: edit.clone(),
             route,
+            hierarchy,
+            source_line_count,
             system,
             names,
             added,

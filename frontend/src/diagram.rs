@@ -2139,6 +2139,7 @@ mod tests {
             config: SimConfig::default(),
             root: System::default(),
             workspace: Default::default(),
+            type_defaults: Default::default(),
             charts: vec![Chart {
                 id: "9".into(),
                 name: "Sub".into(),

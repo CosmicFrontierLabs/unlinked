@@ -43,6 +43,21 @@ const PORT_COUNT_ATTRS: [&str; 9] = [
 /// every block for keys the block does not set itself.
 pub type TypeDefaults = HashMap<String, Vec<(String, String)>>;
 
+pub fn model_defaults(defaults: &TypeDefaults) -> BTreeMap<String, BTreeMap<String, String>> {
+    defaults
+        .iter()
+        .map(|(ty, entries)| {
+            let mut parameters = BTreeMap::new();
+            for (k, v) in entries {
+                if !CONSUMED_BLOCK_KEYS.contains(&k.as_str()) {
+                    parameters.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            (ty.clone(), parameters)
+        })
+        .collect()
+}
+
 pub fn read_type_defaults(node: &Node, out: &mut TypeDefaults) {
     if let Some(defaults) = node.find(&|n| n.tag == "BlockParameterDefaults") {
         for block in defaults.children_named("Block") {
