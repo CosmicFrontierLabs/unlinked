@@ -279,7 +279,9 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         Edit::Disconnect { dst, .. } => {
             let hit = |v: &str| is_endpoint(v, dst, PortKind::In);
             parent.children.retain_mut(|c| match c {
-                XNode::Element(l) if l.name == "Line" && reaches(l, &hit) => prune(l, &hit, true),
+                XNode::Element(l) if l.name == "Line" && reaches(l, &hit, true) => {
+                    prune(l, &hit, true)
+                }
                 _ => true,
             });
             return Ok(());
@@ -355,10 +357,14 @@ fn is_endpoint(v: &str, ep: &Endpoint, default_kind: PortKind) -> bool {
     parse_endpoint(v, default_kind).is_some_and(|(sid, port)| sid == ep.block.0 && port == ep.port)
 }
 
-/// Whether `e` or a branch below it has a destination `hit` matches.
-fn reaches(e: &XElem, hit: &dyn Fn(&str) -> bool) -> bool {
-    e.prop("Dst").is_some_and(|v| hit(&v))
-        || e.elements().any(|b| b.name == "Branch" && reaches(b, hit))
+/// Whether the line or branch `e`, or a branch below it, has a destination
+/// `hit` matches. Physical-connection branches store their port as `Src`.
+fn reaches(e: &XElem, hit: &dyn Fn(&str) -> bool, is_line: bool) -> bool {
+    let dst = |key| e.prop(key).is_some_and(|v| hit(&v));
+    dst("Dst")
+        || (!is_line && dst("Src"))
+        || e.elements()
+            .any(|b| b.name == "Branch" && reaches(b, hit, false))
 }
 
 /// The whitespace preceding `e`'s first child element: the newline and
@@ -554,12 +560,17 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
             .ok_or_else(|| ImportError::Xml("empty document".into()))??;
         if let Some(block) = &resolved.added {
             let at = locate(&parts, &[])?;
-            let root = descend(part_root(&parts, at.part)?, &at.path);
-            if root.prop(SID_WATERMARK).is_some() {
-                if let Some(watermark) =
-                    system_at(&mut parts, &at).and_then(|s| s.prop_mut(SID_WATERMARK))
-                {
-                    watermark.set_text(&block.id.0);
+            let root = system_at(&mut parts, &at)
+                .ok_or_else(|| ImportError::Xml("empty document".into()))?;
+            match root.prop_mut(SID_WATERMARK) {
+                Some(watermark) => watermark.set_text(&block.id.0),
+                // With the system's other properties, ahead of its blocks.
+                None => {
+                    let mut p = XElem::new("P");
+                    p.set_attr("Name", SID_WATERMARK);
+                    p.set_text(&block.id.0);
+                    let (at, indent) = (after_last(root, &["P"]), indent_in(root));
+                    insert_child(root, at, p, &indent);
                 }
             }
         }

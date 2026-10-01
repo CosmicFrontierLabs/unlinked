@@ -9,7 +9,7 @@
 //! renamed, including earlier in the same batch.
 
 use crate::catalog::{self, PortResolution};
-use crate::validation::{validate_structure, Severity};
+use crate::validation::{validate_structure, DiagnosticTarget, Severity};
 use crate::{
     Block, BlockId, BlockStyle, Branch, Chart, Endpoint, Line, Model, Orientation, PortCounts,
     PortKind, Rect, System,
@@ -114,28 +114,34 @@ pub fn apply_batch(model: &mut Model, edits: &[Edit]) -> Result<(), BatchError> 
 /// `before`. Errors already present in an imported model do not block
 /// unrelated edits.
 pub fn structural_regression(before: &Model, after: &Model) -> Result<(), EditError> {
-    let count = |model: &Model| {
+    // Errors are identified by code and target. Line roots are renumbered
+    // by unrelated line edits, so lines are identified by their endpoint.
+    let errors = |model: &Model| {
         let report = validate_structure(model);
-        let mut errors: BTreeMap<String, (usize, String)> = BTreeMap::new();
-        for d in report.diagnostics {
-            if d.severity == Severity::Error {
-                let entry = errors.entry(d.code).or_insert((0, d.message));
-                entry.0 += 1;
-            }
+        if report.truncated {
+            return Err(EditError::Structure(
+                "the model is too large or has too many problems to check edits".into(),
+            ));
         }
-        (report.truncated, errors)
+        let mut errors: BTreeMap<(String, String), (usize, String)> = BTreeMap::new();
+        for d in report.diagnostics {
+            if d.severity != Severity::Error {
+                continue;
+            }
+            let target = match d.target {
+                DiagnosticTarget::Line {
+                    system, endpoint, ..
+                } => format!("line {system:?} {endpoint:?}"),
+                other => format!("{other:?}"),
+            };
+            errors.entry((d.code, target)).or_insert((0, d.message)).0 += 1;
+        }
+        Ok(errors)
     };
-    let (truncated_before, before) = count(before);
-    if truncated_before {
-        return Ok(());
-    }
-    let (truncated_after, after) = count(after);
-    if truncated_after {
-        return Err(EditError::Structure("too many structural errors".into()));
-    }
-    for (code, (n, message)) in after {
-        if before.get(&code).map_or(0, |b| b.0) < n {
-            return Err(EditError::Structure(format!("{code}: {message}")));
+    let before = errors(before)?;
+    for (key, (n, message)) in errors(after)? {
+        if before.get(&key).map_or(0, |b| b.0) < n {
+            return Err(EditError::Structure(format!("{}: {message}", key.0)));
         }
     }
     Ok(())
@@ -524,15 +530,6 @@ fn native_descriptor(block: &Block) -> Option<&'static catalog::BlockDescriptor>
     catalog::find(&block.block_type).filter(|_| native)
 }
 
-/// Port counts as validation sees them: catalog-resolved for native blocks,
-/// otherwise declared.
-fn effective_ports(block: &Block) -> PortCounts {
-    match native_descriptor(block).map(|d| d.resolve_ports(&block.parameters)) {
-        Some(PortResolution::Known(ports)) => ports,
-        _ => block.ports,
-    }
-}
-
 fn add_block(
     model: &mut Model,
     system: &[BlockId],
@@ -584,9 +581,12 @@ fn add_block(
         style: BlockStyle::default(),
         interface: None,
     });
-    if let Some(watermark) = model.root.properties.get_mut(SID_WATERMARK) {
-        *watermark = sid.to_string();
-    }
+    // Recorded even where the file had none, so deleting the block cannot
+    // free its SID for reuse.
+    model
+        .root
+        .properties
+        .insert(SID_WATERMARK.into(), sid.to_string());
     Ok(())
 }
 
@@ -607,10 +607,21 @@ fn check_port(sys: &System, ep: &Endpoint, source: bool) -> Result<(), EditError
                 | PortKind::Reset
         )
     };
-    if !direction
-        || ep.port.index == 0
-        || ep.port.index > effective_ports(block).count(ep.port.kind)
-    {
+    // A native block whose count depends on an expression may have stale
+    // declared ports; rewiring waits until the count is a literal.
+    let ports = match native_descriptor(block).map(|d| d.resolve_ports(&block.parameters)) {
+        Some(PortResolution::Known(ports)) => ports,
+        Some(
+            PortResolution::Unresolved { parameter } | PortResolution::Invalid { parameter, .. },
+        ) => {
+            return Err(EditError::Invalid(format!(
+                "the ports of {:?} depend on {parameter}, which must be a literal to connect",
+                block.name
+            )))
+        }
+        None => block.ports,
+    };
+    if !direction || ep.port.index == 0 || ep.port.index > ports.count(ep.port.kind) {
         return Err(EditError::NoPort(ep.clone()));
     }
     Ok(())

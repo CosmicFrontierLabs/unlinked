@@ -436,9 +436,7 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
             let root = file
                 .system_mut(&[])
                 .ok_or_else(|| ImportError::Mdl("no root system".into()))?;
-            if root.prop(SID_WATERMARK).is_some() {
-                root.set_prop(SID_WATERMARK, &block.id.0, false);
-            }
+            root.set_prop(SID_WATERMARK, &block.id.0, false);
             return Ok(());
         }
         Edit::Connect { src, dst, .. } => {
@@ -449,9 +447,14 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         }
         Edit::Disconnect { dst, .. } => {
             let dst = Port::new(sys, resolved.name(&dst.block)?, dst.port, PortKind::In);
-            let hit = |s: &Section, _: bool| dst.is_at(s, DST_FORMS);
+            // Physical-connection branches store their port as `Src`.
+            let hit = |s: &Section, is_line: bool| {
+                dst.is_at(s, DST_FORMS) || (!is_line && dst.is_at(s, SRC_FORMS))
+            };
             sys.items.retain_mut(|item| match item {
-                Item::Section(l) if l.tag == "Line" && reaches(l, &hit) => prune(l, &hit, true),
+                Item::Section(l) if l.tag == "Line" && reaches(l, &hit, true) => {
+                    prune(l, &hit, true)
+                }
                 _ => true,
             });
             return Ok(());
@@ -687,9 +690,11 @@ fn connect(sys: &mut Section, src: &Port, dst: &Port) {
     line.items.push(Item::Section(new));
 }
 
-/// Whether `hit` matches `s` or any branch below it.
-fn reaches(s: &Section, hit: &dyn Fn(&Section, bool) -> bool) -> bool {
-    hit(s, false) || s.sections().any(|b| b.tag == "Branch" && reaches(b, hit))
+/// Whether `hit` matches the line or branch `s` or any branch below it.
+fn reaches(s: &Section, hit: &dyn Fn(&Section, bool) -> bool, is_line: bool) -> bool {
+    hit(s, is_line)
+        || s.sections()
+            .any(|b| b.tag == "Branch" && reaches(b, hit, false))
 }
 
 pub(super) fn apply(text: &str, edits: &[Resolved]) -> Result<String, ImportError> {
