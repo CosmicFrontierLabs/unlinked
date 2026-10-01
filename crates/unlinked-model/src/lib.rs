@@ -14,6 +14,7 @@ pub mod diff;
 pub mod duplicate;
 pub mod edit;
 pub mod geometry;
+pub mod hierarchy;
 pub mod route_edit;
 pub mod scope;
 pub mod stateflow;
