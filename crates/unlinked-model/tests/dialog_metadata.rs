@@ -144,3 +144,76 @@ fn friendly_labels_never_change_serialized_parameter_values() {
     let metadata = serde_json::to_value(field).unwrap();
     assert_eq!(metadata["dialog"]["section"], "Operation");
 }
+
+#[test]
+fn grouped_dialog_orders_controllers_and_keeps_hidden_fields() {
+    for block in BLOCKS {
+        let groups = block.dialog_sections(&BTreeMap::new());
+        let fields: Vec<_> = groups.iter().flat_map(|s| &s.fields).collect();
+        assert_eq!(fields.len(), block.parameters.len());
+        for (index, (field, visible)) in fields.iter().enumerate() {
+            assert_eq!(*visible, field.visible(block, &BTreeMap::new()));
+            let controller = match field.dialog.visible_when {
+                Visibility::Always => continue,
+                Visibility::Equals { parameter, .. } | Visibility::NotEquals { parameter, .. } => {
+                    parameter
+                }
+            };
+            let controlling_index = fields
+                .iter()
+                .position(|(p, _)| p.name == controller)
+                .unwrap();
+            assert!(
+                controlling_index < index,
+                "{} {}",
+                block.type_key,
+                field.name
+            );
+        }
+    }
+    let switch = find("Switch").unwrap();
+    let groups = switch.dialog_sections(&switch.creation_parameters());
+    assert!(groups
+        .iter()
+        .flat_map(|s| &s.fields)
+        .any(|(p, visible)| p.name == "Threshold" && !visible));
+    let field = parameter(find("Gain").unwrap(), "Multiplication");
+    assert_eq!(field.label_for("Matrix(K*u)"), "Matrix: K * u");
+    assert_eq!(field.label_for(" future mode "), " future mode ");
+}
+
+#[test]
+fn mode_dependent_bounds_and_sample_settings_are_available() {
+    let integrator = find("Integrator").unwrap();
+    for (name, default, controller) in [
+        ("UpperSaturationLimit", "inf", "LimitOutput"),
+        ("LowerSaturationLimit", "-inf", "LimitOutput"),
+        ("WrappedStateUpperValue", "pi", "WrapState"),
+        ("WrappedStateLowerValue", "-pi", "WrapState"),
+    ] {
+        let p = parameter(integrator, name);
+        assert_eq!(p.implicit_default, Some(default));
+        assert!(!p.visible(integrator, &BTreeMap::new()));
+        assert!(p.visible(
+            integrator,
+            &BTreeMap::from([(controller.into(), "on".into())])
+        ));
+    }
+    let sine = find("Sin").unwrap();
+    let sample = BTreeMap::from([
+        ("SineType".into(), "Sample based".into()),
+        ("TimeSource".into(), "Use external signal".into()),
+    ]);
+    assert!(!parameter(sine, "TimeSource").visible(sine, &sample));
+    for (name, default) in [("Samples", "10"), ("Offset", "0")] {
+        let p = parameter(sine, name);
+        assert_eq!(p.implicit_default, Some(default));
+        assert!(p.visible(sine, &sample));
+        assert!(!p.visible(sine, &BTreeMap::new()));
+    }
+    let unlinked_model::catalog::PortResolution::Known(ports) = sine.resolve_ports(&sample) else {
+        panic!("known sample arity")
+    };
+    assert_eq!(ports.inputs, 0);
+    assert!(parameter(sine, "SineType").affects_ports);
+}
