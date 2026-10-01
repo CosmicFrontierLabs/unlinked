@@ -7,7 +7,14 @@
 //! [Demux](https://www.mathworks.com/help/simulink/slref/demux.html) references.
 //! New Sum blocks use rectangular icons; ZOH deliberately starts with an explicit
 //! one-second sample period. UnitDelay retains inherited sampling; multirate
-//! simulation may require the user to choose an explicit period.
+//! simulation may require the user to choose an explicit period. New Switch
+//! blocks use nonzero-control selection with zero-crossing detection disabled,
+//! which is supported by the simulator; threshold modes remain editable.
+//! Sine/trigonometry arity follows the MathWorks
+//! [Sine Wave](https://www.mathworks.com/help/simulink/slref/sinewave.html) and
+//! [Trigonometric Function](https://www.mathworks.com/help/simulink/slref/trigonometricfunction.html)
+//! references. Creation-profile simulation tests live in unlinked-sim/tests/catalog.rs;
+//! these do not imply support for every legal setting of a block.
 //! This module never evaluates MATLAB, runs callbacks, or certifies simulation
 //! support. Unknown imported types and parameters must remain preservable.
 use crate::{Block, PortCounts, System};
@@ -39,6 +46,9 @@ pub struct ParameterDescriptor {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub enum PortRule {
+    SineWave,
+    Trigonometry,
+    Display,
     Integrator,
     Scope,
     Fixed {
@@ -261,6 +271,27 @@ impl PortRule {
     fn resolve(self, parameters: &BTreeMap<String, String>) -> PortResolution {
         let value = |key: &str| parameters.get(key).map(String::as_str).map(str::trim);
         let (parameter, input, widths, signs, other) = match self {
+            Self::SineWave => {
+                return known(
+                    u32::from(value("TimeSource") == Some("Use external signal")),
+                    1,
+                )
+            }
+            Self::Trigonometry => {
+                return known(
+                    if value("Operator") == Some("atan2") {
+                        2
+                    } else {
+                        1
+                    },
+                    if value("Operator") == Some("sincos") {
+                        2
+                    } else {
+                        1
+                    },
+                )
+            }
+            Self::Display => return known(u32::from(value("Floating") != Some("on")), 0),
             Self::Integrator => {
                 for parameter in [
                     "ExternalReset",
@@ -677,7 +708,203 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         },
         [5.0, 38.0],
     ),
+    block(
+        "Step",
+        "Step",
+        "Sources",
+        &[
+            param("Time", "Step time", Expr, "1", false),
+            param("Before", "Initial value", Expr, "0", false),
+            param("After", "Final value", Expr, "1", false),
+            param("SampleTime", "Sample time", Expr, "0", false),
+        ],
+        SOURCE,
+        [30.0, 30.0],
+    ),
+    block(
+        "Sin",
+        "Sine Wave",
+        "Sources",
+        &[
+            param(
+                "SineType",
+                "Sine type",
+                Enum(&["Time based", "Sample based"]),
+                "Time based",
+                false,
+            ),
+            param(
+                "TimeSource",
+                "Time source",
+                Enum(&["Use simulation time", "Use external signal"]),
+                "Use simulation time",
+                true,
+            ),
+            param("Amplitude", "Amplitude", Expr, "1", false),
+            param("Bias", "Bias", Expr, "0", false),
+            param("Frequency", "Frequency (rad/s)", Expr, "1", false),
+            param("Phase", "Phase (rad)", Expr, "0", false),
+            param("SampleTime", "Sample time", Expr, "0", false),
+        ],
+        PortRule::SineWave,
+        [30.0, 30.0],
+    ),
+    block("Clock", "Clock", "Sources", &[], SOURCE, [30.0, 30.0]),
+    block("Ground", "Ground", "Sources", &[], SOURCE, [30.0, 20.0]),
+    block(
+        "RandomNumber",
+        "Random Number",
+        "Sources",
+        &[
+            param("Mean", "Mean", Expr, "0", false),
+            param("Variance", "Variance", Expr, "1", false),
+            param("Seed", "Seed", Expr, "0", false),
+            param("SampleTime", "Sample time", Expr, "0.1", false),
+        ],
+        SOURCE,
+        [40.0, 30.0],
+    ),
+    block(
+        "Saturate",
+        "Saturation",
+        "Discontinuities",
+        &[
+            param("UpperLimit", "Upper limit", Expr, "0.5", false),
+            param("LowerLimit", "Lower limit", Expr, "-0.5", false),
+        ],
+        ONE,
+        [30.0, 30.0],
+    ),
+    block(
+        "TransferFcn",
+        "Transfer Function",
+        "Continuous",
+        &[
+            param("Numerator", "Numerator coefficients", Expr, "[1]", false),
+            param(
+                "Denominator",
+                "Denominator coefficients",
+                Expr,
+                "[1 1]",
+                false,
+            ),
+        ],
+        ONE,
+        [80.0, 40.0],
+    ),
+    block(
+        "StateSpace",
+        "State-Space",
+        "Continuous",
+        &[
+            param("A", "State matrix A", Expr, "1", false),
+            param("B", "Input matrix B", Expr, "1", false),
+            param("C", "Output matrix C", Expr, "1", false),
+            param("D", "Feedthrough matrix D", Expr, "1", false),
+            param("InitialCondition", "Initial conditions", Expr, "0", false),
+            param(
+                "AllowTunableDMatrix",
+                "Allow tunable D matrix",
+                Boolean,
+                "off",
+                false,
+            ),
+        ],
+        ONE,
+        [80.0, 50.0],
+    ),
+    block(
+        "Switch",
+        "Switch",
+        "Routing",
+        &[
+            ParameterDescriptor {
+                implicit_default: Some("u2 >= Threshold"),
+                ..param(
+                    "Criteria",
+                    "Switch criteria",
+                    Enum(&["u2 >= Threshold", "u2 > Threshold", "u2 ~= 0"]),
+                    "u2 ~= 0",
+                    false,
+                )
+            },
+            param("Threshold", "Threshold", Expr, "0", false),
+            ParameterDescriptor {
+                implicit_default: Some("on"),
+                ..param(
+                    "ZeroCross",
+                    "Zero-crossing detection",
+                    Boolean,
+                    "off",
+                    false,
+                )
+            },
+        ],
+        PortRule::Fixed {
+            inputs: 3,
+            outputs: 1,
+        },
+        [30.0, 50.0],
+    ),
+    block("Abs", "Absolute Value", "Math", &[], ONE, [30.0, 30.0]),
+    block(
+        "Trigonometry",
+        "Trigonometric Function",
+        "Math",
+        &[param(
+            "Operator",
+            "Function",
+            Enum(&[
+                "sin",
+                "cos",
+                "tan",
+                "asin",
+                "acos",
+                "atan",
+                "atan2",
+                "sinh",
+                "cosh",
+                "tanh",
+                "asinh",
+                "acosh",
+                "atanh",
+                "sincos",
+                "cos + jsin",
+            ]),
+            "sin",
+            true,
+        )],
+        PortRule::Trigonometry,
+        [40.0, 30.0],
+    ),
+    block("Terminator", "Terminator", "Sinks", &[], SINK, [20.0, 20.0]),
+    block(
+        "Display",
+        "Display",
+        "Sinks",
+        &[param("Floating", "Floating", Boolean, "off", true)],
+        PortRule::Display,
+        [60.0, 30.0],
+    ),
 ];
+
+/// Stable palette group order. Block order within each group follows BLOCKS.
+pub const PALETTE_CATEGORIES: &[&str] = &[
+    "Sources",
+    "Math",
+    "Continuous",
+    "Discrete",
+    "Discontinuities",
+    "Routing",
+    "Ports",
+    "Sinks",
+];
+
+pub fn blocks_in_category(category: &str) -> impl Iterator<Item = &'static BlockDescriptor> + '_ {
+    BLOCKS
+        .iter()
+        .filter(move |b| b.creatable && b.category == category)
+}
 
 pub fn find(type_key: &str) -> Option<&'static BlockDescriptor> {
     BLOCKS.iter().find(|b| b.type_key == type_key)
@@ -868,5 +1095,33 @@ mod tests {
             ports("Mux", "Inputs", "**"),
             PortResolution::Invalid { .. }
         ));
+    }
+    #[test]
+    fn palette_groups_cover_every_creatable_block_once() {
+        let keys: Vec<_> = PALETTE_CATEGORIES
+            .iter()
+            .flat_map(|category| blocks_in_category(category))
+            .map(|b| b.type_key)
+            .collect();
+        let unique: std::collections::BTreeSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len());
+        assert_eq!(keys.len(), BLOCKS.iter().filter(|b| b.creatable).count());
+        assert!(blocks_in_category("absent").next().is_none());
+    }
+    #[test]
+    fn alternate_sine_and_trigonometry_modes_have_correct_arity() {
+        assert_eq!(
+            ports("Sin", "TimeSource", "Use external signal"),
+            known(1, 1)
+        );
+        let sample = BTreeMap::from([
+            ("SineType".into(), "Sample based".into()),
+            ("TimeSource".into(), "Use external signal".into()),
+        ]);
+        assert_eq!(find("Sin").unwrap().resolve_ports(&sample), known(1, 1));
+        assert_eq!(ports("Trigonometry", "Operator", "atan2"), known(2, 1));
+        assert_eq!(ports("Trigonometry", "Operator", "sincos"), known(1, 2));
+        assert_eq!(ports("Trigonometry", "Operator", "cos + jsin"), known(1, 1));
+        assert_eq!(ports("Display", "Floating", "on"), known(0, 0));
     }
 }
