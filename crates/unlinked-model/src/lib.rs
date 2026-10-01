@@ -9,6 +9,7 @@
 
 pub mod catalog;
 pub mod diff;
+pub mod duplicate;
 pub mod edit;
 pub mod geometry;
 pub mod route_edit;

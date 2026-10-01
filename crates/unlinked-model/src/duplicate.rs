@@ -3,7 +3,7 @@
 //! External connections are deliberately omitted. Internal connections are
 //! rerouted, not translated; named nets require a signal-name edit first.
 use crate::catalog::{self, PortResolution};
-use crate::edit::{Edit, EditError, SystemRef, apply_batch, next_sid, system_names};
+use crate::edit::{apply_batch, next_sid, system_names, Edit, EditError, SystemRef};
 use crate::{BlockId, BlockStyle, Model, Orientation, Point, PortKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -93,16 +93,15 @@ pub fn duplicate(
                 "masked, linked, subsystem or interface blocks are not supported",
             ));
         }
-        let chart_path = path
+        let chart_path: Vec<_> = path
             .iter()
-            .chain(std::iter::once(&block.name))
-            .map(|s| s.replace('/', "//"))
-            .collect::<Vec<_>>()
-            .join("/");
+            .cloned()
+            .chain(std::iter::once(block.name.clone()))
+            .collect();
         if model
             .charts
             .iter()
-            .any(|c| c.name == chart_path || c.name.starts_with(&(chart_path.clone() + "/")))
+            .any(|c| crate::stateflow::split_path(&c.name).starts_with(&chart_path))
         {
             return Err(reject("block owns a Stateflow chart"));
         }
@@ -327,11 +326,9 @@ mod tests {
         assert_eq!(gain.name, "gain copy1");
         let connections = source.root.connections();
         assert_eq!(connections.len(), 3);
-        assert!(
-            connections
-                .iter()
-                .any(|c| c.src.block.0 == "4" && c.dst.block.0 == "5")
-        );
+        assert!(connections
+            .iter()
+            .any(|c| c.src.block.0 == "4" && c.dst.block.0 == "5"));
     }
     #[test]
     fn absent_imported_switch_parameters_keep_implicit_behavior() {
@@ -358,23 +355,19 @@ mod tests {
     fn rejects_metadata_that_cannot_be_preserved() {
         let mut source = model();
         source.root.blocks[0].style.background = Some("red".into());
-        assert!(
-            copy(&source, &["1"])
-                .unwrap_err()
-                .to_string()
-                .contains("styles")
-        );
+        assert!(copy(&source, &["1"])
+            .unwrap_err()
+            .to_string()
+            .contains("styles"));
         source.root.blocks[0].style = BlockStyle::default();
         source.root.blocks[0].orientation = Orientation::Left;
         assert!(copy(&source, &["1"]).is_err());
         source.root.blocks[0].orientation = Orientation::Right;
         source.root.lines[0].name = Some("label".into());
-        assert!(
-            copy(&source, &["1", "2"])
-                .unwrap_err()
-                .to_string()
-                .contains("named internal")
-        );
+        assert!(copy(&source, &["1", "2"])
+            .unwrap_err()
+            .to_string()
+            .contains("named internal"));
         // External labels belong to the excluded external connection.
         assert!(copy(&source, &["1"]).is_ok());
         source.root.blocks[0].library_source = Some("library/source".into());
@@ -387,26 +380,22 @@ mod tests {
         let edits = copy(&source, &["1"]).unwrap();
         assert!(matches!(&edits[0], Edit::AddBlock{name,..} if name == "source copy2"));
         assert!(copy(&source, &["1", "1"]).is_err());
-        assert!(
-            duplicate(
-                &source,
-                &vec![],
-                &["1".into(), "2".into()],
-                Point { x: 0., y: 0. },
-                u64::MAX
-            )
-            .is_err()
-        );
-        assert!(
-            duplicate(
-                &source,
-                &vec![],
-                &["1".into()],
-                Point { x: f64::NAN, y: 0. },
-                4
-            )
-            .is_err()
-        );
+        assert!(duplicate(
+            &source,
+            &vec![],
+            &["1".into(), "2".into()],
+            Point { x: 0., y: 0. },
+            u64::MAX
+        )
+        .is_err());
+        assert!(duplicate(
+            &source,
+            &vec![],
+            &["1".into()],
+            Point { x: f64::NAN, y: 0. },
+            4
+        )
+        .is_err());
         assert!(duplicate(&source, &vec![], &["1".into()], Point { x: 0., y: 0. }, 2).is_err());
     }
 }
