@@ -445,12 +445,14 @@ pub fn model_editor(props: &EditorProps) -> Html {
         base.model.clone()
     };
     // Static checks only: cheap enough to rerun after every edit.
-    let problems = {
+    let report = {
         let model = model.clone();
         use_memo(Rc::as_ptr(&model) as usize, move |_| {
-            unlinked_sim::diagnose::diagnose(&model, &Default::default()).diagnostics
+            unlinked_sim::diagnose::diagnose(&model, &Default::default())
         })
     };
+    let problems = Rc::new(report.diagnostics.clone());
+    let problems_truncated = report.truncated || report.warnings_omitted;
     html! {
         <>
             { toolbar }
@@ -467,7 +469,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 <ModelSettings config={model.config.clone()}
                     on_edit={(*editing && !*busy).then(|| on_edit.clone())} />
             }
-            <DiagramView {model} fit_key={props.fit_key.clone()} {problems}
+            <DiagramView {model} fit_key={props.fit_key.clone()} {problems} {problems_truncated}
                 on_settings={Callback::from({
                     let settings = settings.clone();
                     move |()| settings.set(true)

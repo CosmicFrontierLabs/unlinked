@@ -75,8 +75,11 @@ pub fn model_settings(props: &SettingsProps) -> Html {
                     "Solver" => config.solver.as_deref(),
                     _ => config.raw.get(key).map(String::as_str),
                 };
+                // Clearing a stored setting stores it empty, which the
+                // validation reports; clearing an unset one changes nothing.
                 let value = value.trim().to_string();
-                if !value.is_empty() && current != Some(value.as_str()) {
+                let unchanged = current.unwrap_or_default() == value;
+                if !unchanged {
                     on_edit.emit(vec![Edit::SetConfig {
                         key: key.into(),
                         value,

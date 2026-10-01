@@ -49,6 +49,9 @@ pub struct DiagramProps {
     /// toolbar's problems button and shown in the block inspector.
     #[prop_or_default]
     pub problems: Rc<Vec<Diagnostic>>,
+    /// The check stopped listing problems at its limits, or did not finish.
+    #[prop_or_default]
+    pub problems_truncated: bool,
     /// Opens the model settings, for problems with them.
     #[prop_or_default]
     pub on_settings: Option<Callback<()>>,
@@ -782,10 +785,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         });
     }
 
-    // A selection belongs to the level it was made on.
+    // A selection belongs to the level it was made on, except a block that
+    // was opened to be shown, such as a problem's.
+    let select_on_open = use_mut_ref(|| None::<String>);
     {
-        let selection = selection.clone();
-        use_effect_with((*path).clone(), move |_| selection.set(Selection::Nothing));
+        let (selection, select_on_open) = (selection.clone(), select_on_open.clone());
+        use_effect_with((*path).clone(), move |_| {
+            selection.set(match select_on_open.borrow_mut().take() {
+                Some(id) => Selection::Blocks(vec![id]),
+                None => Selection::Nothing,
+            })
+        });
     }
     // Select a block an action created, once it is in the shown system.
     {
@@ -1882,11 +1892,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     // Show where a problem is: open its system and select its block.
     let go_to = |d: &Diagnostic| {
-        let (path, selection, model, on_settings) = (
+        let (path, selection, model, on_settings, select_on_open) = (
             path.clone(),
             selection.clone(),
             props.model.clone(),
             props.on_settings.clone(),
+            select_on_open.clone(),
         );
         let target = d.target.clone();
         Callback::from(move |_: MouseEvent| match &target {
@@ -1898,8 +1909,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
             DiagnosticTarget::Block { system, id, .. } => {
                 if let Some(names) = system_names(&model, system) {
-                    path.set(names);
-                    selection.set(Selection::Blocks(vec![id.0.clone()]));
+                    // Another level selects the block once it is shown.
+                    if names == *path {
+                        selection.set(Selection::Blocks(vec![id.0.clone()]));
+                    } else {
+                        *select_on_open.borrow_mut() = Some(id.0.clone());
+                        path.set(names);
+                    }
                 }
             }
             DiagnosticTarget::Line { system, .. } => {
@@ -1922,6 +1938,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         <span>{ &d.message }</span>
                     </button>
                 }) }
+                if props.problems_truncated {
+                    <div class="problem warning">{ "The check stopped at its limits: there may be more problems than listed." }</div>
+                }
                 <div class="muted">{ "Static check: structure, settings and simulator support. No simulation was run." }</div>
             </div>
         }
@@ -2001,8 +2020,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 <button class={classes!("problems-button", (errors > 0).then_some("has-errors"),
                     (*show_problems).then_some("active"))} onclick={toggle_problems}
                     title="Problems found by the static check">
-                    { format!("{errors} error{} · {warnings} warning{}",
-                        if errors == 1 { "" } else { "s" }, if warnings == 1 { "" } else { "s" }) }
+                    { format!("{errors} error{} · {warnings} warning{}{}",
+                        if errors == 1 { "" } else { "s" }, if warnings == 1 { "" } else { "s" },
+                        if props.problems_truncated { " (incomplete)" } else { "" }) }
                 </button>
                 <span class="zoom">{ format!("{:.0}%", v.scale * 100.0) }</span>
                 <button onclick={fit_view}>{ "Fit" }</button>
@@ -2510,7 +2530,7 @@ fn inspector(props: &InspectorProps) -> Html {
 /// the scope specification, which is shown structured instead.
 const HIDDEN_PARAMETERS: &[&str] = &["ZOrder", "ScopeSpecificationString"];
 
-fn fmt_num(v: f64) -> String {
+pub(crate) fn fmt_num(v: f64) -> String {
     if v != 0.0 && (v.abs() < 1e-3 || v.abs() >= 1e6) {
         format!("{v:e}")
     } else {
