@@ -11,8 +11,8 @@
 use crate::catalog::{self, PortResolution};
 use crate::validation::{validate_structure, DiagnosticTarget, Severity};
 use crate::{
-    Block, BlockId, BlockStyle, Branch, Chart, Endpoint, Line, Model, Orientation, PortCounts,
-    PortKind, Rect, System,
+    Block, BlockId, BlockStyle, Branch, Chart, Endpoint, Line, Model, Orientation, PortKind, Rect,
+    System,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
