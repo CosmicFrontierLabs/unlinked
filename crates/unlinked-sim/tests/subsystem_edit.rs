@@ -109,6 +109,25 @@ fn assert_equivalent(mut model: Model, selection: &[&str], outputs: &[&str]) -> 
             );
         }
     }
+    edit::apply_batch(
+        &mut model,
+        &[edit::Edit::ExpandSubsystem {
+            system: vec![],
+            id: id.as_str().into(),
+        }],
+    )
+    .unwrap();
+    assert!(validation::validate_structure(&model).is_valid());
+    let expanded = simulate_model(&model, &options).unwrap();
+    assert_eq!(before.time, expanded.time);
+    for id in outputs {
+        for (&expected, &actual) in before.signals[*id].iter().zip(&expanded.signals[*id]) {
+            assert!(
+                actual.is_finite() && (actual - expected).abs() <= 1e-11 * expected.abs().max(1.),
+                "expanded output {id}, selection {selection:?}: {actual} != {expected}"
+            );
+        }
+    }
     before
 }
 

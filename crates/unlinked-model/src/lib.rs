@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod diff;
 pub mod duplicate;
 pub mod edit;
+pub mod expand;
 pub mod geometry;
 pub mod hierarchy;
 pub mod route_edit;
