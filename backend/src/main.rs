@@ -1,6 +1,7 @@
 mod access;
 #[cfg(test)]
 mod api_tests;
+mod asset_cache;
 mod audit;
 mod config;
 mod db;
@@ -151,7 +152,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .fallback_status(StatusCode::OK)
         .html_cache_control(CacheControl::NoCache)
         .cache_control(CacheControl::Long)
-        .into_router();
+        .into_router()
+        .layer(middleware::from_fn(asset_cache::revalidate_worker));
 
     // Both limits use MAX_UPLOAD_BYTES: the tower-http layer rejects oversized
     // Content-Length up front, DefaultBodyLimit caps buffered extractors

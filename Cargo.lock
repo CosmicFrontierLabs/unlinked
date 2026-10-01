@@ -805,6 +805,7 @@ dependencies = [
  "unlinked-matlab",
  "unlinked-model",
  "unlinked-render",
+ "unlinked-sim",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
