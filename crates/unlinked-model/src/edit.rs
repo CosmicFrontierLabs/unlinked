@@ -190,11 +190,14 @@ fn set_config(config: &mut crate::SimConfig, key: &str, value: &str) {
     for k in config_writes(key, |k| config.raw.contains_key(k)) {
         config.raw.insert(k.to_string(), value.to_string());
     }
-    let get = |k: &str| config.raw.get(k).cloned();
-    config.solver = get("Solver").or_else(|| get("SolverName"));
-    config.start_time = get("StartTime");
-    config.stop_time = get("StopTime");
-    config.fixed_step = get("FixedStep");
+    let typed = match key {
+        "Solver" => &mut config.solver,
+        "StartTime" => &mut config.start_time,
+        "StopTime" => &mut config.stop_time,
+        "FixedStep" => &mut config.fixed_step,
+        _ => return,
+    };
+    *typed = Some(value.to_string());
 }
 
 /// An edit that could not be applied, and its position in the batch.

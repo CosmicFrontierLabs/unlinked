@@ -329,8 +329,9 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
             }
         }
 
-        // Solver settings land where they are read, in the configuration
-        // part when the package has one.
+        // Solver settings land where they are read: in the active
+        // configuration set part when the package has them. Files whose
+        // active set holds no settings of its own (a reference) refuse.
         let config = [
             Edit::SetConfig {
                 key: "StopTime".into(),
@@ -346,12 +347,18 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
         match unlinked_import::patch::apply_edits(&name, &bytes, &config) {
             Ok(patched) => {
                 let changed = changed_content(&bytes, &patched);
-                if changed.iter().any(|p| {
-                    !matches!(
-                        p.as_str(),
-                        "file" | "simulink/configSet0.xml" | "simulink/blockdiagram.xml"
-                    )
-                }) {
+                let config_part = |p: &str| {
+                    p.strip_prefix("simulink/configSet")
+                        .and_then(|rest| rest.strip_suffix(".xml"))
+                        .is_some_and(|n| n.parse::<u32>().is_ok())
+                };
+                let parts = changed.iter().filter(|p| config_part(p)).count();
+                if parts > 1
+                    || changed.iter().any(|p| {
+                        !config_part(p)
+                            && !matches!(p.as_str(), "file" | "simulink/blockdiagram.xml")
+                    })
+                {
                     failures.push(format!("{name}: config edit changed {changed:?}"));
                 }
                 match unlinked_import::import(&name, &patched) {
@@ -363,6 +370,9 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
                     Ok(_) => {}
                     Err(e) => failures.push(format!("{name}: config edit does not import: {e}")),
                 }
+            }
+            Err(_) if original.config.raw.is_empty() => {
+                *exercised.entry("refused config reference").or_insert(0) += 1;
             }
             Err(e) => failures.push(format!("{name}: config edit failed: {e}")),
         }

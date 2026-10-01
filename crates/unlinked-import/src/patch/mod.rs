@@ -207,6 +207,46 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
     }
 }
 
+/// Where a solver setting is written.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ConfigPlace {
+    /// The configuration set's solver component.
+    Component,
+    /// The model's own properties.
+    Model,
+}
+
+/// Where to write each property that setting `key` changes, so it lands
+/// where the importer reads it: the solver component wins, and model-level
+/// properties fill in what it lacks. `component` and `model` count each
+/// property's occurrences there; `component` is `None` without a solver
+/// component. Duplicated properties are refused, as their effective value
+/// is ambiguous.
+fn config_places(
+    key: &str,
+    component: Option<&dyn Fn(&str) -> usize>,
+    model: &dyn Fn(&str) -> usize,
+) -> Result<Vec<(&'static str, ConfigPlace)>, ImportError> {
+    let in_component = |k: &str| component.map_or(0, |c| c(k));
+    unlinked_model::edit::config_writes(key, |k| in_component(k) + model(k) > 0)
+        .into_iter()
+        .map(|k| {
+            let (c, m) = (in_component(k), model(k));
+            if c > 1 || m > 1 {
+                return Err(ImportError::Edit(format!(
+                    "the solver setting {k} is stored more than once"
+                )));
+            }
+            let place = if c == 1 || (m == 0 && component.is_some()) {
+                ConfigPlace::Component
+            } else {
+                ConfigPlace::Model
+            };
+            Ok((k, place))
+        })
+        .collect()
+}
+
 /// The `Ports` value for `p`: counts in Simulink's order, trailing zeros
 /// dropped.
 fn format_ports(p: &PortCounts) -> String {

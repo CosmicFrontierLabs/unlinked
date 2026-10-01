@@ -153,3 +153,127 @@ fn slx_without_a_config_part_writes_model_properties() {
         part(&out, "simulink/blockdiagram.xml")
     );
 }
+
+/// Mirrored solver names split between the component and model-level
+/// fallbacks are each written where they are read.
+#[test]
+fn mirrors_split_across_component_and_model_level_stay_in_step() {
+    for src in [
+        "Model {\nName m\nSolverName ode45\nSimulink.SolverCC {\nSolver ode4\n}\nSystem {\nName m\n}\n}\n",
+        "Model {\nName m\nSolver ode45\nSimulink.SolverCC {\nSolverName ode4\n}\nSystem {\nName m\n}\n}\n",
+    ] {
+        let out = roundtrip("m.mdl", src.as_bytes(), &[set("Solver", "ode1")]);
+        let model = unlinked_import::import("m.mdl", &out).unwrap();
+        assert_eq!(model.config.raw["Solver"], "ode1");
+        assert_eq!(model.config.raw["SolverName"], "ode1");
+    }
+}
+
+#[test]
+fn mdl_solver_objects_named_by_class_are_components() {
+    let src = "Model {\nName m\nObject {\nClassName Simulink.SolverCC\nSolver ode4\n}\nSystem {\nName m\n}\n}\n";
+    let out = roundtrip("m.mdl", src.as_bytes(), &[set("Solver", "ode1")]);
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("ClassName Simulink.SolverCC\nSolver\tode1\n"),
+        "{text}"
+    );
+}
+
+/// Ambiguous layouts are refused rather than guessed at.
+#[test]
+fn ambiguous_solver_settings_are_refused() {
+    let edit = [set("Solver", "ode1")];
+    for src in [
+        "Model {\nName m\nSimulink.SolverCC {\nSolver ode4\nSolver ode45\n}\nSystem {\nName m\n}\n}\n",
+        "Model {\nName m\nSimulink.SolverCC {\nSolver ode4\n}\nSimulink.SolverCC {\nSolver ode45\n}\nSystem {\nName m\n}\n}\n",
+    ] {
+        assert!(apply_edits("m.mdl", src.as_bytes(), &edit).is_err(), "{src}");
+    }
+    let duplicate = slx(&[(
+        "simulink/blockdiagram.xml",
+        r#"<ModelInformation><Model Name="m"><Object ClassName="Simulink.SolverCC"><P Name="Solver">ode4</P><P Name="Solver">ode45</P></Object><System/></Model></ModelInformation>"#,
+    )]);
+    assert!(apply_edits("m.slx", &duplicate, &edit).is_err());
+}
+
+fn info(active: &[(&str, bool)]) -> String {
+    let sets: String = active
+        .iter()
+        .map(|(part, on)| {
+            let flag = if *on { r#" Active="true""# } else { "" };
+            format!(r#"<ConfigSet PartName="/simulink/{part}"{flag}>Set</ConfigSet>"#)
+        })
+        .collect();
+    format!("<ConfigSetInfo>{sets}</ConfigSetInfo>")
+}
+
+const SOLVER_ODE4: &str = r#"<ConfigSet><Object ClassName="Simulink.SolverCC"><P Name="Solver">ode4</P></Object></ConfigSet>"#;
+const SOLVER_ODE45: &str = r#"<ConfigSet><Object ClassName="Simulink.SolverCC"><P Name="Solver">ode45</P></Object></ConfigSet>"#;
+
+/// The active configuration set is the one read and written; the others
+/// are left alone.
+#[test]
+fn the_active_configuration_set_is_read_and_edited() {
+    let index = info(&[("configSet0.xml", false), ("configSet1.xml", true)]);
+    let bytes = slx(&[
+        ("simulink/blockdiagram.xml", DIAGRAM),
+        ("simulink/configSetInfo.xml", &index),
+        ("simulink/configSet0.xml", SOLVER_ODE4),
+        ("simulink/configSet1.xml", SOLVER_ODE45),
+    ]);
+    let model = unlinked_import::import("m.slx", &bytes).unwrap();
+    assert_eq!(model.config.solver.as_deref(), Some("ode45"));
+    let out = roundtrip("m.slx", &bytes, &[set("Solver", "ode23")]);
+    assert_eq!(part(&out, "simulink/configSet0.xml"), SOLVER_ODE4);
+    assert!(part(&out, "simulink/configSet1.xml").contains(">ode23<"));
+}
+
+#[test]
+fn unresolved_or_referenced_configuration_sets_are_refused() {
+    let edit = [set("Solver", "ode1")];
+    let reference = r#"<ConfigSet><Object ClassName="Simulink.ConfigSetRef"><P Name="SourceName">Shared</P></Object></ConfigSet>"#;
+    let none_active = info(&[("configSet0.xml", false), ("configSet1.xml", false)]);
+    let reference_active = info(&[("configSet0.xml", false), ("configSet1.xml", true)]);
+    for (index, second) in [(&none_active, SOLVER_ODE45), (&reference_active, reference)] {
+        let bytes = slx(&[
+            ("simulink/blockdiagram.xml", DIAGRAM),
+            ("simulink/configSetInfo.xml", index),
+            ("simulink/configSet0.xml", SOLVER_ODE4),
+            ("simulink/configSet1.xml", second),
+        ]);
+        // Neither imports the inactive set's solver as the model's.
+        let model = unlinked_import::import("m.slx", &bytes).unwrap();
+        assert_eq!(model.config.solver, None);
+        assert!(apply_edits("m.slx", &bytes, &edit).is_err());
+    }
+}
+
+#[test]
+fn settings_held_only_in_typed_fields_survive_other_edits() {
+    let mut model = unlinked_import::import("m.mdl", SOLVER_CC.as_bytes()).unwrap();
+    model.config.fixed_step = Some("0.5".into());
+    apply_batch(&mut model, &[set("StopTime", "3")]).unwrap();
+    assert_eq!(model.config.fixed_step.as_deref(), Some("0.5"));
+    assert_eq!(model.config.stop_time.as_deref(), Some("3"));
+}
+
+#[test]
+fn configuration_sets_without_a_single_active_one_are_refused() {
+    let edit = [set("Solver", "ode1")];
+    let sets = [
+        ("simulink/blockdiagram.xml", DIAGRAM),
+        ("simulink/configSet0.xml", SOLVER_ODE4),
+        ("simulink/configSet1.xml", SOLVER_ODE45),
+    ];
+    // Several sets and no index.
+    assert!(apply_edits("m.slx", &slx(&sets), &edit).is_err());
+    // Two active entries, one of them malformed.
+    let index = r#"<ConfigSetInfo><ConfigSet Active="true" PartName="/simulink/configSet0.xml"/><ConfigSet Active="true"/></ConfigSetInfo>"#;
+    let mut parts = sets.to_vec();
+    parts.push(("simulink/configSetInfo.xml", index));
+    assert!(apply_edits("m.slx", &slx(&parts), &edit).is_err());
+    // An MDL configuration reference.
+    let src = "Model {\nName m\nObject {\nClassName Simulink.ConfigSetRef\nSourceName shared\n}\nSystem {\nName m\n}\n}\n";
+    assert!(apply_edits("m.mdl", src.as_bytes(), &edit).is_err());
+}

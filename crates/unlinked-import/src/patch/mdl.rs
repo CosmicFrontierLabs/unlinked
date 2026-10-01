@@ -9,11 +9,11 @@ mod expand;
 mod hierarchy;
 use unlinked_model::expand::removable_property as expansion_property;
 
-use super::{format_ports, parse_endpoint};
+use super::{config_places, format_ports, parse_endpoint, ConfigPlace};
 use super::{Boundary, Resolved};
 use crate::convert::parse_port;
 use crate::{ImportError, MAX_DEPTH, MAX_NODES};
-use unlinked_model::edit::{config_writes, Edit, SID_WATERMARK};
+use unlinked_model::edit::{Edit, SID_WATERMARK};
 use unlinked_model::geometry::to_rotation;
 use unlinked_model::{Block, PortKind, PortRef};
 use unlinked_model::{Orientation, Rect};
@@ -765,15 +765,43 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
     Ok(())
 }
 
-/// Write a solver setting where the importer reads it: the first solver
-/// component of the model's configuration sets, or the `Model` section
-/// itself in files without one.
+/// Write a solver setting where the importer reads it: the model's solver
+/// component, or the `Model` section's own properties. Models with several
+/// solver components are refused, since which one applies is not resolved.
 fn set_config(file: &mut MdlFile, key: &str, value: &str) -> Result<(), ImportError> {
-    fn solver(s: &mut Section) -> Option<&mut Section> {
-        if s.tag == "Simulink.SolverCC" {
-            return Some(s);
+    /// Item index paths, below `s`, of the solver components.
+    fn find(s: &Section, at: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if s.tag == "Simulink.SolverCC"
+            || s.prop("ClassName").as_deref() == Some("Simulink.SolverCC")
+        {
+            out.push(at.clone());
+            return;
         }
-        s.sections_mut().find_map(solver)
+        for (i, item) in s.items.iter().enumerate() {
+            if let Item::Section(c) = item {
+                at.push(i);
+                find(c, at, out);
+                at.pop();
+            }
+        }
+    }
+    fn at<'a>(s: &'a Section, path: &[usize]) -> &'a Section {
+        path.iter().fold(s, |s, &i| match &s.items[i] {
+            Item::Section(c) => c,
+            _ => unreachable!("paths lead through sections"),
+        })
+    }
+    fn at_mut<'a>(s: &'a mut Section, path: &[usize]) -> &'a mut Section {
+        path.iter().fold(s, |s, &i| match &mut s.items[i] {
+            Item::Section(c) => c,
+            _ => unreachable!("paths lead through sections"),
+        })
+    }
+    fn count(s: &Section, key: &str) -> usize {
+        s.items
+            .iter()
+            .filter(|i| matches!(i, Item::Prop { key: k, .. } if k == key))
+            .count()
     }
     let model = file
         .items
@@ -783,13 +811,45 @@ fn set_config(file: &mut MdlFile, key: &str, value: &str) -> Result<(), ImportEr
             _ => None,
         })
         .ok_or_else(|| ImportError::Mdl("no Model section".into()))?;
-    let has_solver = solver(model).is_some();
-    let target = if has_solver {
-        solver(model).expect("checked above")
-    } else {
-        model
+    fn references(s: &Section) -> bool {
+        s.tag == "Simulink.ConfigSetRef"
+            || s.prop("ClassName").as_deref() == Some("Simulink.ConfigSetRef")
+            || s.sections().any(references)
+    }
+    // A configuration reference may be the active set, whose settings live
+    // elsewhere.
+    if references(model) {
+        return Err(ImportError::Edit(
+            "the model refers to a shared configuration; editing it is not supported".into(),
+        ));
+    }
+    let mut found = Vec::new();
+    find(model, &mut Vec::new(), &mut found);
+    let component = match found.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        _ => {
+            return Err(ImportError::Edit(
+                "the model has several solver configurations; editing them is not supported".into(),
+            ))
+        }
     };
-    for k in config_writes(key, |k| target.prop(k).is_some()) {
+    let places = {
+        let in_component = component
+            .as_deref()
+            .map(|p| |k: &str| count(at(model, p), k));
+        let model = &*model;
+        config_places(
+            key,
+            in_component.as_ref().map(|f| f as &dyn Fn(&str) -> usize),
+            &|k| count(model, k),
+        )?
+    };
+    for (k, place) in places {
+        let target = match (place, &component) {
+            (ConfigPlace::Component, Some(path)) => at_mut(model, path),
+            _ => &mut *model,
+        };
         let bare = target.was_quoted(k) == Some(false);
         target.set_prop(k, value, bare && is_bare_token(value));
     }
