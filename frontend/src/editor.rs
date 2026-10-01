@@ -94,13 +94,31 @@ pub fn model_editor(props: &EditorProps) -> Html {
     }
 
     let on_edit = {
-        let (pending, redo_stack, working, error) = (
+        let (pending, redo_stack, working, error, base) = (
             pending.clone(),
             redo_stack.clone(),
             working.clone(),
             error.clone(),
+            base.clone(),
         );
         Callback::from(move |group: Vec<Edit>| {
+            // Grouping and expanding move raw file records the IR does not
+            // model, so the file may refuse what the preview accepts: try
+            // saving first, so a refusal shows now rather than at Save.
+            let hierarchy = group.iter().any(|e| {
+                matches!(
+                    e,
+                    Edit::CreateSubsystem { .. } | Edit::ExpandSubsystem { .. }
+                )
+            });
+            if hierarchy {
+                let mut all = pending.concat();
+                all.extend(group.iter().cloned());
+                if let Err(e) = unlinked_import::patch::apply_edits(&base.path, &base.bytes, &all) {
+                    error.set(Some(e.to_string()));
+                    return;
+                }
+            }
             let mut next = (**working).clone();
             match apply_batch(&mut next, &group) {
                 Ok(()) => {
