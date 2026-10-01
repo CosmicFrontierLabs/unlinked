@@ -138,7 +138,7 @@ Model {
     Line {
       SrcBlock "Ki*Ts"
       SrcPort 1
-      Points [20, 0; 0, -10]
+      Points [10, 0; 0, -10]
       DstBlock "Accumulate"
       DstPort 1
     }
@@ -160,7 +160,7 @@ Model {
     Line {
       SrcBlock "z^-1"
       SrcPort 1
-      Points [-20, 0; 0, -60]
+      Points [-15, 0; 0, -60]
       DstBlock "Accumulate"
       DstPort 2
     }
