@@ -17,6 +17,9 @@ pub enum Severity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiagnosticTarget {
     Model,
+    Config {
+        parameter: String,
+    },
     Block {
         system: Vec<BlockId>,
         id: BlockId,
