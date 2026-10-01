@@ -1186,10 +1186,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         [sid] => s.blocks.iter().find(|b| &b.id.0 == sid),
         _ => None,
     });
+    // Only an input driven by exactly one line identifies it; imported models
+    // may drive an input twice, and then which line was clicked is unknown.
     let selected_line = system.zip(selected_wire.as_ref()).and_then(|(s, dst)| {
-        s.lines
+        let mut driving = s
+            .lines
             .iter()
-            .find(|l| unlinked_model::edit::drives(l, dst))
+            .filter(|l| unlinked_model::edit::drives(l, dst));
+        match (driving.next(), driving.next()) {
+            (Some(line), None) => Some(line),
+            _ => None,
+        }
     });
     let selected_chart = selected_block.and_then(|b| {
         let mut p = refs.clone();
