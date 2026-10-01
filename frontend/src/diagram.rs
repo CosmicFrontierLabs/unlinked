@@ -59,6 +59,17 @@ enum Drag {
     },
     /// Drawing a selection box from `start`; `extend` adds to the selection.
     Select { start: Point, extend: bool },
+    /// Dragging segment `segment` of the drawn wire `points` into `dst`
+    /// across itself, from diagram point `start`; see
+    /// [`geometry::drag_segment`].
+    Segment {
+        dst: Endpoint,
+        points: Vec<Point>,
+        fixed: usize,
+        segment: usize,
+        start: Point,
+        route: Option<Vec<Point>>,
+    },
     /// Dragging a new connection out of port `from`.
     Wire { from: Endpoint },
     /// Dragging a corner of block `id`, whose outline was `rect`; `right`
@@ -110,6 +121,36 @@ fn to_diagram(e: &MouseEvent, container: &NodeRef, view: &View, svg: &str) -> Op
         (e.client_x() as f64 - rect.left() - view.x) / view.scale + vx,
         (e.client_y() as f64 - rect.top() - view.y) / view.scale + vy,
     ))
+}
+
+/// The points of a rendered `polyline`.
+fn polyline_points(el: &Element) -> Vec<Point> {
+    el.get_attribute("points")
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|pair| {
+            let (x, y) = pair.split_once(',')?;
+            Some(Point::new(x.parse().ok()?, y.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Index of the segment of `points` nearest `at`, among those from `first`.
+fn nearest_segment(points: &[Point], first: usize, at: Point) -> Option<usize> {
+    let distance = |a: Point, b: Point| {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = dx * dx + dy * dy;
+        let t = if len > 0.0 {
+            (((at.x - a.x) * dx + (at.y - a.y) * dy) / len).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (px, py) = (a.x + t * dx - at.x, a.y + t * dy - at.y);
+        px * px + py * py
+    };
+    (first..points.len().saturating_sub(1)).min_by(|&i, &j| {
+        distance(points[i], points[i + 1]).total_cmp(&distance(points[j], points[j + 1]))
+    })
 }
 
 /// Smallest block side a resize leaves.
@@ -367,6 +408,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let wire_preview = use_state(|| None::<(Point, Point)>);
     // The outline of a block being resized.
     let resize_preview = use_state(|| None::<Rect>);
+    // A wire being rerouted, as it would be drawn.
+    let route_preview = use_state(|| None::<Vec<Point>>);
     let theme = use_state(|| Theme::Dark);
     let view = use_reducer(|| View {
         scale: 1.0,
@@ -521,6 +564,31 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 });
                 return;
             }
+            // Pressing on a wire may start dragging its nearest segment; a
+            // press without movement still selects the wire on click.
+            let segment = on_edit.as_ref().and_then(|_| {
+                let hit = closest(e.target(), "polyline.wire-hit")?;
+                let dst = endpoint_of(&hit, "dst-")?;
+                let fixed: usize = hit.get_attribute("data-fixed")?.parse().ok()?;
+                let points = polyline_points(&hit);
+                let start = (*rendered)
+                    .as_ref()
+                    .ok()
+                    .and_then(|svg| to_diagram(&e, &container, &view, svg))?;
+                let segment = nearest_segment(&points, fixed.saturating_sub(1), start)?;
+                Some(Drag::Segment {
+                    dst,
+                    points,
+                    fixed,
+                    segment,
+                    start,
+                    route: None,
+                })
+            });
+            if let Some(segment) = segment {
+                *drag.borrow_mut() = Some(segment);
+                return;
+            }
             let grabbed = on_edit
                 .as_ref()
                 .and_then(|_| block_group(e.target())?.get_attribute("data-sid"));
@@ -574,12 +642,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onmousemove = {
         let (drag, view) = (drag.clone(), view.clone());
-        let (container, rendered, wire_preview, resize_preview, select_box) = (
+        let (container, rendered, wire_preview, resize_preview, select_box, route_preview) = (
             container.clone(),
             rendered.clone(),
             wire_preview.clone(),
             resize_preview.clone(),
             select_box.clone(),
+            route_preview.clone(),
         );
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
@@ -651,6 +720,39 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         select_box.set(Some((*start, to)));
                     }
                 }
+                Some(Drag::Segment {
+                    points,
+                    fixed,
+                    segment,
+                    start,
+                    route,
+                    ..
+                }) => {
+                    let Some(to) = (*rendered)
+                        .as_ref()
+                        .ok()
+                        .and_then(|svg| to_diagram(&e, &container, &view, svg))
+                    else {
+                        return;
+                    };
+                    let (a, b) = (points[*segment], points[*segment + 1]);
+                    let across = if (b.x - a.x).abs() >= (b.y - a.y).abs() {
+                        to.y - start.y
+                    } else {
+                        to.x - start.x
+                    };
+                    let delta = (across / SNAP).round() * SNAP;
+                    *route = (delta != 0.0)
+                        .then(|| geometry::drag_segment(points, *fixed, *segment, delta))
+                        .flatten();
+                    // Preview as drawn: fixed start, new vertices, port end.
+                    route_preview.set(route.as_ref().map(|r| {
+                        let mut drawn = points[..*fixed].to_vec();
+                        drawn.extend(r);
+                        drawn.extend(&points[points.len() - 2..]);
+                        drawn
+                    }));
+                }
                 _ => {}
             }
         })
@@ -662,10 +764,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_edit.clone(),
             system_ref.clone(),
         );
-        let (wire_preview, resize_preview, select_box) = (
+        let (wire_preview, resize_preview, select_box, route_preview) = (
             wire_preview.clone(),
             resize_preview.clone(),
             select_box.clone(),
+            route_preview.clone(),
         );
         let (selected, selected_wire, view) =
             (selected.clone(), selected_wire.clone(), view.clone());
@@ -717,6 +820,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     true
                 }
                 Some(Drag::Pan { moved, .. }) => moved,
+                Some(Drag::Segment { dst, route, .. }) => {
+                    route_preview.set(None);
+                    let moved = route.is_some();
+                    if let (Some(points), Some(on_edit)) = (route, &on_edit) {
+                        on_edit.emit(Edit::SetRoute {
+                            system: system_ref.clone(),
+                            dst,
+                            points,
+                        });
+                    }
+                    moved
+                }
                 Some(Drag::Blocks {
                     blocks,
                     offset,
@@ -1072,12 +1187,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 <rect class="select-box" x={a.x.min(b.x).to_string()} y={a.y.min(b.y).to_string()}
                     width={(a.x - b.x).abs().to_string()} height={(a.y - b.y).abs().to_string()} />
             });
+            let rerouting = route_preview.as_ref().map(|pts| {
+                let points: Vec<String> = pts.iter().map(|p| format!("{},{}", p.x, p.y)).collect();
+                html! { <polyline class="route-preview" points={points.join(" ")} /> }
+            });
             html! {
                 <svg class="overlay" viewBox={format!("{vx} {vy} {vw} {vh}")}
                     width={vw.to_string()} height={vh.to_string()}>
                     { for wire }
                     { for handles }
                     { for selecting }
+                    { for rerouting }
                 </svg>
             }
         }

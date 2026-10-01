@@ -641,6 +641,7 @@ a.compare {
 }
 
 .overlay line.wire-preview,
+.overlay polyline.route-preview,
 .overlay rect.resize-outline {
     stroke: var(--orange);
     stroke-width: 1.5;
