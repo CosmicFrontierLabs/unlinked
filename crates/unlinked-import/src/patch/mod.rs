@@ -359,6 +359,29 @@ mod tests {
     }
 
     #[test]
+    fn mdl_routes_are_written_as_bare_matrices() {
+        let out_id = import("m.mdl", MDL_LINE.as_bytes()).unwrap().root.blocks[1]
+            .id
+            .clone();
+        let route = Edit::SetRoute {
+            system: vec![],
+            dst: unlinked_model::Endpoint {
+                block: out_id,
+                port: unlinked_model::PortRef {
+                    kind: PortKind::In,
+                    index: 1,
+                },
+            },
+            points: vec![unlinked_model::Point::new(70.0, 25.0)],
+        };
+        let out = apply_edits("m.mdl", MDL_LINE.as_bytes(), &[route]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Points\t[25, 0]\n"), "{text}");
+    }
+
+    const MDL_LINE: &str = "Model {\n  Name\t\"m\"\n  System {\n    Name\t\"m\"\n    Block {\n      BlockType\tGain\n      Name\t\"g\"\n      SID\t\"1\"\n      Position\t[10, 10, 40, 40]\n    }\n    Block {\n      BlockType\tOutport\n      Name\t\"out\"\n      SID\t\"2\"\n      Position\t[100, 10, 130, 40]\n    }\n    Line {\n      SrcBlock\t\"g\"\n      SrcPort\t1\n      Points\t[20, 0]\n      DstBlock\t\"out\"\n      DstPort\t1\n    }\n  }\n}\n";
+
+    #[test]
     fn cp1252_roundtrips() {
         let bytes = b"\x80 caf\xe9 \x93q\x94";
         assert_eq!(encode_cp1252(&decode_text(bytes)).unwrap(), bytes);

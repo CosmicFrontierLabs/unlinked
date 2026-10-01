@@ -780,7 +780,8 @@ fn set_route_points(section: &mut Section, points: &super::RoutePoints) -> Resul
     if points.value == "[]" {
         section.remove_prop("Points");
     } else {
-        section.set_prop("Points", &points.value, false);
+        // A bare matrix, as Simulink writes it; the value is numbers only.
+        section.set_prop("Points", &points.value, true);
     }
     for (branch, p) in section
         .sections_mut()
