@@ -103,6 +103,32 @@ enum Drag {
     Ended { moved: bool },
 }
 
+/// What is selected on the shown diagram level: one kind of thing at a time,
+/// so actions such as Delete never act on a stale selection of another kind.
+#[derive(Clone, Default, PartialEq)]
+enum Selection {
+    #[default]
+    Nothing,
+    /// Blocks, by SID; the inspector shows a lone block.
+    Blocks(Vec<String>),
+    /// A connection, by the input it drives.
+    Wire(Endpoint),
+    /// A branched line, by the source of its trunk.
+    Trunk(Endpoint),
+    /// An annotation, by its index in the system.
+    Annotation(usize),
+}
+
+impl Selection {
+    /// The selected blocks, if blocks are what is selected.
+    fn blocks(&self) -> &[String] {
+        match self {
+            Selection::Blocks(ids) => ids,
+            _ => &[],
+        }
+    }
+}
+
 /// A wire whose route is being dragged.
 enum RouteTarget {
     /// The final leg into input `0`, ending at the port's anchor and outline.
@@ -444,16 +470,9 @@ fn css_string(s: &str) -> String {
 #[function_component(DiagramView)]
 pub fn diagram_view(props: &DiagramProps) -> Html {
     let path = use_state(Vec::<String>::new);
-    // Selected blocks, by SID; the inspector shows a lone selection.
-    let selected = use_state(Vec::<String>::new);
+    let selection = use_state(Selection::default);
     // The selection box being drawn, corner to corner.
     let select_box = use_state(|| None::<(Point, Point)>);
-    // A selected connection, by the input it drives.
-    let selected_wire = use_state(|| None::<Endpoint>);
-    // A selected branched line, by the source of its trunk.
-    let selected_trunk = use_state(|| None::<Endpoint>);
-    // A selected annotation, by its index in the shown system.
-    let selected_annotation = use_state(|| None::<usize>);
     // A connection being dragged: from its first port to the pointer.
     let wire_preview = use_state(|| None::<(Point, Point)>);
     // The outline of a block being resized.
@@ -514,18 +533,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         });
     }
 
-    // A selected connection belongs to the level it was picked on.
+    // A selection belongs to the level it was made on.
     {
-        let (selected_wire, selected_trunk, selected_annotation) = (
-            selected_wire.clone(),
-            selected_trunk.clone(),
-            selected_annotation.clone(),
-        );
-        use_effect_with((*path).clone(), move |_| {
-            selected_wire.set(None);
-            selected_trunk.set(None);
-            selected_annotation.set(None);
-        });
+        let selection = selection.clone();
+        use_effect_with((*path).clone(), move |_| selection.set(Selection::Nothing));
     }
 
     // Wheel zoom around the cursor. Registered by hand so the listener is
@@ -571,11 +582,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .collect()
             })
             .unwrap_or_default();
-        let (container, rendered, wire_preview, selected, select_box) = (
+        let (container, rendered, wire_preview, selection, select_box) = (
             container.clone(),
             rendered.clone(),
             wire_preview.clone(),
-            selected.clone(),
+            selection.clone(),
             select_box.clone(),
         );
         Callback::from(move |e: MouseEvent| {
@@ -685,8 +696,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 .and_then(|_| block_group(e.target())?.get_attribute("data-sid"));
             if let Some(id) = grabbed {
                 // Grabbing a selected block moves the whole selection.
-                let ids = if selected.contains(&id) {
-                    (*selected).clone()
+                let ids = if selection.blocks().contains(&id) {
+                    selection.blocks().to_vec()
                 } else {
                     vec![id]
                 };
@@ -898,12 +909,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_box.clone(),
             route_preview.clone(),
         );
-        let (selected, selected_wire, selected_trunk, view) = (
-            selected.clone(),
-            selected_wire.clone(),
-            selected_trunk.clone(),
-            view.clone(),
-        );
+        let (selection, view) = (selection.clone(), view.clone());
         let blocks: Vec<(String, Rect)> = system
             .map(|s| {
                 s.blocks
@@ -1042,7 +1048,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     let dragged = area.width() + area.height() > 3.0 / view.scale;
                     if dragged {
                         let mut ids = if extend {
-                            (*selected).clone()
+                            selection.blocks().to_vec()
                         } else {
                             Vec::new()
                         };
@@ -1055,9 +1061,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                 ids.push(id.clone());
                             }
                         }
-                        selected.set(ids);
-                        selected_wire.set(None);
-                        selected_trunk.set(None);
+                        selection.set(Selection::Blocks(ids));
                     }
                     dragged
                 }
@@ -1069,50 +1073,54 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onclick = {
         let drag = drag.clone();
-        let (selected, selected_wire, selected_trunk, selected_annotation) = (
-            selected.clone(),
-            selected_wire.clone(),
-            selected_trunk.clone(),
-            selected_annotation.clone(),
-        );
+        let selection = selection.clone();
         Callback::from(move |e: MouseEvent| {
             let moved = matches!(drag.borrow_mut().take(), Some(Drag::Ended { moved: true }));
             if moved {
                 return;
             }
-            let wire =
-                closest(e.target(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"));
-            let trunk =
-                closest(e.target(), "polyline.trunk-hit").and_then(|w| endpoint_of(&w, "src-"));
-            let annotation = closest(e.target(), "[data-annotation]")
-                .and_then(|a| a.get_attribute("data-annotation")?.parse::<usize>().ok());
-            let block = block_group(e.target()).and_then(|g| g.get_attribute("data-sid"));
-            selected_trunk.set(trunk.clone());
-            selected_annotation.set(annotation);
-            let other = wire.is_some() || trunk.is_some() || annotation.is_some();
-            selected.set(match (other, block) {
-                (true, _) => Vec::new(),
+            let target = e.target();
+            let wire = || {
+                closest(target.clone(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"))
+            };
+            let trunk = || {
+                closest(target.clone(), "polyline.trunk-hit").and_then(|w| endpoint_of(&w, "src-"))
+            };
+            let annotation = || {
+                closest(target.clone(), "[data-annotation]")?
+                    .get_attribute("data-annotation")?
+                    .parse::<usize>()
+                    .ok()
+            };
+            let block = || block_group(target.clone())?.get_attribute("data-sid");
+            selection.set(if let Some(dst) = wire() {
+                Selection::Wire(dst)
+            } else if let Some(src) = trunk() {
+                Selection::Trunk(src)
+            } else if let Some(id) = block() {
                 // Shift-click adds or removes a block.
-                (false, Some(id)) if e.shift_key() => {
-                    let mut ids = (*selected).clone();
+                if e.shift_key() {
+                    let mut ids = selection.blocks().to_vec();
                     match ids.iter().position(|s| *s == id) {
                         Some(i) => {
                             ids.remove(i);
                         }
                         None => ids.push(id),
                     }
-                    ids
+                    Selection::Blocks(ids)
+                } else {
+                    Selection::Blocks(vec![id])
                 }
-                (false, Some(id)) => vec![id],
-                (false, None) => Vec::new(),
+            } else if let Some(index) = annotation() {
+                Selection::Annotation(index)
+            } else {
+                Selection::Nothing
             });
-            selected_wire.set(wire);
         })
     };
     let onkeydown = {
-        let (selected, selected_wire, on_edit, on_edits, system_ref) = (
-            selected.clone(),
-            selected_wire.clone(),
+        let (selection, on_edit, on_edits, system_ref) = (
+            selection.clone(),
             on_edit.clone(),
             props.on_edit.clone(),
             system_ref.clone(),
@@ -1121,8 +1129,6 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
         let annotations: Vec<Annotation> =
             system.map(|s| s.annotations.clone()).unwrap_or_default();
-        let (selected_trunk, selected_annotation) =
-            (selected_trunk.clone(), selected_annotation.clone());
         let (clipboard, model, on_error) = (
             clipboard.clone(),
             props.model.clone(),
@@ -1136,12 +1142,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             let key = e.key().to_ascii_lowercase();
             // Copy (Ctrl+C) the selected blocks; paste (Ctrl+V) duplicates
             // them with their internal lines, offset from the originals.
-            if command && key == "c" && !selected.is_empty() {
+            if command && key == "c" && !selection.blocks().is_empty() {
                 e.prevent_default();
                 *clipboard.borrow_mut() = Some(Clipboard {
                     model: model.clone(),
                     system: system_ref.clone(),
-                    ids: selected.iter().cloned().map(BlockId).collect(),
+                    ids: selection.blocks().iter().cloned().map(BlockId).collect(),
                     pastes: 0,
                 });
                 return;
@@ -1175,9 +1181,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             })
                             .collect();
                         on_edits.emit(group);
-                        selected.set(added);
-                        selected_wire.set(None);
-                        selected_trunk.set(None);
+                        selection.set(Selection::Blocks(added));
                     }
                     Err(message) => {
                         if let Some(on_error) = &on_error {
@@ -1191,7 +1195,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             if command && (key == "r" || key == "i") {
                 let chosen: Vec<&Block> = blocks
                     .iter()
-                    .filter(|b| selected.contains(&b.id.0))
+                    .filter(|b| selection.blocks().contains(&b.id.0))
                     .collect();
                 if chosen.is_empty() {
                     return;
@@ -1225,39 +1229,46 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             // Select every block (Ctrl+A).
             if command && key == "a" {
                 e.prevent_default();
-                selected.set(blocks.iter().map(|b| b.id.0.clone()).collect());
-                selected_wire.set(None);
-                selected_trunk.set(None);
+                selection.set(Selection::Blocks(
+                    blocks.iter().map(|b| b.id.0.clone()).collect(),
+                ));
                 return;
             }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
                 return;
             }
-            let annotation = selected_annotation.and_then(|i| Some((i, annotations.get(i)?)));
-            if let Some(dst) = (*selected_wire).clone() {
-                e.prevent_default();
-                on_edit.emit(Edit::Disconnect {
-                    system: system_ref.clone(),
-                    dst,
-                });
-                selected_wire.set(None);
-            } else if let Some((index, a)) = annotation {
-                e.prevent_default();
-                on_edit.emit(Edit::DeleteAnnotation {
-                    system: system_ref.clone(),
-                    target: AnnotationTarget {
-                        index,
-                        expected: a.clone(),
-                    },
-                });
-                selected_annotation.set(None);
-            } else if !selected.is_empty() {
-                e.prevent_default();
-                let ids: Vec<BlockId> = selected.iter().cloned().map(BlockId).collect();
-                if let Some(group) = confirm_delete(&system_ref, &ids, &lines) {
-                    on_edits.emit(group);
-                    selected.set(Vec::new());
+            match &*selection {
+                Selection::Wire(dst) => {
+                    e.prevent_default();
+                    on_edit.emit(Edit::Disconnect {
+                        system: system_ref.clone(),
+                        dst: dst.clone(),
+                    });
+                    selection.set(Selection::Nothing);
                 }
+                Selection::Annotation(index) => {
+                    let Some(a) = annotations.get(*index) else {
+                        return;
+                    };
+                    e.prevent_default();
+                    on_edit.emit(Edit::DeleteAnnotation {
+                        system: system_ref.clone(),
+                        target: AnnotationTarget {
+                            index: *index,
+                            expected: a.clone(),
+                        },
+                    });
+                    selection.set(Selection::Nothing);
+                }
+                Selection::Blocks(ids) if !ids.is_empty() => {
+                    e.prevent_default();
+                    let ids: Vec<BlockId> = ids.iter().cloned().map(BlockId).collect();
+                    if let Some(group) = confirm_delete(&system_ref, &ids, &lines) {
+                        on_edits.emit(group);
+                        selection.set(Selection::Nothing);
+                    }
+                }
+                _ => {}
             }
         })
     };
@@ -1299,13 +1310,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let ondblclick = {
         let path = path.clone();
-        let selected = selected.clone();
+        let selection = selection.clone();
         let model = props.model.clone();
-        let (on_edit, system_ref, selected_annotation) = (
-            on_edit.clone(),
-            system_ref.clone(),
-            selected_annotation.clone(),
-        );
+        let (on_edit, system_ref) = (on_edit.clone(), system_ref.clone());
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         let annotation_count = system.map_or(0, |s| s.annotations.len());
         Callback::from(move |e: MouseEvent| {
@@ -1331,8 +1338,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         text: "Annotation".into(),
                         position: Rect::new(x, y, x, y),
                     });
-                    selected.set(Vec::new());
-                    selected_annotation.set(Some(annotation_count));
+                    selection.set(Selection::Annotation(annotation_count));
                 }
                 return;
             }
@@ -1348,25 +1354,27 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 let mut p = (*path).clone();
                 p.push(name);
                 path.set(p);
-                selected.set(Vec::new());
+                selection.set(Selection::Nothing);
             }
         })
     };
 
     // The inspector and resize handles follow a lone selected block.
-    let selected_block = system.and_then(|s| match selected.as_slice() {
+    let selected_block = system.and_then(|s| match selection.blocks() {
         [sid] => s.blocks.iter().find(|b| &b.id.0 == sid),
         _ => None,
     });
-    // Only an input driven by exactly one line identifies it; imported models
-    // may drive an input twice, and then which line was clicked is unknown.
     // A line selected by the input it drives or the source of its trunk;
     // ends shared by several lines (in imported models) select none.
-    let selected_line = system.and_then(|s| match (&*selected_wire, &*selected_trunk) {
-        (Some(dst), _) => unlinked_model::edit::line_into(s, dst),
-        (None, Some(src)) => unlinked_model::edit::line_from(s, src),
-        (None, None) => None,
+    let selected_line = system.and_then(|s| match &*selection {
+        Selection::Wire(dst) => unlinked_model::edit::line_into(s, dst),
+        Selection::Trunk(src) => unlinked_model::edit::line_from(s, src),
+        _ => None,
     });
+    let selected_annotation = match &*selection {
+        Selection::Annotation(i) => system.and_then(|s| s.annotations.get(*i)).map(|a| (*i, a)),
+        _ => None,
+    };
     let selected_chart = selected_block.and_then(|b| {
         let mut p = refs.clone();
         p.push(&b.name);
@@ -1375,14 +1383,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
 
     let open_path = {
         let path = path.clone();
-        let selected = selected.clone();
         move |p: Vec<String>| {
             let path = path.clone();
-            let selected = selected.clone();
-            Callback::from(move |_: MouseEvent| {
-                path.set(p.clone());
-                selected.set(Vec::new());
-            })
+            Callback::from(move |_: MouseEvent| path.set(p.clone()))
         }
     };
 
@@ -1423,44 +1426,34 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
 
-    let highlight: String = selected
-        .iter()
-        .map(|sid| {
-            format!(
-                ".diagram g.block[data-sid=\"{}\"] > :is(rect, polygon, ellipse) {{ stroke: #ff9e64; stroke-width: 3px; }}\n",
-                css_string(sid)
-            )
-        })
-        .collect();
-    let wire_highlight = selected_wire
-        .as_ref()
-        .map(|dst| {
-            format!(
-                ".diagram polyline.wire-hit[data-dst-sid=\"{}\"][data-dst-kind=\"{}\"][data-dst-index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
-                css_string(&dst.block.0),
-                dst.port.kind.token(),
-                dst.port.index
-            )
-        })
-        .unwrap_or_default()
-        + &selected_trunk
-            .as_ref()
-            .map(|src| {
+    let line_end = |class: &str, prefix: &str, ep: &Endpoint| {
+        format!(
+            ".diagram polyline.{class}[data-{prefix}sid=\"{}\"][data-{prefix}kind=\"{}\"][data-{prefix}index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
+            css_string(&ep.block.0),
+            ep.port.kind.token(),
+            ep.port.index
+        )
+    };
+    let highlight: String = match &*selection {
+        Selection::Nothing => String::new(),
+        Selection::Blocks(ids) => ids
+            .iter()
+            .map(|sid| {
                 format!(
-                    ".diagram polyline.trunk-hit[data-src-sid=\"{}\"][data-src-kind=\"{}\"][data-src-index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
-                    css_string(&src.block.0),
-                    src.port.kind.token(),
-                    src.port.index
+                    ".diagram g.block[data-sid=\"{}\"] > :is(rect, polygon, ellipse) {{ stroke: #ff9e64; stroke-width: 3px; }}\n",
+                    css_string(sid)
                 )
             })
-            .unwrap_or_default();
-    let wire_highlight = wire_highlight
-        + &selected_annotation
-            .map(|i| format!(".diagram .annotation[data-annotation=\"{i}\"] {{ fill: #ff9e64; }}"))
-            .unwrap_or_default();
+            .collect(),
+        Selection::Wire(dst) => line_end("wire-hit", "dst-", dst),
+        Selection::Trunk(src) => line_end("trunk-hit", "src-", src),
+        Selection::Annotation(i) => {
+            format!(".diagram .annotation[data-annotation=\"{i}\"] {{ fill: #ff9e64; }}")
+        }
+    };
     let highlight = match &props.diff {
-        Some(d) => diff_css(d, &path, system) + &highlight + &wire_highlight,
-        None => highlight + &wire_highlight,
+        Some(d) => diff_css(d, &path, system) + &highlight,
+        None => highlight,
     };
 
     let canvas = match rendered.as_ref() {
@@ -1537,8 +1530,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 <aside class="tree">
                     <SystemTree model={props.model.clone()} current={(*path).clone()} on_open={Callback::from({
                         let path = path.clone();
-                        let selected = selected.clone();
-                        move |p: Vec<String>| { path.set(p); selected.set(Vec::new()); }
+                        move |p: Vec<String>| path.set(p)
                     })} />
                     if props.on_edit.is_some() {
                         <BlockPalette />
@@ -1556,23 +1548,29 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         blocks={Rc::new(system.map(|s| s.blocks.clone()).unwrap_or_default())}
                         on_edit={on_edit.clone()} />
                 }
-                if let Some((index, annotation)) = selected_annotation
-                    .and_then(|i| Some((i, system?.annotations.get(i)?)))
-                {
+                if let Some((index, annotation)) = selected_annotation {
+                    // Deleting it frees its index for the next annotation, so
+                    // the selection must not linger on that index.
                     <AnnotationInspector {index} annotation={Rc::new(annotation.clone())}
-                        system={system_ref.clone()} on_edit={on_edit.clone()} />
+                        system={system_ref.clone()} on_edit={on_edit.clone().map(|on_edit| {
+                            let selection = selection.clone();
+                            Callback::from(move |edit: Edit| {
+                                if matches!(edit, Edit::DeleteAnnotation { .. }) {
+                                    selection.set(Selection::Nothing);
+                                }
+                                on_edit.emit(edit);
+                            })
+                        })} />
                 }
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
                         system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
                         on_edit={on_edit.clone()} on_open={Callback::from({
                         let path = path.clone();
-                        let selected = selected.clone();
                         move |name: String| {
                             let mut p = (*path).clone();
                             p.push(name);
                             path.set(p);
-                            selected.set(Vec::new());
                         }
                     })} />
                 }

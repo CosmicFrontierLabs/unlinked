@@ -209,6 +209,32 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
             ],
         );
     }
+    if opts.hit_targets {
+        // Annotation text is hard to hit glyph by glyph: cover each box, in
+        // the annotations' own layer so blocks drawn later stay on top.
+        s.open(
+            "g",
+            &[
+                ("class", "annotation-hits".into()),
+                ("fill", "transparent".into()),
+            ],
+        );
+        for (a, i) in annotations.iter().zip(&annotation_index) {
+            let r = a.bounds();
+            s.leaf(
+                "rect",
+                &[
+                    ("class", "annotation-hit".into()),
+                    ("x", num(r.left)),
+                    ("y", num(r.top)),
+                    ("width", num(r.width())),
+                    ("height", num(r.height())),
+                    ("data-annotation", i.to_string()),
+                ],
+            );
+        }
+        s.close("g");
+    }
 
     let connected = connected_ports(sys);
     let mut order: Vec<usize> = (0..sys.blocks.len()).collect();
@@ -242,30 +268,6 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
     s.close("g");
 
     if opts.hit_targets {
-        // Annotation text is hard to hit glyph by glyph: cover each box,
-        // beneath the wire and port targets.
-        s.open(
-            "g",
-            &[
-                ("class", "annotation-hits".into()),
-                ("fill", "transparent".into()),
-            ],
-        );
-        for (a, i) in annotations.iter().zip(&annotation_index) {
-            let r = a.bounds();
-            s.leaf(
-                "rect",
-                &[
-                    ("class", "annotation-hit".into()),
-                    ("x", num(r.left)),
-                    ("y", num(r.top)),
-                    ("width", num(r.width())),
-                    ("height", num(r.height())),
-                    ("data-annotation", i.to_string()),
-                ],
-            );
-        }
-        s.close("g");
         draw_hit_targets(&mut s, sys, &routed)?;
     }
 
