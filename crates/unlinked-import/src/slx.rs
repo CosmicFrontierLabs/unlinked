@@ -33,6 +33,10 @@ impl SlxPackage {
         self.archive.index_for_name(name).is_some()
     }
 
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.archive.file_names()
+    }
+
     pub fn read_string(&mut self, name: &str) -> Result<String, ImportError> {
         let mut file = self
             .archive
