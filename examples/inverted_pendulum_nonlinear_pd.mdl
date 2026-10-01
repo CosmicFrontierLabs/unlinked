@@ -168,21 +168,21 @@ Model {
     Line {
       SrcBlock "damping"
       SrcPort 1
-      Points [-95, 0; 0, -110]
+      Points [-95, 0; 0, -105]
       DstBlock "Angular accel"
       DstPort 3
     }
     Line {
       SrcBlock "Kp"
       SrcPort 1
-      Points [-90, 0; 0, 25]
+      Points [-90, 0; 0, 20]
       DstBlock "PD"
       DstPort 1
     }
     Line {
       SrcBlock "Kd"
       SrcPort 1
-      Points [-15, 0; 0, -15]
+      Points [-15, 0; 0, -10]
       DstBlock "PD"
       DstPort 2
     }

@@ -115,7 +115,7 @@ Model {
     Line {
       SrcBlock "Kp"
       SrcPort 1
-      Points [80, 0; 0, 30]
+      Points [80, 0; 0, 25]
       DstBlock "PID"
       DstPort 1
     }
@@ -128,7 +128,7 @@ Model {
     Line {
       SrcBlock "Filtered derivative"
       SrcPort 1
-      Points [50, 0; 0, -30]
+      Points [50, 0; 0, -25]
       DstBlock "PID"
       DstPort 3
     }
@@ -155,7 +155,7 @@ Model {
         DstPort 1
       }
       Branch {
-        Points [0, 90; -440, 0; 0, -85]
+        Points [0, 90; -440, 0; 0, -80]
         DstBlock "Error"
         DstPort 2
       }

@@ -105,12 +105,12 @@ Model {
         DstPort 1
       }
       Branch {
-        Points [0, 90]
+        Points [0, 85]
         DstBlock "A"
         DstPort 1
       }
       Branch {
-        Points [0, 160]
+        Points [0, 155]
         DstBlock "LQR gain -K"
         DstPort 1
       }
@@ -118,7 +118,7 @@ Model {
     Line {
       SrcBlock "A"
       SrcPort 1
-      Points [-80, 0; 0, -75]
+      Points [-80, 0; 0, -70]
       DstBlock "Sum"
       DstPort 2
     }

@@ -118,7 +118,7 @@ Model {
     Line {
       SrcBlock "Ki"
       SrcPort 1
-      Points [20, 0; 0, -40]
+      Points [20, 0; 0, -20]
       DstBlock "PI"
       DstPort 2
     }
