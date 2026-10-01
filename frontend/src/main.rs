@@ -2,6 +2,7 @@ mod api;
 mod auth;
 pub mod diagnostics_worker;
 mod diagram;
+mod dialog;
 mod editor;
 mod fetch;
 mod local_viewer;

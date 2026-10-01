@@ -5,6 +5,7 @@
 //! instead of the generated plumbing inside it; path entries past the chart
 //! block name subcharted states.
 
+use crate::dialog::ParameterDialog;
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
@@ -51,6 +52,12 @@ pub struct DiagramProps {
     /// The check stopped listing problems at its limits, or did not finish.
     #[prop_or_default]
     pub problems_truncated: bool,
+    /// Starts a compile check of the shown model; unset while one runs.
+    #[prop_or_default]
+    pub on_compile: Option<Callback<()>>,
+    /// The state or outcome of the last compile check, if any.
+    #[prop_or_default]
+    pub compile_status: AttrValue,
     /// Opens the model settings, for problems with them.
     #[prop_or_default]
     pub on_settings: Option<Callback<()>>,
@@ -1928,8 +1935,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let problem_list = (*show_problems).then(|| {
         html! {
             <div class="problems-panel">
+                <div class="compile-check">
+                    <button onclick={props.on_compile.clone().map(|c| c.reform(|_: MouseEvent| ()))}
+                        disabled={props.on_compile.is_none()}
+                        title="Compile the model for the simulator, off the page's main thread, without simulating">
+                        { "Check compile" }
+                    </button>
+                    <span class="muted">{ &props.compile_status }</span>
+                </div>
                 if props.problems.is_empty() {
-                    <div class="muted">{ "No problems found by the static check." }</div>
+                    <div class="muted">{ "No problems found." }</div>
                 }
                 { for props.problems.iter().map(|d| html! {
                     <button class={classes!("problem-row", problem_class(d))} onclick={go_to(d)}>
@@ -1940,7 +1955,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if props.problems_truncated {
                     <div class="problem warning">{ "The check stopped at its limits: there may be more problems than listed." }</div>
                 }
-                <div class="muted">{ "Static check: structure, settings and simulator support. No simulation was run." }</div>
+                <div class="muted">{ "Checks structure, settings and simulator support. No simulation is run." }</div>
             </div>
         }
     });
@@ -2381,6 +2396,28 @@ fn inspector(props: &InspectorProps) -> Html {
         });
     let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
     let script = props.chart.as_ref().and_then(|c| c.script.clone());
+    // Native catalog blocks get their dialog; any other stored parameters,
+    // and every parameter of other blocks, are listed raw.
+    let descriptor = catalog::find(&b.block_type)
+        .filter(|_| b.mask.is_none() && b.library_source.is_none() && b.subsystem.is_none());
+    let others: Vec<(&String, &String)> = b
+        .parameters
+        .iter()
+        .filter(|(k, _)| !HIDDEN_PARAMETERS.contains(&k.as_str()))
+        .filter(|(k, _)| {
+            descriptor.is_none_or(|d| d.parameters.iter().all(|p| p.name != k.as_str()))
+        })
+        .collect();
+    let shown_fields: Vec<&str> = descriptor
+        .map(|d| {
+            d.dialog_sections(&b.parameters)
+                .into_iter()
+                .flat_map(|s| s.fields)
+                .filter(|(_, visible)| *visible)
+                .map(|(p, _)| p.name)
+                .collect()
+        })
+        .unwrap_or_default();
     // A value cell: editable input when editing, code otherwise. Changes
     // are committed on blur or Enter.
     let value_cell = |name: &str, value: &str| -> Html {
@@ -2451,7 +2488,10 @@ fn inspector(props: &InspectorProps) -> Html {
         <aside class="inspector">
             { title }
             <div class="muted">{ format!("{kind} · SID {}", b.id) }</div>
-            { for props.problems.iter().map(|d| {
+            // Problems with a shown dialog field are shown beside it instead.
+            { for props.problems.iter().filter(|d| !matches!(&d.target,
+                DiagnosticTarget::Block { parameter: Some(p), .. } if shown_fields.contains(&p.as_str())
+            )).map(|d| {
                 let about = match &d.target {
                     DiagnosticTarget::Block { parameter: Some(p), .. } => format!("{p}: "),
                     _ => String::new(),
@@ -2489,12 +2529,20 @@ fn inspector(props: &InspectorProps) -> Html {
                 </table>
             }
             { for ScopeConfig::from_block(b).map(scope_section) }
-            <h4>{ "Parameters" }</h4>
-            <table>
-                { for b.parameters.iter().filter(|(k, _)| !HIDDEN_PARAMETERS.contains(&k.as_str())).map(|(k, v)| html! {
-                    <tr><td>{ k }</td><td>{ value_cell(k, v) }</td></tr>
-                }) }
-            </table>
+            if descriptor.is_some() {
+                <ParameterDialog block={props.block.clone()} system={props.system.clone()}
+                    problems={props.problems.clone()} on_edit={props.on_edit.clone()} />
+            }
+            if !others.is_empty() {
+                <details class="raw" open={descriptor.is_none()}>
+                    <summary>{ if descriptor.is_some() { "Other parameters" } else { "Parameters" } }</summary>
+                    <table>
+                        { for others.iter().map(|(k, v)| html! {
+                            <tr><td>{ k }</td><td>{ value_cell(k, v) }</td></tr>
+                        }) }
+                    </table>
+                </details>
+            }
             if let Some(spec) = b.param("ScopeSpecificationString") {
                 <details class="raw">
                     <summary>{ "Raw scope specification" }</summary>
