@@ -32,6 +32,9 @@ pub struct DiagramProps {
     #[prop_or_default]
     /// Each call carries one user action, which undo treats as a unit.
     pub on_edit: Option<Callback<Vec<Edit>>>,
+    /// Why an editing action could not be turned into edits.
+    #[prop_or_default]
+    pub on_error: Option<Callback<String>>,
     /// The view re-fits when this changes; by default whenever the model
     /// changes. Editors pass a stable key so edits keep the current view.
     #[prop_or_default]
@@ -417,6 +420,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         y: 0.0,
     });
     let drag = use_mut_ref(|| None::<Drag>);
+    // Blocks copied with Ctrl+C: their system, IDs, and how many times they
+    // have been pasted (each paste lands further down and right).
+    let clipboard = use_mut_ref(|| None::<(SystemRef, Vec<BlockId>, u32)>);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -941,13 +947,69 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
         let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
+        let (clipboard, model, on_error) = (
+            clipboard.clone(),
+            props.model.clone(),
+            props.on_error.clone(),
+        );
         Callback::from(move |e: KeyboardEvent| {
             let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
                 return;
             };
-            // Rotate (Ctrl+R) and flip (Ctrl+I), as in Simulink.
             let command = e.ctrl_key() || e.meta_key();
             let key = e.key().to_ascii_lowercase();
+            // Copy (Ctrl+C) the selected blocks; paste (Ctrl+V) duplicates
+            // them with their internal lines, offset from the originals.
+            if command && key == "c" && !selected.is_empty() {
+                e.prevent_default();
+                let ids = selected.iter().cloned().map(BlockId).collect();
+                *clipboard.borrow_mut() = Some((system_ref.clone(), ids, 0));
+                return;
+            }
+            if command && key == "v" {
+                let mut clip = clipboard.borrow_mut();
+                let Some((from, ids, pastes)) =
+                    clip.as_mut().filter(|(from, ..)| *from == system_ref)
+                else {
+                    return;
+                };
+                e.prevent_default();
+                let step = 20.0 * f64::from(*pastes + 1);
+                let pasted = unlinked_model::edit::next_sid(&model)
+                    .ok_or_else(|| "no block IDs left".to_string())
+                    .and_then(|sid| {
+                        unlinked_model::edit::duplicate(
+                            &model,
+                            from,
+                            ids,
+                            Point::new(step, step),
+                            sid,
+                        )
+                        .map_err(|e| e.to_string())
+                    });
+                match pasted {
+                    Ok(group) => {
+                        *pastes += 1;
+                        let added = group
+                            .iter()
+                            .filter_map(|edit| match edit {
+                                Edit::AddBlock { id, .. } => Some(id.0.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        on_edits.emit(group);
+                        selected.set(added);
+                        selected_wire.set(None);
+                    }
+                    Err(message) => {
+                        if let Some(on_error) = &on_error {
+                            on_error.emit(format!("Cannot paste: {message}"));
+                        }
+                    }
+                }
+                return;
+            }
+            // Rotate (Ctrl+R) and flip (Ctrl+I), as in Simulink.
             if command && (key == "r" || key == "i") {
                 let chosen: Vec<&Block> = blocks
                     .iter()
