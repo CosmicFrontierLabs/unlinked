@@ -43,6 +43,47 @@ impl Side {
     }
 }
 
+/// Orientation and control-side mirroring for Simulink's `BlockRotation`
+/// (clockwise degrees) and `BlockMirror`.
+pub fn from_rotation(rotation: i32, mirror: bool) -> (Orientation, bool) {
+    match (rotation.rem_euclid(360), mirror) {
+        (90, false) => (Orientation::Down, false),
+        (90, true) => (Orientation::Up, true),
+        (180, false) => (Orientation::Left, true),
+        (180, true) => (Orientation::Right, true),
+        (270, false) => (Orientation::Up, false),
+        (270, true) => (Orientation::Down, true),
+        (_, false) => (Orientation::Right, false),
+        (_, true) => (Orientation::Left, false),
+    }
+}
+
+/// Inverse of [`from_rotation`]: `BlockRotation` and `BlockMirror`.
+pub fn to_rotation(orientation: Orientation, mirrored: bool) -> (i32, bool) {
+    match (orientation, mirrored) {
+        (Orientation::Right, false) => (0, false),
+        (Orientation::Left, false) => (0, true),
+        (Orientation::Down, false) => (90, false),
+        (Orientation::Up, true) => (90, true),
+        (Orientation::Left, true) => (180, false),
+        (Orientation::Right, true) => (180, true),
+        (Orientation::Up, false) => (270, false),
+        (Orientation::Down, true) => (270, true),
+    }
+}
+
+/// The block turned 90° clockwise, as Simulink's Rotate (Ctrl+R).
+pub fn rotated(orientation: Orientation, mirrored: bool) -> (Orientation, bool) {
+    let (rotation, mirror) = to_rotation(orientation, mirrored);
+    from_rotation(rotation + 90, mirror)
+}
+
+/// The block flipped across its signal axis, as Simulink's Flip (Ctrl+I).
+pub fn flipped(orientation: Orientation, mirrored: bool) -> (Orientation, bool) {
+    let (rotation, mirror) = to_rotation(orientation, mirrored);
+    from_rotation(rotation, !mirror)
+}
+
 /// Ports drawn on the "control" side (top, for a right-facing block).
 const CONTROL_KINDS: [PortKind; 5] = [
     PortKind::Enable,
