@@ -125,7 +125,7 @@ impl DiagnosticsWorker {
         Self {
             current: Rc::new(Cell::new(0)),
             running: None,
-            timeout_ms: timeout_ms.max(1),
+            timeout_ms: timeout_ms.clamp(1, i32::MAX as u32),
         }
     }
     /// Cancel is silent; the panel owns the decision to clear or retain old results.
@@ -202,5 +202,22 @@ impl DiagnosticsWorker {
 impl Drop for DiagnosticsWorker {
     fn drop(&mut self) {
         self.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DiagnosticsWorker;
+    #[test]
+    fn timeout_fits_positive_browser_timer_range() {
+        for (requested, expected) in [
+            (0, 1),
+            (1, 1),
+            (15_000, 15_000),
+            (i32::MAX as u32, i32::MAX as u32),
+            (u32::MAX, i32::MAX as u32),
+        ] {
+            assert_eq!(DiagnosticsWorker::new(requested).timeout_ms, expected);
+        }
     }
 }
