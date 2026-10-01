@@ -8,8 +8,9 @@ use super::{format_ports, parse_endpoint};
 use crate::convert::parse_port;
 use crate::{ImportError, MAX_DEPTH, MAX_NODES};
 use unlinked_model::edit::{Edit, SID_WATERMARK};
-use unlinked_model::Rect;
+use unlinked_model::geometry::to_rotation;
 use unlinked_model::{Block, PortKind, PortRef};
+use unlinked_model::{Orientation, Rect};
 
 #[derive(Debug, Clone)]
 enum Item {
@@ -492,7 +493,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         Edit::MoveBlock { id, .. }
         | Edit::SetParameter { id, .. }
         | Edit::RenameBlock { id, .. }
-        | Edit::DeleteBlock { id, .. } => id,
+        | Edit::DeleteBlock { id, .. }
+        | Edit::SetOrientation { id, .. } => id,
     };
     let name = resolved.name(id)?;
     let mut matches = sys.items.iter().enumerate().filter(|(_, i)| {
@@ -518,6 +520,36 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
     match edit {
         Edit::MoveBlock { position, .. } => {
             block_at(sys, i).set_prop("Position", &format_rect(position), true);
+            for line in sys
+                .sections_mut()
+                .filter(|l| l.tag == "Line" && touches(l, name, sid))
+            {
+                clear_points(line);
+            }
+        }
+        Edit::SetOrientation {
+            orientation,
+            mirrored,
+            ..
+        } => {
+            let b = block_at(sys, i);
+            // Older files say `Orientation "left"`; keep that form unless
+            // the block already uses rotation or needs a mirror.
+            if b.prop("BlockRotation").is_none() && !mirrored {
+                let word = match orientation {
+                    Orientation::Right => "right",
+                    Orientation::Left => "left",
+                    Orientation::Up => "up",
+                    Orientation::Down => "down",
+                };
+                b.set_prop("Orientation", word, false);
+                b.remove_prop("BlockMirror");
+            } else {
+                let (rotation, mirror) = to_rotation(*orientation, *mirrored);
+                b.remove_prop("Orientation");
+                b.set_prop("BlockRotation", &rotation.to_string(), true);
+                b.set_prop("BlockMirror", if mirror { "on" } else { "off" }, true);
+            }
             for line in sys
                 .sections_mut()
                 .filter(|l| l.tag == "Line" && touches(l, name, sid))

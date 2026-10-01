@@ -10,6 +10,7 @@ use super::{format_ports, parse_endpoint};
 use crate::{ImportError, MAX_DEPTH, MAX_UNCOMPRESSED_BYTES};
 use std::io::{Cursor, Read, Write};
 use unlinked_model::edit::{Edit, SID_WATERMARK};
+use unlinked_model::geometry::to_rotation;
 use unlinked_model::{Block, Endpoint, PortCounts, PortKind};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -302,7 +303,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         Edit::MoveBlock { id, .. }
         | Edit::SetParameter { id, .. }
         | Edit::RenameBlock { id, .. }
-        | Edit::DeleteBlock { id, .. } => id.0.clone(),
+        | Edit::DeleteBlock { id, .. }
+        | Edit::SetOrientation { id, .. } => id.0.clone(),
     };
     let i = only_child(parent, &format!("block {sid}"), |c| {
         c.name == "Block" && c.attr("SID").as_deref() == Some(sid.as_str())
@@ -313,6 +315,32 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
             match block.prop_mut("Position") {
                 Some(p) => p.set_text(&format_rect(position)),
                 None => block.push_prop("Position", &format_rect(position)),
+            }
+            for line in parent
+                .elements_mut()
+                .filter(|l| l.name == "Line" && touches(l, &sid))
+            {
+                clear_points(line);
+            }
+        }
+        Edit::SetOrientation {
+            orientation,
+            mirrored,
+            ..
+        } => {
+            let block = element_mut(parent, i);
+            let (rotation, mirror) = to_rotation(*orientation, *mirrored);
+            block.children.retain(|c| {
+                !matches!(c, XNode::Element(p) if p.name == "P" && p.attr("Name").as_deref() == Some("Orientation"))
+            });
+            for (name, value) in [
+                ("BlockRotation", rotation.to_string()),
+                ("BlockMirror", if mirror { "on" } else { "off" }.to_string()),
+            ] {
+                match block.prop_mut(name) {
+                    Some(p) => p.set_text(&value),
+                    None => block.push_prop(name, &value),
+                }
             }
             for line in parent
                 .elements_mut()

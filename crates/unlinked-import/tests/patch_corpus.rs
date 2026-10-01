@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use unlinked_model::edit::{apply_batch, next_sid, touches, DisconnectPolicy, Edit};
+use unlinked_model::geometry::{flipped, rotated};
 use unlinked_model::{BlockId, Branch, Endpoint, Line, Model, PortKind, PortRef, Rect};
 
 fn corpus_dir() -> Option<PathBuf> {
@@ -106,10 +107,10 @@ fn structural_edits(model: &Model, edits: &mut Vec<Edit>) {
     let Some(sid) = next_sid(model) else {
         return;
     };
-    let deleted: Vec<&BlockId> = edits
+    let deleted: Vec<BlockId> = edits
         .iter()
         .filter_map(|e| match e {
-            Edit::DeleteBlock { id, .. } => Some(id),
+            Edit::DeleteBlock { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
@@ -169,6 +170,22 @@ fn structural_edits(model: &Model, edits: &mut Vec<Edit>) {
         edits.push(Edit::Disconnect {
             system: vec![],
             dst,
+        });
+    }
+    // Turn and flip a block the batch has not touched.
+    let untouched = model
+        .root
+        .blocks
+        .iter()
+        .find(|b| !edits.iter().any(|e| e.block() == Some(&b.id)) && !deleted.contains(&b.id));
+    if let Some(b) = untouched {
+        let (o, m) = rotated(b.orientation, b.mirrored);
+        let (orientation, mirrored) = flipped(o, m);
+        edits.push(Edit::SetOrientation {
+            system: vec![],
+            id: b.id.clone(),
+            orientation,
+            mirrored,
         });
     }
 }

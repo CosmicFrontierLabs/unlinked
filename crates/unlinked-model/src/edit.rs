@@ -89,6 +89,14 @@ pub enum Edit {
         src: Endpoint,
         points: Vec<crate::Point>,
     },
+    /// Turn or flip a block; see [`crate::geometry::rotated`] and
+    /// [`crate::geometry::flipped`]. Attached lines are routed afresh.
+    SetOrientation {
+        system: SystemRef,
+        id: BlockId,
+        orientation: Orientation,
+        mirrored: bool,
+    },
 }
 
 /// An edit that could not be applied, and its position in the batch.
@@ -301,7 +309,8 @@ impl Edit {
             | Edit::Connect { system, .. }
             | Edit::Disconnect { system, .. }
             | Edit::SetRoute { system, .. }
-            | Edit::SetTrunkRoute { system, .. } => system,
+            | Edit::SetTrunkRoute { system, .. }
+            | Edit::SetOrientation { system, .. } => system,
         }
     }
 
@@ -311,7 +320,8 @@ impl Edit {
             Edit::MoveBlock { id, .. }
             | Edit::SetParameter { id, .. }
             | Edit::RenameBlock { id, .. }
-            | Edit::DeleteBlock { id, .. } => Some(id),
+            | Edit::DeleteBlock { id, .. }
+            | Edit::SetOrientation { id, .. } => Some(id),
             Edit::AddBlock { .. }
             | Edit::Connect { .. }
             | Edit::Disconnect { .. }
@@ -340,7 +350,10 @@ impl Edit {
             Edit::SetRoute { points, .. } | Edit::SetTrunkRoute { points, .. } => {
                 crate::route_edit::validate_points(points)?;
             }
-            Edit::DeleteBlock { .. } | Edit::Connect { .. } | Edit::Disconnect { .. } => {}
+            Edit::DeleteBlock { .. }
+            | Edit::Connect { .. }
+            | Edit::Disconnect { .. }
+            | Edit::SetOrientation { .. } => {}
         }
         Ok(())
     }
@@ -383,7 +396,8 @@ impl Edit {
             Edit::MoveBlock { id, .. }
             | Edit::SetParameter { id, .. }
             | Edit::RenameBlock { id, .. }
-            | Edit::DeleteBlock { id, .. } => id,
+            | Edit::DeleteBlock { id, .. }
+            | Edit::SetOrientation { id, .. } => id,
         };
         let names = system_names(model, self.system())
             .ok_or_else(|| EditError::NoSystem(self.system().to_vec()))?;
@@ -408,6 +422,18 @@ impl Edit {
         match self {
             Edit::MoveBlock { position, .. } => {
                 sys.blocks[index].position = *position;
+                for line in sys.lines.iter_mut().filter(|l| touches(l, id)) {
+                    clear_points(line);
+                }
+            }
+            Edit::SetOrientation {
+                orientation,
+                mirrored,
+                ..
+            } => {
+                let block = &mut sys.blocks[index];
+                block.orientation = *orientation;
+                block.mirrored = *mirrored;
                 for line in sys.lines.iter_mut().filter(|l| touches(l, id)) {
                     clear_points(line);
                 }

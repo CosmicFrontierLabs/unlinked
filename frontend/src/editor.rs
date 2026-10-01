@@ -9,12 +9,14 @@
 
 use crate::api;
 use crate::diagram::DiagramView;
+use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::edit::{apply_batch, Edit};
 use unlinked_model::Model;
 use uuid::Uuid;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::{HtmlInputElement, InputEvent};
+use web_sys::{HtmlInputElement, InputEvent, KeyboardEvent};
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq)]
@@ -72,7 +74,9 @@ async fn latest_base(project_id: Uuid, file_id: Uuid) -> Result<Base, String> {
 pub fn model_editor(props: &EditorProps) -> Html {
     let editing = use_state(|| false);
     let base = use_state(|| props.base.clone());
-    let pending = use_state(Vec::<Edit>::new);
+    // Edits by user action, so undo and redo move whole actions.
+    let pending = use_state(Vec::<Vec<Edit>>::new);
+    let redo_stack = use_state(Vec::<Vec<Edit>>::new);
     let working = use_state(|| props.base.model.clone());
     let error = use_state(|| None::<String>);
     // Why the last save was refused because the file changed meanwhile.
@@ -90,14 +94,20 @@ pub fn model_editor(props: &EditorProps) -> Html {
     }
 
     let on_edit = {
-        let (pending, working, error) = (pending.clone(), working.clone(), error.clone());
-        Callback::from(move |edit: Edit| {
+        let (pending, redo_stack, working, error) = (
+            pending.clone(),
+            redo_stack.clone(),
+            working.clone(),
+            error.clone(),
+        );
+        Callback::from(move |group: Vec<Edit>| {
             let mut next = (**working).clone();
-            match apply_batch(&mut next, std::slice::from_ref(&edit)) {
+            match apply_batch(&mut next, &group) {
                 Ok(()) => {
                     let mut p = (*pending).clone();
-                    p.push(edit);
+                    p.push(group);
                     pending.set(p);
+                    redo_stack.set(Vec::new());
                     working.set(Rc::new(next));
                     error.set(None);
                 }
@@ -111,9 +121,10 @@ pub fn model_editor(props: &EditorProps) -> Html {
         Callback::from(move |_: MouseEvent| editing.set(true))
     };
     let discard = {
-        let (editing, pending, working, error, stale, base) = (
+        let (editing, pending, redo_stack, working, error, stale, base) = (
             editing.clone(),
             pending.clone(),
+            redo_stack.clone(),
             working.clone(),
             error.clone(),
             stale.clone(),
@@ -122,31 +133,100 @@ pub fn model_editor(props: &EditorProps) -> Html {
         Callback::from(move |_: MouseEvent| {
             editing.set(false);
             pending.set(Vec::new());
+            redo_stack.set(Vec::new());
             working.set(base.model.clone());
             error.set(None);
             stale.set(None);
         })
     };
     let undo = {
-        let (pending, working, error, base) = (
+        let (pending, redo_stack, working, error, base) = (
             pending.clone(),
+            redo_stack.clone(),
             working.clone(),
             error.clone(),
             base.clone(),
         );
-        Callback::from(move |_: MouseEvent| {
+        Callback::from(move |_: ()| {
             let mut p = (*pending).clone();
-            p.pop();
-            match replay(&base.model, &p) {
+            let Some(group) = p.pop() else {
+                return;
+            };
+            match replay(&base.model, &p.concat()) {
                 Ok(m) => {
                     working.set(Rc::new(m));
                     pending.set(p);
+                    let mut r = (*redo_stack).clone();
+                    r.push(group);
+                    redo_stack.set(r);
                     error.set(None);
                 }
                 Err(e) => error.set(Some(e)),
             }
         })
     };
+    let redo = {
+        let (pending, redo_stack, working, error) = (
+            pending.clone(),
+            redo_stack.clone(),
+            working.clone(),
+            error.clone(),
+        );
+        Callback::from(move |_: ()| {
+            let mut r = (*redo_stack).clone();
+            let Some(group) = r.pop() else {
+                return;
+            };
+            let mut next = (**working).clone();
+            match apply_batch(&mut next, &group) {
+                Ok(()) => {
+                    let mut p = (*pending).clone();
+                    p.push(group);
+                    pending.set(p);
+                    redo_stack.set(r);
+                    working.set(Rc::new(next));
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(e.to_string())),
+            }
+        })
+    };
+    // Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes, unless typing in
+    // a field. Re-registered each render so it acts on the current state.
+    {
+        let (undo, redo, active) = (undo.clone(), redo.clone(), *editing && !*busy);
+        use_effect(move || {
+            // Not passive, so the browser's own shortcut can be suppressed.
+            let listener = active.then(|| {
+                EventListener::new_with_options(
+                    &gloo_utils::document(),
+                    "keydown",
+                    EventListenerOptions::enable_prevent_default(),
+                    move |e| {
+                        let Some(e) = e.dyn_ref::<KeyboardEvent>() else {
+                            return;
+                        };
+                        let typing = e
+                            .target()
+                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                            .is_some_and(|t| {
+                                matches!(t.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+                            });
+                        if typing || !(e.ctrl_key() || e.meta_key()) {
+                            return;
+                        }
+                        match (e.key().to_ascii_lowercase().as_str(), e.shift_key()) {
+                            ("z", false) => undo.emit(()),
+                            ("z", true) | ("y", _) => redo.emit(()),
+                            _ => return,
+                        }
+                        e.prevent_default();
+                    },
+                )
+            });
+            move || drop(listener)
+        });
+    }
     let save = {
         let (mounted, pending, message, busy, error, stale, editing, working, base) = (
             mounted.clone(),
@@ -160,8 +240,9 @@ pub fn model_editor(props: &EditorProps) -> Html {
             base.clone(),
         );
         let (project_id, on_saved) = (props.project_id, props.on_saved.clone());
+        let redo_stack = redo_stack.clone();
         Callback::from(move |_: MouseEvent| {
-            let edits = (*pending).clone();
+            let edits = pending.concat();
             if edits.is_empty() {
                 return;
             }
@@ -176,8 +257,8 @@ pub fn model_editor(props: &EditorProps) -> Html {
             let msg = if message.trim().is_empty() {
                 format!(
                     "{} edit{}",
-                    edits.len(),
-                    if edits.len() == 1 { "" } else { "s" }
+                    pending.len(),
+                    if pending.len() == 1 { "" } else { "s" }
                 )
             } else {
                 message.trim().to_string()
@@ -195,6 +276,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 message.clone(),
             );
             let base = (*base).clone();
+            let redo_stack = redo_stack.clone();
             spawn_local(async move {
                 let result = api::upload(
                     project_id,
@@ -212,6 +294,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     Ok(_) => {
                         editing.set(false);
                         pending.set(Vec::new());
+                        redo_stack.set(Vec::new());
                         working.set(base.model.clone());
                         message.set(String::new());
                         error.set(None);
@@ -260,7 +343,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 };
                 // The edits keep their IDs from the old base; they only
                 // carry over if every one still applies to the new version.
-                match replay(&latest.model, &pending) {
+                match replay(&latest.model, &pending.concat()) {
                     Ok(model) => {
                         error.set(Some(format!(
                             "Your {} edit{} now apply on top of v{}. Review, then save.",
@@ -300,10 +383,11 @@ pub fn model_editor(props: &EditorProps) -> Html {
         html! {
             <div class="edit-bar editing">
                 <strong>{ format!("Editing v{}", base.version) }</strong>
-                <span class="muted">{ "Drag blocks, edit names and parameters in the inspector, Delete removes the selected block." }</span>
+                <span class="muted">{ "Drag blocks; Ctrl+R rotates and Ctrl+I flips the selected block; Delete removes the selection." }</span>
                 <span class="spacer" />
                 <span>{ format!("{count} change{}", if count == 1 { "" } else { "s" }) }</span>
-                <button onclick={undo} disabled={count == 0 || *busy}>{ "Undo" }</button>
+                <button onclick={undo.reform(|_: MouseEvent| ())} disabled={count == 0 || *busy} title="Ctrl+Z">{ "Undo" }</button>
+                <button onclick={redo.reform(|_: MouseEvent| ())} disabled={redo_stack.is_empty() || *busy} title="Ctrl+Shift+Z">{ "Redo" }</button>
                 <button onclick={discard} disabled={*busy}>{ "Discard" }</button>
                 <input placeholder="Change message" value={(*message).clone()} oninput={set_message} disabled={*busy} />
                 <button class="primary" onclick={save} disabled={count == 0 || *busy || stale.is_some()}>

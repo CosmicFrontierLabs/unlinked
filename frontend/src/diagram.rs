@@ -7,10 +7,10 @@
 
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
-use unlinked_model::catalog;
 use unlinked_model::diff::{BlockChange, ModelDiff};
 use unlinked_model::edit::{system_ids, touches, DisconnectPolicy, Edit, SystemRef};
 use unlinked_model::scope::ScopeConfig;
+use unlinked_model::{catalog, geometry};
 use unlinked_model::{
     Block, BlockId, Chart, Endpoint, Line, Model, Point, PortKind, PortRef, Rect, System,
 };
@@ -30,7 +30,8 @@ pub struct DiagramProps {
     /// Enables editing: blocks can be dragged, renamed, re-parameterized and
     /// deleted, and each change is reported here.
     #[prop_or_default]
-    pub on_edit: Option<Callback<Edit>>,
+    /// Each call carries one user action, which undo treats as a unit.
+    pub on_edit: Option<Callback<Vec<Edit>>>,
     /// The view re-fits when this changes; by default whenever the model
     /// changes. Editors pass a stable key so edits keep the current view.
     #[prop_or_default]
@@ -59,6 +60,16 @@ enum Drag {
     },
     /// Dragging a new connection out of port `from`.
     Wire { from: Endpoint },
+    /// Dragging a corner of block `id`, whose outline was `rect`; `right`
+    /// and `bottom` say which corner.
+    Resize {
+        sx: f64,
+        sy: f64,
+        id: BlockId,
+        rect: Rect,
+        right: bool,
+        bottom: bool,
+    },
     /// Released; kept so the following click knows whether it was a drag.
     Ended { moved: bool },
 }
@@ -98,6 +109,27 @@ fn to_diagram(e: &MouseEvent, container: &NodeRef, view: &View, svg: &str) -> Op
         (e.client_x() as f64 - rect.left() - view.x) / view.scale + vx,
         (e.client_y() as f64 - rect.top() - view.y) / view.scale + vy,
     ))
+}
+
+/// Smallest block side a resize leaves.
+const MIN_SIDE: f64 = 10.0;
+
+/// `rect` with the corner selected by `right`/`bottom` moved by (dx, dy)
+/// diagram units, snapped, and kept at least [`MIN_SIDE`] across.
+fn resized(rect: Rect, right: bool, bottom: bool, dx: f64, dy: f64) -> Rect {
+    let snap = |v: f64| (v / SNAP).round() * SNAP;
+    let mut r = rect;
+    if right {
+        r.right = snap(rect.right + dx).max(rect.left + MIN_SIDE);
+    } else {
+        r.left = snap(rect.left + dx).min(rect.right - MIN_SIDE);
+    }
+    if bottom {
+        r.bottom = snap(rect.bottom + dy).max(rect.top + MIN_SIDE);
+    } else {
+        r.top = snap(rect.top + dy).min(rect.bottom - MIN_SIDE);
+    }
+    r
 }
 
 /// `base`, or `base` with the smallest number appended that no block in
@@ -316,6 +348,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let selected_wire = use_state(|| None::<Endpoint>);
     // A connection being dragged: from its first port to the pointer.
     let wire_preview = use_state(|| None::<(Point, Point)>);
+    // The outline of a block being resized.
+    let resize_preview = use_state(|| None::<Rect>);
     let theme = use_state(|| Theme::Dark);
     let view = use_reducer(|| View {
         scale: 1.0,
@@ -331,6 +365,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
 
     let model = props.model.clone();
     let editable = props.on_edit.is_some();
+    // Most actions are a single edit.
+    let on_edit: Option<Callback<Edit>> = props
+        .on_edit
+        .as_ref()
+        .map(|cb| cb.reform(|edit| vec![edit]));
     let rendered = use_memo(
         (
             Rc::as_ptr(&props.model) as usize,
@@ -403,7 +442,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let system_ref: SystemRef = system_ids(&props.model, &path).unwrap_or_default();
 
     let onmousedown = {
-        let (drag, view, on_edit) = (drag.clone(), view.clone(), props.on_edit.clone());
+        let (drag, view, on_edit) = (drag.clone(), view.clone(), on_edit.clone());
         let blocks: Vec<(String, Rect)> = system
             .map(|s| {
                 s.blocks
@@ -429,6 +468,23 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .and_then(|svg| to_diagram(&e, &container, &view, svg));
                 wire_preview.set(start.map(|p| (p, p)));
                 *drag.borrow_mut() = Some(Drag::Wire { from });
+                return;
+            }
+            let handle = closest(e.target(), "rect.resize-handle").and_then(|h| {
+                let id = h.get_attribute("data-sid")?;
+                let corner = h.get_attribute("data-corner")?;
+                let rect = blocks.iter().find(|(b, _)| *b == id)?.1;
+                Some((BlockId(id), rect, corner))
+            });
+            if let Some((id, rect, corner)) = handle {
+                *drag.borrow_mut() = Some(Drag::Resize {
+                    sx,
+                    sy,
+                    id,
+                    rect,
+                    right: corner.ends_with('e'),
+                    bottom: corner.starts_with('s'),
+                });
                 return;
             }
             let grabbed = on_edit.as_ref().and_then(|_| {
@@ -458,11 +514,26 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onmousemove = {
         let (drag, view) = (drag.clone(), view.clone());
-        let (container, rendered, wire_preview) =
-            (container.clone(), rendered.clone(), wire_preview.clone());
+        let (container, rendered, wire_preview, resize_preview) = (
+            container.clone(),
+            rendered.clone(),
+            wire_preview.clone(),
+            resize_preview.clone(),
+        );
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
             match drag.borrow_mut().as_mut() {
+                Some(Drag::Resize {
+                    sx,
+                    sy,
+                    rect,
+                    right,
+                    bottom,
+                    ..
+                }) => {
+                    let (dx, dy) = ((cx - *sx) / view.scale, (cy - *sy) / view.scale);
+                    resize_preview.set(Some(resized(*rect, *right, *bottom, dx, dy)));
+                }
                 Some(Drag::Wire { .. }) => {
                     let to = (*rendered)
                         .as_ref()
@@ -514,11 +585,23 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
     let end_drag = {
-        let (drag, on_edit, system_ref) = (drag.clone(), props.on_edit.clone(), system_ref.clone());
-        let wire_preview = wire_preview.clone();
+        let (drag, on_edit, system_ref) = (drag.clone(), on_edit.clone(), system_ref.clone());
+        let (wire_preview, resize_preview) = (wire_preview.clone(), resize_preview.clone());
         Callback::from(move |e: MouseEvent| {
             let mut d = drag.borrow_mut();
             let moved = match d.take() {
+                Some(Drag::Resize { id, rect, .. }) => {
+                    let to = *resize_preview;
+                    resize_preview.set(None);
+                    if let (Some(position), Some(on_edit)) = (to.filter(|r| *r != rect), &on_edit) {
+                        on_edit.emit(Edit::MoveBlock {
+                            system: system_ref.clone(),
+                            id,
+                            position,
+                        });
+                    }
+                    true
+                }
                 // Dropped on a port of the opposite direction: connect,
                 // whichever end the drag started from.
                 Some(Drag::Wire { from }) => {
@@ -589,20 +672,54 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
     let onkeydown = {
-        let (selected, selected_wire, on_edit, system_ref) = (
+        let (selected, selected_wire, on_edit, on_edits, system_ref) = (
             selected.clone(),
             selected_wire.clone(),
+            on_edit.clone(),
             props.on_edit.clone(),
             system_ref.clone(),
         );
         let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
+        let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
         Callback::from(move |e: KeyboardEvent| {
+            let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
+                return;
+            };
+            // Rotate (Ctrl+R) and flip (Ctrl+I), as in Simulink.
+            let command = e.ctrl_key() || e.meta_key();
+            let key = e.key().to_ascii_lowercase();
+            if command && (key == "r" || key == "i") {
+                let block = (*selected)
+                    .as_ref()
+                    .and_then(|sid| blocks.iter().find(|b| &b.id.0 == sid));
+                if let Some(b) = block {
+                    e.prevent_default();
+                    let (orientation, mirrored) = if key == "r" {
+                        geometry::rotated(b.orientation, b.mirrored)
+                    } else {
+                        geometry::flipped(b.orientation, b.mirrored)
+                    };
+                    let mut group = Vec::new();
+                    if key == "r" {
+                        group.push(Edit::MoveBlock {
+                            system: system_ref.clone(),
+                            id: b.id.clone(),
+                            position: geometry::quarter_turn(b.position),
+                        });
+                    }
+                    group.push(Edit::SetOrientation {
+                        system: system_ref.clone(),
+                        id: b.id.clone(),
+                        orientation,
+                        mirrored,
+                    });
+                    on_edits.emit(group);
+                }
+                return;
+            }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
                 return;
             }
-            let Some(on_edit) = &on_edit else {
-                return;
-            };
             if let Some(dst) = (*selected_wire).clone() {
                 e.prevent_default();
                 on_edit.emit(Edit::Disconnect {
@@ -632,11 +749,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
     let ondrop = {
-        let (on_edit, system_ref, model) = (
-            props.on_edit.clone(),
-            system_ref.clone(),
-            props.model.clone(),
-        );
+        let (on_edit, system_ref, model) =
+            (on_edit.clone(), system_ref.clone(), props.model.clone());
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         Callback::from(move |e: DragEvent| {
             let Some(on_edit) = &on_edit else {
@@ -770,18 +884,46 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         Ok(svg) => Html::from_html_unchecked(AttrValue::from(svg.clone())),
         Err(e) => html! { <div class="error">{ e }</div> },
     };
-    // The connection being dragged, drawn over the diagram in its units.
-    let preview = match (
-        *wire_preview,
-        (*rendered).as_ref().ok().and_then(|s| view_box(s)),
-    ) {
-        (Some((a, b)), Some([vx, vy, vw, vh])) => html! {
-            <svg class="wire-preview" viewBox={format!("{vx} {vy} {vw} {vh}")}
-                width={vw.to_string()} height={vh.to_string()}>
-                <line x1={a.x.to_string()} y1={a.y.to_string()} x2={b.x.to_string()} y2={b.y.to_string()} />
-            </svg>
-        },
-        _ => html! {},
+    // Drawn over the diagram in its units: the connection being dragged,
+    // and the selected block's resize handles and new outline.
+    let overlay = match (*rendered).as_ref().ok().and_then(|s| view_box(s)) {
+        Some([vx, vy, vw, vh]) => {
+            let wire = wire_preview.map(|(a, b)| html! {
+                <line class="wire-preview" x1={a.x.to_string()} y1={a.y.to_string()} x2={b.x.to_string()} y2={b.y.to_string()} />
+            });
+            let handles = selected_block.filter(|_| props.on_edit.is_some()).map(|b| {
+                let r = resize_preview.unwrap_or(b.position);
+                // Constant on screen whatever the zoom.
+                let size = 8.0 / view.scale;
+                let corners = [
+                    ("nw", r.left, r.top),
+                    ("ne", r.right, r.top),
+                    ("sw", r.left, r.bottom),
+                    ("se", r.right, r.bottom),
+                ];
+                html! {
+                    <>
+                        if resize_preview.is_some() {
+                            <rect class="resize-outline" x={r.left.to_string()} y={r.top.to_string()}
+                                width={r.width().to_string()} height={r.height().to_string()} />
+                        }
+                        { for corners.iter().map(|(corner, x, y)| html! {
+                            <rect class="resize-handle" data-sid={b.id.0.clone()} data-corner={*corner}
+                                x={(x - size / 2.0).to_string()} y={(y - size / 2.0).to_string()}
+                                width={size.to_string()} height={size.to_string()} />
+                        }) }
+                    </>
+                }
+            });
+            html! {
+                <svg class="overlay" viewBox={format!("{vx} {vy} {vw} {vh}")}
+                    width={vw.to_string()} height={vh.to_string()}>
+                    { for wire }
+                    { for handles }
+                </svg>
+            }
+        }
+        None => html! {},
     };
     let v = *view;
     let transform = format!(
@@ -814,12 +956,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={end_drag}
                     {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop}>
                     <style>{ highlight }</style>
-                    <div class="canvas" style={transform}>{ canvas }{ preview }</div>
+                    <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
                 </div>
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
                         system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
-                        on_edit={props.on_edit.clone()} on_open={Callback::from({
+                        on_edit={on_edit.clone()} on_open={Callback::from({
                         let path = path.clone();
                         let selected = selected.clone();
                         move |name: String| {

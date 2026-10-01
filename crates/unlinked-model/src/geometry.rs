@@ -9,7 +9,7 @@
 //! model files are stored relative to the port anchor, which is
 //! [`PORT_OFFSET`] outside the block outline.
 
-use crate::{Block, Orientation, Point, PortKind, PortRef};
+use crate::{Block, Orientation, Point, PortKind, PortRef, Rect};
 
 /// Distance from the block outline to a port's line anchor.
 pub const PORT_OFFSET: f64 = 5.0;
@@ -41,6 +41,55 @@ impl Side {
             Side::Bottom => Side::Top,
         }
     }
+}
+
+/// Orientation and control-side mirroring for Simulink's `BlockRotation`
+/// (clockwise degrees) and `BlockMirror`.
+pub fn from_rotation(rotation: i32, mirror: bool) -> (Orientation, bool) {
+    match (rotation.rem_euclid(360), mirror) {
+        (90, false) => (Orientation::Down, false),
+        (90, true) => (Orientation::Up, true),
+        (180, false) => (Orientation::Left, true),
+        (180, true) => (Orientation::Right, true),
+        (270, false) => (Orientation::Up, false),
+        (270, true) => (Orientation::Down, true),
+        (_, false) => (Orientation::Right, false),
+        (_, true) => (Orientation::Left, false),
+    }
+}
+
+/// Inverse of [`from_rotation`]: `BlockRotation` and `BlockMirror`.
+pub fn to_rotation(orientation: Orientation, mirrored: bool) -> (i32, bool) {
+    match (orientation, mirrored) {
+        (Orientation::Right, false) => (0, false),
+        (Orientation::Left, false) => (0, true),
+        (Orientation::Down, false) => (90, false),
+        (Orientation::Up, true) => (90, true),
+        (Orientation::Left, true) => (180, false),
+        (Orientation::Right, true) => (180, true),
+        (Orientation::Up, false) => (270, false),
+        (Orientation::Down, true) => (270, true),
+    }
+}
+
+/// The block turned 90° clockwise, as Simulink's Rotate (Ctrl+R).
+pub fn rotated(orientation: Orientation, mirrored: bool) -> (Orientation, bool) {
+    let (rotation, mirror) = to_rotation(orientation, mirrored);
+    from_rotation(rotation + 90, mirror)
+}
+
+/// The block flipped across its signal axis, as Simulink's Flip (Ctrl+I).
+pub fn flipped(orientation: Orientation, mirrored: bool) -> (Orientation, bool) {
+    let (rotation, mirror) = to_rotation(orientation, mirrored);
+    from_rotation(rotation, !mirror)
+}
+
+/// A block outline after a quarter turn: width and height swap about the
+/// exact centre, so repeated turns never drift.
+pub fn quarter_turn(r: Rect) -> Rect {
+    let c = r.center();
+    let (hw, hh) = (r.height() / 2.0, r.width() / 2.0);
+    Rect::new(c.x - hw, c.y - hh, c.x + hw, c.y + hh)
 }
 
 /// Ports drawn on the "control" side (top, for a right-facing block).
@@ -191,6 +240,48 @@ mod tests {
     use super::*;
     use crate::{BlockStyle, PortCounts, Rect};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn rotation_mapping_roundtrips_and_composes() {
+        let all = [
+            Orientation::Right,
+            Orientation::Left,
+            Orientation::Up,
+            Orientation::Down,
+        ];
+        for o in all {
+            for m in [false, true] {
+                let (r, mirror) = to_rotation(o, m);
+                assert_eq!(from_rotation(r, mirror), (o, m));
+                // Four turns or two flips are the identity.
+                let mut s = (o, m);
+                for _ in 0..4 {
+                    s = rotated(s.0, s.1);
+                }
+                assert_eq!(s, (o, m));
+                let f = flipped(o, m);
+                assert_eq!(flipped(f.0, f.1), (o, m));
+            }
+        }
+        assert_eq!(
+            rotated(Orientation::Right, false),
+            (Orientation::Down, false)
+        );
+        assert_eq!(
+            flipped(Orientation::Right, false),
+            (Orientation::Left, false)
+        );
+    }
+
+    #[test]
+    fn quarter_turns_keep_the_centre() {
+        let r = Rect::new(0.0, 0.0, 30.0, 35.0);
+        let once = quarter_turn(r);
+        assert_eq!(once, Rect::new(-2.5, 2.5, 32.5, 32.5));
+        assert_eq!(once.center(), r.center());
+        let four = (0..4).fold(r, |r, _| quarter_turn(r));
+        assert_eq!(four, r);
+    }
 
     fn block(pos: Rect, ports: &[u32], orientation: Orientation, mirrored: bool) -> Block {
         Block {

@@ -632,7 +632,7 @@ a.compare {
     stroke: rgba(122, 162, 247, 0.3);
 }
 
-.diagram .canvas svg.wire-preview {
+.diagram .canvas svg.overlay {
     position: absolute;
     left: 0;
     top: 0;
@@ -640,10 +640,30 @@ a.compare {
     overflow: visible;
 }
 
-.wire-preview line {
+.overlay line.wire-preview,
+.overlay rect.resize-outline {
     stroke: var(--orange);
     stroke-width: 1.5;
     stroke-dasharray: 4 3;
+    fill: none;
+}
+
+.overlay rect.resize-handle {
+    fill: var(--orange);
+    stroke: var(--bg);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+    pointer-events: all;
+}
+
+.overlay rect.resize-handle[data-corner="nw"],
+.overlay rect.resize-handle[data-corner="se"] {
+    cursor: nwse-resize;
+}
+
+.overlay rect.resize-handle[data-corner="ne"],
+.overlay rect.resize-handle[data-corner="sw"] {
+    cursor: nesw-resize;
 }
 
 .palette h3 {

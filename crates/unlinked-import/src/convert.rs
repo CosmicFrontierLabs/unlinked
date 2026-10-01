@@ -3,7 +3,7 @@
 use crate::tree::Node;
 use crate::ImportError;
 use std::collections::{BTreeMap, HashMap};
-use unlinked_model::geometry::port_anchor;
+use unlinked_model::geometry::{from_rotation, port_anchor};
 use unlinked_model::{
     Annotation, Block, BlockId, BlockStyle, Branch, Endpoint, Line, Mask, MaskParameter,
     NamePlacement, Orientation, Point, PortCounts, PortInterface, PortKind, PortRef, Rect,
@@ -222,17 +222,7 @@ impl<'a> Converter<'a> {
 fn orientation(node: &Node) -> (Orientation, bool) {
     let mirror = node.get("BlockMirror") == Some("on");
     if let Some(rot) = node.get("BlockRotation") {
-        let rot = rot.trim().parse::<i32>().unwrap_or(0).rem_euclid(360);
-        return match (rot, mirror) {
-            (90, false) => (Orientation::Down, false),
-            (90, true) => (Orientation::Up, true),
-            (180, false) => (Orientation::Left, true),
-            (180, true) => (Orientation::Right, true),
-            (270, false) => (Orientation::Up, false),
-            (270, true) => (Orientation::Down, true),
-            (_, false) => (Orientation::Right, false),
-            (_, true) => (Orientation::Left, false),
-        };
+        return from_rotation(rot.trim().parse::<i32>().unwrap_or(0), mirror);
     }
     let o = match node.get("Orientation") {
         Some("left") => Orientation::Left,
