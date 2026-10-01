@@ -66,6 +66,8 @@ Note: memory-serve 2.x requires axum 0.8+. For axum 0.7, use memory-serve 0.6.0 
   There is deliberately no CORS layer. WebSocket routes must authenticate with
   `session::WsUser` or the `session::require_ws_user` route layer, which also
   require a same-origin `Origin`.
+- **Unknown `/api/*` paths answer a JSON 404** (`api_not_found` in `main.rs`);
+  only non-API paths fall back to the SPA's `index.html`.
 - **Mutations write an audit entry** with `audit::record` inside the same
   transaction.
 - **Tests:** `test_support` builds states/clients. DB-backed tests start with
