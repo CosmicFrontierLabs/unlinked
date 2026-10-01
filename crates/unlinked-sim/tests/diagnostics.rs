@@ -178,3 +178,28 @@ fn invalid_explicit_run_options_use_the_simulators_checks() {
         SimulationCheck::Rejected
     );
 }
+
+#[test]
+fn diagnostic_preflight_rejects_large_identity_and_ancestor_paths_before_cloning_targets() {
+    let mut oversized = model("1");
+    oversized.root.blocks[0].id = unlinked_model::BlockId("x".repeat(1025));
+    let report = diagnose(&oversized, &DiagnosticContext::default());
+    assert_eq!(report.simulation, SimulationCheck::Incomplete);
+    assert!(report.truncated);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].code, "diagnostic_budget");
+    let mut deep = model("1");
+    // Every individual ID is legal, but the combined ancestor target path is not.
+    for i in 0..5 {
+        let mut wrapper = deep.root.blocks[0].clone();
+        wrapper.id = unlinked_model::BlockId(format!("{i}{}", "x".repeat(899)));
+        wrapper.name = format!("level{i}");
+        wrapper.block_type = "SubSystem".into();
+        wrapper.subsystem = Some(Box::new(std::mem::take(&mut deep.root)));
+        deep.root.blocks.push(wrapper);
+    }
+    let report = diagnose(&deep, &DiagnosticContext::default());
+    assert_eq!(report.simulation, SimulationCheck::Incomplete);
+    assert!(report.truncated);
+    assert_eq!(report.diagnostics.len(), 1);
+}

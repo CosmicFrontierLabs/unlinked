@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+pub mod diagnostics_worker;
 mod diagram;
 mod editor;
 mod fetch;

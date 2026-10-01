@@ -4,8 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Unlinked</title>
+    <base data-trunk-public-url />
     <link data-trunk rel="css" href="style.css" />
-    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <link data-trunk rel="rust" data-bin="frontend" data-wasm-opt="z" />
+    <link data-trunk rel="rust" data-bin="unlinked-diagnostics-worker" data-type="worker" data-loader-shim data-wasm-opt="z" />
 </head>
 <body>
 </body>
