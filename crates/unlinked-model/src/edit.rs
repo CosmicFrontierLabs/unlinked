@@ -75,6 +75,20 @@ pub enum Edit {
     /// Remove the connection into the input `dst`, along with branches and
     /// lines left leading nowhere.
     Disconnect { system: SystemRef, dst: Endpoint },
+    /// Replace absolute vertices of a terminal connection. Ambiguous targets
+    /// and physical or detached nets are rejected.
+    SetRoute {
+        system: SystemRef,
+        dst: Endpoint,
+        points: Vec<crate::Point>,
+    },
+    /// Replace a uniquely sourced line root's absolute vertices. Descendant
+    /// vertices retain their absolute positions.
+    SetTrunkRoute {
+        system: SystemRef,
+        src: Endpoint,
+        points: Vec<crate::Point>,
+    },
 }
 
 /// An edit that could not be applied, and its position in the batch.
@@ -285,7 +299,9 @@ impl Edit {
             | Edit::DeleteBlock { system, .. }
             | Edit::AddBlock { system, .. }
             | Edit::Connect { system, .. }
-            | Edit::Disconnect { system, .. } => system,
+            | Edit::Disconnect { system, .. }
+            | Edit::SetRoute { system, .. }
+            | Edit::SetTrunkRoute { system, .. } => system,
         }
     }
 
@@ -296,7 +312,11 @@ impl Edit {
             | Edit::SetParameter { id, .. }
             | Edit::RenameBlock { id, .. }
             | Edit::DeleteBlock { id, .. } => Some(id),
-            Edit::AddBlock { .. } | Edit::Connect { .. } | Edit::Disconnect { .. } => None,
+            Edit::AddBlock { .. }
+            | Edit::Connect { .. }
+            | Edit::Disconnect { .. }
+            | Edit::SetRoute { .. }
+            | Edit::SetTrunkRoute { .. } => None,
         }
     }
 
@@ -317,6 +337,9 @@ impl Edit {
                 check_rect(position)?;
                 check_name(name)?;
             }
+            Edit::SetRoute { points, .. } | Edit::SetTrunkRoute { points, .. } => {
+                crate::route_edit::validate_points(points)?;
+            }
             Edit::DeleteBlock { .. } | Edit::Connect { .. } | Edit::Disconnect { .. } => {}
         }
         Ok(())
@@ -332,6 +355,20 @@ impl Edit {
 
     fn apply_to_diagram(&self, model: &mut Model, charts: &[Chart]) -> Result<(), EditError> {
         let id = match self {
+            Edit::SetRoute {
+                system,
+                dst,
+                points,
+            } => {
+                return crate::route_edit::set_route(system_mut(model, system)?, dst, false, points)
+            }
+            Edit::SetTrunkRoute {
+                system,
+                src,
+                points,
+            } => {
+                return crate::route_edit::set_route(system_mut(model, system)?, src, true, points)
+            }
             Edit::AddBlock {
                 system,
                 id,
@@ -423,7 +460,11 @@ impl Edit {
                     l.dst.is_some() || !l.branches.is_empty()
                 });
             }
-            Edit::AddBlock { .. } | Edit::Connect { .. } | Edit::Disconnect { .. } => {
+            Edit::AddBlock { .. }
+            | Edit::Connect { .. }
+            | Edit::Disconnect { .. }
+            | Edit::SetRoute { .. }
+            | Edit::SetTrunkRoute { .. } => {
                 unreachable!("applied above")
             }
         }

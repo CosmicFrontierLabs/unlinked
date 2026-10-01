@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod diff;
 pub mod edit;
 pub mod geometry;
+pub mod route_edit;
 pub mod scope;
 pub mod stateflow;
 pub mod validation;
