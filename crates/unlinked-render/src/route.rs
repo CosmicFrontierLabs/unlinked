@@ -19,6 +19,9 @@ pub struct Wire {
     pub dangling: bool,
     /// The port this wire ends at, if it is a leaf of the line.
     pub dst: Option<Endpoint>,
+    /// Leading points fixed by the line's source or junction rather than
+    /// stored as vertices.
+    pub fixed: usize,
 }
 
 pub struct RoutedLine {
@@ -69,6 +72,7 @@ pub fn route_line(sys: &System, line: &Line) -> RoutedLine {
             emit(
                 sys,
                 b.points.clone(),
+                1,
                 &b.dst,
                 &b.branches,
                 incomplete,
@@ -98,7 +102,17 @@ pub fn route_line(sys: &System, line: &Line) -> RoutedLine {
         }
     }
 
-    emit(sys, trunk, &line.dst, &line.branches, incomplete, &mut out);
+    // The trunk starts at the source port's outline point and anchor.
+    let fixed = if src_anchor.is_some() { 2 } else { 1 };
+    emit(
+        sys,
+        trunk,
+        fixed,
+        &line.dst,
+        &line.branches,
+        incomplete,
+        &mut out,
+    );
     out
 }
 
@@ -126,9 +140,13 @@ fn endpoint_geometry(sys: &System, ep: &Endpoint) -> Option<(Point, (f64, f64), 
     ))
 }
 
+/// `fixed` leading points of `path` are not stored vertices: the source
+/// port's outline point and anchor, or a branch's junction.
+#[allow(clippy::too_many_arguments)]
 fn emit(
     sys: &System,
     mut path: Vec<Point>,
+    fixed: usize,
     dst: &Option<Endpoint>,
     branches: &[Branch],
     incomplete: bool,
@@ -143,7 +161,7 @@ fn emit(
     for b in branches {
         let mut sub = vec![tail];
         sub.extend(&b.points);
-        emit(sys, sub, &b.dst, &b.branches, incomplete, out);
+        emit(sys, sub, 1, &b.dst, &b.branches, incomplete, out);
     }
 
     let geometry = dst
@@ -163,6 +181,7 @@ fn emit(
             dangling: incomplete || (geometry.is_none() && branches.is_empty()),
             arrow,
             dst: dst.clone(),
+            fixed,
         });
     }
 }

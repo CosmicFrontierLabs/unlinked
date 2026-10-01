@@ -595,6 +595,7 @@ fn draw_hit_targets(
         let mut attrs = vec![
             ("class", "wire-hit".to_string()),
             ("points", points_attr(&pts)),
+            ("data-fixed", w.fixed.to_string()),
         ];
         attrs.extend(data.iter().map(|(k, v)| (k.as_str(), v.clone())));
         s.leaf("polyline", &attrs);

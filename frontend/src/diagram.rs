@@ -49,14 +49,26 @@ enum Drag {
         start: View,
         moved: bool,
     },
-    Block {
+    /// Moving the selected blocks: each one's rendered group, id and outline.
+    Blocks {
         sx: f64,
         sy: f64,
-        group: Element,
-        id: String,
-        rect: Rect,
+        blocks: Vec<(Element, String, Rect)>,
         offset: (f64, f64),
         moved: bool,
+    },
+    /// Drawing a selection box from `start`; `extend` adds to the selection.
+    Select { start: Point, extend: bool },
+    /// Dragging segment `segment` of the drawn wire `points` into `dst`
+    /// across itself, from diagram point `start`; see
+    /// [`geometry::drag_segment`].
+    Segment {
+        dst: Endpoint,
+        points: Vec<Point>,
+        fixed: usize,
+        segment: usize,
+        start: Point,
+        route: Option<Vec<Point>>,
     },
     /// Dragging a new connection out of port `from`.
     Wire { from: Endpoint },
@@ -109,6 +121,36 @@ fn to_diagram(e: &MouseEvent, container: &NodeRef, view: &View, svg: &str) -> Op
         (e.client_x() as f64 - rect.left() - view.x) / view.scale + vx,
         (e.client_y() as f64 - rect.top() - view.y) / view.scale + vy,
     ))
+}
+
+/// The points of a rendered `polyline`.
+fn polyline_points(el: &Element) -> Vec<Point> {
+    el.get_attribute("points")
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|pair| {
+            let (x, y) = pair.split_once(',')?;
+            Some(Point::new(x.parse().ok()?, y.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Index of the segment of `points` nearest `at`, among those from `first`.
+fn nearest_segment(points: &[Point], first: usize, at: Point) -> Option<usize> {
+    let distance = |a: Point, b: Point| {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = dx * dx + dy * dy;
+        let t = if len > 0.0 {
+            (((at.x - a.x) * dx + (at.y - a.y) * dy) / len).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (px, py) = (a.x + t * dx - at.x, a.y + t * dy - at.y);
+        px * px + py * py
+    };
+    (first..points.len().saturating_sub(1)).min_by(|&i, &j| {
+        distance(points[i], points[i + 1]).total_cmp(&distance(points[j], points[j + 1]))
+    })
 }
 
 /// Smallest block side a resize leaves.
@@ -266,17 +308,26 @@ fn closest(target: Option<web_sys::EventTarget>, selector: &str) -> Option<Eleme
         .flatten()
 }
 
-/// The edit deleting block `id`, or `None` if the user declines. A block
-/// with lines attached is only deleted, lines included, after confirming;
-/// otherwise the edit refuses to touch lines at all.
-fn confirm_delete(system: &SystemRef, id: BlockId, lines: &[Line]) -> Option<Edit> {
-    let attached = lines.iter().filter(|l| touches(l, &id)).count();
+/// The edits deleting blocks `ids`, or `None` if the user declines. Blocks
+/// with lines attached are only deleted, lines included, after confirming;
+/// otherwise the edits refuse to touch lines at all.
+fn confirm_delete(system: &SystemRef, ids: &[BlockId], lines: &[Line]) -> Option<Vec<Edit>> {
+    let attached = lines
+        .iter()
+        .filter(|l| ids.iter().any(|id| touches(l, id)))
+        .count();
     let disconnect = if attached == 0 {
         DisconnectPolicy::Reject
     } else {
+        let what = if ids.len() == 1 {
+            "this block".to_string()
+        } else {
+            format!("these {} blocks", ids.len())
+        };
         let message = format!(
-            "Delete this block and the {attached} line{} connected to it?",
-            if attached == 1 { "" } else { "s" }
+            "Delete {what} and the {attached} line{} connected to {}?",
+            if attached == 1 { "" } else { "s" },
+            if ids.len() == 1 { "it" } else { "them" }
         );
         if !gloo_utils::window()
             .confirm_with_message(&message)
@@ -286,11 +337,15 @@ fn confirm_delete(system: &SystemRef, id: BlockId, lines: &[Line]) -> Option<Edi
         }
         DisconnectPolicy::Disconnect
     };
-    Some(Edit::DeleteBlock {
-        system: system.clone(),
-        id,
-        disconnect,
-    })
+    Some(
+        ids.iter()
+            .map(|id| Edit::DeleteBlock {
+                system: system.clone(),
+                id: id.clone(),
+                disconnect,
+            })
+            .collect(),
+    )
 }
 
 fn block_group(target: Option<web_sys::EventTarget>) -> Option<Element> {
@@ -343,13 +398,18 @@ fn css_string(s: &str) -> String {
 #[function_component(DiagramView)]
 pub fn diagram_view(props: &DiagramProps) -> Html {
     let path = use_state(Vec::<String>::new);
-    let selected = use_state(|| None::<String>);
+    // Selected blocks, by SID; the inspector shows a lone selection.
+    let selected = use_state(Vec::<String>::new);
+    // The selection box being drawn, corner to corner.
+    let select_box = use_state(|| None::<(Point, Point)>);
     // A selected connection, by the input it drives.
     let selected_wire = use_state(|| None::<Endpoint>);
     // A connection being dragged: from its first port to the pointer.
     let wire_preview = use_state(|| None::<(Point, Point)>);
     // The outline of a block being resized.
     let resize_preview = use_state(|| None::<Rect>);
+    // A wire being rerouted, as it would be drawn.
+    let route_preview = use_state(|| None::<Vec<Point>>);
     let theme = use_state(|| Theme::Dark);
     let view = use_reducer(|| View {
         scale: 1.0,
@@ -451,13 +511,30 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .collect()
             })
             .unwrap_or_default();
-        let (container, rendered, wire_preview) =
-            (container.clone(), rendered.clone(), wire_preview.clone());
+        let (container, rendered, wire_preview, selected, select_box) = (
+            container.clone(),
+            rendered.clone(),
+            wire_preview.clone(),
+            selected.clone(),
+            select_box.clone(),
+        );
         Callback::from(move |e: MouseEvent| {
+            let (sx, sy) = (e.client_x() as f64, e.client_y() as f64);
+            // The middle button always pans; while editing, the left button
+            // on empty canvas draws a selection box instead.
+            if e.button() == 1 {
+                e.prevent_default();
+                *drag.borrow_mut() = Some(Drag::Pan {
+                    sx,
+                    sy,
+                    start: *view,
+                    moved: false,
+                });
+                return;
+            }
             if e.button() != 0 {
                 return;
             }
-            let (sx, sy) = (e.client_x() as f64, e.client_y() as f64);
             let port = on_edit
                 .as_ref()
                 .and_then(|_| endpoint_of(&closest(e.target(), "circle.port-hit")?, ""));
@@ -487,22 +564,78 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 });
                 return;
             }
-            let grabbed = on_edit.as_ref().and_then(|_| {
-                let group = block_group(e.target())?;
-                let id = group.get_attribute("data-sid")?;
-                let rect = blocks.iter().find(|(b, _)| *b == id)?.1;
-                Some((group, id, rect))
+            // Pressing on a wire may start dragging its nearest segment; a
+            // press without movement still selects the wire on click.
+            let segment = on_edit.as_ref().and_then(|_| {
+                let hit = closest(e.target(), "polyline.wire-hit")?;
+                let dst = endpoint_of(&hit, "dst-")?;
+                let fixed: usize = hit.get_attribute("data-fixed")?.parse().ok()?;
+                let points = polyline_points(&hit);
+                let start = (*rendered)
+                    .as_ref()
+                    .ok()
+                    .and_then(|svg| to_diagram(&e, &container, &view, svg))?;
+                let segment = nearest_segment(&points, fixed.saturating_sub(1), start)?;
+                Some(Drag::Segment {
+                    dst,
+                    points,
+                    fixed,
+                    segment,
+                    start,
+                    route: None,
+                })
             });
-            *drag.borrow_mut() = Some(match grabbed {
-                Some((group, id, rect)) => Drag::Block {
+            if let Some(segment) = segment {
+                *drag.borrow_mut() = Some(segment);
+                return;
+            }
+            let grabbed = on_edit
+                .as_ref()
+                .and_then(|_| block_group(e.target())?.get_attribute("data-sid"));
+            if let Some(id) = grabbed {
+                // Grabbing a selected block moves the whole selection.
+                let ids = if selected.contains(&id) {
+                    (*selected).clone()
+                } else {
+                    vec![id]
+                };
+                let moving = ids
+                    .iter()
+                    .filter_map(|id| {
+                        let rect = blocks.iter().find(|(b, _)| b == id)?.1;
+                        // Within this diagram: other viewers may show the
+                        // same SIDs.
+                        let selector = format!("g.block[data-sid=\"{}\"]", css_string(id));
+                        let group = container
+                            .cast::<Element>()?
+                            .query_selector(&selector)
+                            .ok()??;
+                        Some((group, id.clone(), rect))
+                    })
+                    .collect();
+                *drag.borrow_mut() = Some(Drag::Blocks {
                     sx,
                     sy,
-                    group,
-                    id,
-                    rect,
+                    blocks: moving,
                     offset: (0.0, 0.0),
                     moved: false,
-                },
+                });
+                return;
+            }
+            let start = on_edit.as_ref().and_then(|_| {
+                (*rendered)
+                    .as_ref()
+                    .ok()
+                    .and_then(|svg| to_diagram(&e, &container, &view, svg))
+            });
+            *drag.borrow_mut() = Some(match start {
+                Some(start) => {
+                    select_box.set(Some((start, start)));
+                    Drag::Select {
+                        start,
+                        extend: e.shift_key(),
+                    }
+                }
                 None => Drag::Pan {
                     sx,
                     sy,
@@ -514,11 +647,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onmousemove = {
         let (drag, view) = (drag.clone(), view.clone());
-        let (container, rendered, wire_preview, resize_preview) = (
+        let (container, rendered, wire_preview, resize_preview, select_box, route_preview) = (
             container.clone(),
             rendered.clone(),
             wire_preview.clone(),
             resize_preview.clone(),
+            select_box.clone(),
+            route_preview.clone(),
         );
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
@@ -559,34 +694,97 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         }));
                     }
                 }
-                Some(Drag::Block {
+                Some(Drag::Blocks {
                     sx,
                     sy,
-                    group,
+                    blocks,
                     offset,
                     moved,
-                    ..
                 }) => {
                     let (dx, dy) = (cx - *sx, cy - *sy);
                     *moved |= dx.abs() + dy.abs() > 3.0;
                     if *moved {
                         // Snap in diagram units; preview by translating the
-                        // block's group until the edit is applied.
+                        // blocks' groups until the edits are applied.
                         let snap = |v: f64| (v / view.scale / SNAP).round() * SNAP;
                         *offset = (snap(dx), snap(dy));
-                        let _ = group.set_attribute(
-                            "transform",
-                            &format!("translate({} {})", offset.0, offset.1),
-                        );
+                        for (group, ..) in blocks.iter() {
+                            let _ = group.set_attribute(
+                                "transform",
+                                &format!("translate({} {})", offset.0, offset.1),
+                            );
+                        }
                     }
+                }
+                Some(Drag::Select { start, .. }) => {
+                    let to = (*rendered)
+                        .as_ref()
+                        .ok()
+                        .and_then(|svg| to_diagram(&e, &container, &view, svg));
+                    if let Some(to) = to {
+                        select_box.set(Some((*start, to)));
+                    }
+                }
+                Some(Drag::Segment {
+                    points,
+                    fixed,
+                    segment,
+                    start,
+                    route,
+                    ..
+                }) => {
+                    let Some(to) = (*rendered)
+                        .as_ref()
+                        .ok()
+                        .and_then(|svg| to_diagram(&e, &container, &view, svg))
+                    else {
+                        return;
+                    };
+                    let (a, b) = (points[*segment], points[*segment + 1]);
+                    let across = if (b.x - a.x).abs() >= (b.y - a.y).abs() {
+                        to.y - start.y
+                    } else {
+                        to.x - start.x
+                    };
+                    let delta = (across / SNAP).round() * SNAP;
+                    *route = (delta != 0.0)
+                        .then(|| geometry::drag_segment(points, *fixed, *segment, delta))
+                        .flatten();
+                    // Preview as drawn: fixed start, new vertices, port end.
+                    route_preview.set(route.as_ref().map(|r| {
+                        let mut drawn = points[..*fixed].to_vec();
+                        drawn.extend(r);
+                        drawn.extend(&points[points.len() - 2..]);
+                        drawn
+                    }));
                 }
                 _ => {}
             }
         })
     };
     let end_drag = {
-        let (drag, on_edit, system_ref) = (drag.clone(), on_edit.clone(), system_ref.clone());
-        let (wire_preview, resize_preview) = (wire_preview.clone(), resize_preview.clone());
+        let (drag, on_edit, on_edits, system_ref) = (
+            drag.clone(),
+            on_edit.clone(),
+            props.on_edit.clone(),
+            system_ref.clone(),
+        );
+        let (wire_preview, resize_preview, select_box, route_preview) = (
+            wire_preview.clone(),
+            resize_preview.clone(),
+            select_box.clone(),
+            route_preview.clone(),
+        );
+        let (selected, selected_wire, view) =
+            (selected.clone(), selected_wire.clone(), view.clone());
+        let blocks: Vec<(String, Rect)> = system
+            .map(|s| {
+                s.blocks
+                    .iter()
+                    .map(|b| (b.id.0.clone(), b.position))
+                    .collect()
+            })
+            .unwrap_or_default();
         Callback::from(move |e: MouseEvent| {
             let mut d = drag.borrow_mut();
             let moved = match d.take() {
@@ -627,26 +825,75 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     true
                 }
                 Some(Drag::Pan { moved, .. }) => moved,
-                Some(Drag::Block {
-                    id,
-                    rect,
+                Some(Drag::Segment { dst, route, .. }) => {
+                    route_preview.set(None);
+                    let moved = route.is_some();
+                    if let (Some(points), Some(on_edit)) = (route, &on_edit) {
+                        on_edit.emit(Edit::SetRoute {
+                            system: system_ref.clone(),
+                            dst,
+                            points,
+                        });
+                    }
+                    moved
+                }
+                Some(Drag::Blocks {
+                    blocks,
                     offset,
                     moved,
                     ..
                 }) => {
-                    if let (true, Some(on_edit)) = (moved && offset != (0.0, 0.0), &on_edit) {
-                        on_edit.emit(Edit::MoveBlock {
-                            system: system_ref.clone(),
-                            id: BlockId(id),
-                            position: Rect::new(
-                                rect.left + offset.0,
-                                rect.top + offset.1,
-                                rect.right + offset.0,
-                                rect.bottom + offset.1,
-                            ),
-                        });
+                    if let (true, Some(on_edits)) = (moved && offset != (0.0, 0.0), &on_edits) {
+                        let (dx, dy) = offset;
+                        on_edits.emit(
+                            blocks
+                                .into_iter()
+                                .map(|(_, id, r)| Edit::MoveBlock {
+                                    system: system_ref.clone(),
+                                    id: BlockId(id),
+                                    position: Rect::new(
+                                        r.left + dx,
+                                        r.top + dy,
+                                        r.right + dx,
+                                        r.bottom + dy,
+                                    ),
+                                })
+                                .collect(),
+                        );
                     }
                     moved
+                }
+                // A box selects every block it touches; a click without
+                // dragging is left to the click handler.
+                Some(Drag::Select { start, extend }) => {
+                    let end = select_box.map_or(start, |(_, end)| end);
+                    select_box.set(None);
+                    let area = Rect::new(
+                        start.x.min(end.x),
+                        start.y.min(end.y),
+                        start.x.max(end.x),
+                        start.y.max(end.y),
+                    );
+                    let dragged = area.width() + area.height() > 3.0 / view.scale;
+                    if dragged {
+                        let mut ids = if extend {
+                            (*selected).clone()
+                        } else {
+                            Vec::new()
+                        };
+                        for (id, r) in &blocks {
+                            let touches = r.left <= area.right
+                                && r.right >= area.left
+                                && r.top <= area.bottom
+                                && r.bottom >= area.top;
+                            if touches && !ids.contains(id) {
+                                ids.push(id.clone());
+                            }
+                        }
+                        selected.set(ids);
+                        selected_wire.set(None);
+                    }
+                    dragged
                 }
                 Some(Drag::Ended { moved }) => moved,
                 None => return,
@@ -664,9 +911,22 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
             let wire =
                 closest(e.target(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"));
-            selected.set(match wire {
-                Some(_) => None,
-                None => block_group(e.target()).and_then(|g| g.get_attribute("data-sid")),
+            let block = block_group(e.target()).and_then(|g| g.get_attribute("data-sid"));
+            selected.set(match (wire.is_some(), block) {
+                (true, _) => Vec::new(),
+                // Shift-click adds or removes a block.
+                (false, Some(id)) if e.shift_key() => {
+                    let mut ids = (*selected).clone();
+                    match ids.iter().position(|s| *s == id) {
+                        Some(i) => {
+                            ids.remove(i);
+                        }
+                        None => ids.push(id),
+                    }
+                    ids
+                }
+                (false, Some(id)) => vec![id],
+                (false, None) => Vec::new(),
             });
             selected_wire.set(wire);
         })
@@ -689,17 +949,22 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             let command = e.ctrl_key() || e.meta_key();
             let key = e.key().to_ascii_lowercase();
             if command && (key == "r" || key == "i") {
-                let block = (*selected)
-                    .as_ref()
-                    .and_then(|sid| blocks.iter().find(|b| &b.id.0 == sid));
-                if let Some(b) = block {
-                    e.prevent_default();
+                let chosen: Vec<&Block> = blocks
+                    .iter()
+                    .filter(|b| selected.contains(&b.id.0))
+                    .collect();
+                if chosen.is_empty() {
+                    return;
+                }
+                e.prevent_default();
+                // Each selected block turns or flips in place, as one action.
+                let mut group = Vec::new();
+                for b in chosen {
                     let (orientation, mirrored) = if key == "r" {
                         geometry::rotated(b.orientation, b.mirrored)
                     } else {
                         geometry::flipped(b.orientation, b.mirrored)
                     };
-                    let mut group = Vec::new();
                     if key == "r" {
                         group.push(Edit::MoveBlock {
                             system: system_ref.clone(),
@@ -713,8 +978,15 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         orientation,
                         mirrored,
                     });
-                    on_edits.emit(group);
                 }
+                on_edits.emit(group);
+                return;
+            }
+            // Select every block (Ctrl+A).
+            if command && key == "a" {
+                e.prevent_default();
+                selected.set(blocks.iter().map(|b| b.id.0.clone()).collect());
+                selected_wire.set(None);
                 return;
             }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
@@ -727,11 +999,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     dst,
                 });
                 selected_wire.set(None);
-            } else if let Some(sid) = (*selected).clone() {
+            } else if !selected.is_empty() {
                 e.prevent_default();
-                if let Some(edit) = confirm_delete(&system_ref, BlockId(sid), &lines) {
-                    on_edit.emit(edit);
-                    selected.set(None);
+                let ids: Vec<BlockId> = selected.iter().cloned().map(BlockId).collect();
+                if let Some(group) = confirm_delete(&system_ref, &ids, &lines) {
+                    on_edits.emit(group);
+                    selected.set(Vec::new());
                 }
             }
         })
@@ -789,15 +1062,15 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 let mut p = (*path).clone();
                 p.push(name);
                 path.set(p);
-                selected.set(None);
+                selected.set(Vec::new());
             }
         })
     };
 
-    let selected_block = system.and_then(|s| {
-        selected
-            .as_ref()
-            .and_then(|sid| s.blocks.iter().find(|b| &b.id.0 == sid))
+    // The inspector and resize handles follow a lone selected block.
+    let selected_block = system.and_then(|s| match selected.as_slice() {
+        [sid] => s.blocks.iter().find(|b| &b.id.0 == sid),
+        _ => None,
     });
     let selected_chart = selected_block.and_then(|b| {
         let mut p = refs.clone();
@@ -813,7 +1086,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             let selected = selected.clone();
             Callback::from(move |_: MouseEvent| {
                 path.set(p.clone());
-                selected.set(None);
+                selected.set(Vec::new());
             })
         }
     };
@@ -855,15 +1128,15 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
 
-    let highlight = selected
-        .as_ref()
+    let highlight: String = selected
+        .iter()
         .map(|sid| {
             format!(
-                ".diagram g.block[data-sid=\"{}\"] > :is(rect, polygon, ellipse) {{ stroke: #ff9e64; stroke-width: 3px; }}",
+                ".diagram g.block[data-sid=\"{}\"] > :is(rect, polygon, ellipse) {{ stroke: #ff9e64; stroke-width: 3px; }}\n",
                 css_string(sid)
             )
         })
-        .unwrap_or_default();
+        .collect();
     let wire_highlight = selected_wire
         .as_ref()
         .map(|dst| {
@@ -915,11 +1188,21 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     </>
                 }
             });
+            let selecting = select_box.map(|(a, b)| html! {
+                <rect class="select-box" x={a.x.min(b.x).to_string()} y={a.y.min(b.y).to_string()}
+                    width={(a.x - b.x).abs().to_string()} height={(a.y - b.y).abs().to_string()} />
+            });
+            let rerouting = route_preview.as_ref().map(|pts| {
+                let points: Vec<String> = pts.iter().map(|p| format!("{},{}", p.x, p.y)).collect();
+                html! { <polyline class="route-preview" points={points.join(" ")} /> }
+            });
             html! {
                 <svg class="overlay" viewBox={format!("{vx} {vy} {vw} {vh}")}
                     width={vw.to_string()} height={vh.to_string()}>
                     { for wire }
                     { for handles }
+                    { for selecting }
+                    { for rerouting }
                 </svg>
             }
         }
@@ -945,7 +1228,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     <SystemTree model={props.model.clone()} current={(*path).clone()} on_open={Callback::from({
                         let path = path.clone();
                         let selected = selected.clone();
-                        move |p: Vec<String>| { path.set(p); selected.set(None); }
+                        move |p: Vec<String>| { path.set(p); selected.set(Vec::new()); }
                     })} />
                     if props.on_edit.is_some() {
                         <BlockPalette />
@@ -968,7 +1251,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             let mut p = (*path).clone();
                             p.push(name);
                             path.set(p);
-                            selected.set(None);
+                            selected.set(Vec::new());
                         }
                     })} />
                 }
@@ -1143,7 +1426,9 @@ fn inspector(props: &InspectorProps) -> Html {
     let delete = props.on_edit.clone().map(|on_edit| {
         let (system, id, lines) = (props.system.clone(), b.id.clone(), props.lines.clone());
         let onclick = Callback::from(move |_: MouseEvent| {
-            if let Some(edit) = confirm_delete(&system, id.clone(), &lines) {
+            for edit in
+                confirm_delete(&system, std::slice::from_ref(&id), &lines).unwrap_or_default()
+            {
                 on_edit.emit(edit);
             }
         });

@@ -84,6 +84,63 @@ pub fn flipped(orientation: Orientation, mirrored: bool) -> (Orientation, bool) 
     from_rotation(rotation, !mirror)
 }
 
+/// The stored vertices of a drawn wire after dragging segment `segment`
+/// (between `points[segment]` and the next) across itself by `delta`.
+///
+/// `points` is the wire as drawn: `fixed` leading points belong to its
+/// source or junction, and it ends at the destination port's anchor and
+/// outline point. Those stay put; an end of the segment that is fixed gains a
+/// connecting jog instead. Repeated and collinear vertices are dropped.
+/// `None` when the segment lies entirely within the fixed ends.
+pub fn drag_segment(
+    points: &[Point],
+    fixed: usize,
+    segment: usize,
+    delta: f64,
+) -> Option<Vec<Point>> {
+    const FIXED_END: usize = 2;
+    let n = points.len();
+    if fixed == 0 || n < fixed + FIXED_END || segment + 1 >= n {
+        return None;
+    }
+    if segment + 1 < fixed || segment >= n - FIXED_END {
+        return None;
+    }
+    let (a, b) = (points[segment], points[segment + 1]);
+    let horizontal = (b.x - a.x).abs() >= (b.y - a.y).abs();
+    let shift = |p: Point| {
+        if horizontal {
+            Point::new(p.x, p.y + delta)
+        } else {
+            Point::new(p.x + delta, p.y)
+        }
+    };
+    let mut out = points[..segment].to_vec();
+    if segment < fixed {
+        out.push(a);
+    }
+    out.push(shift(a));
+    out.push(shift(b));
+    if segment + 1 >= n - FIXED_END {
+        out.push(b);
+    }
+    out.extend_from_slice(&points[segment + 2..]);
+    // Drop repeated and collinear interior points in one pass: each point is
+    // judged against the last one kept and the one after it.
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    let mut kept: Vec<Point> = out[..fixed].to_vec();
+    for i in fixed..out.len() - FIXED_END {
+        let (prev, here, next) = (kept[kept.len() - 1], out[i], out[i + 1]);
+        let repeated = close(prev.x, here.x) && close(prev.y, here.y);
+        let collinear = (close(prev.x, here.x) && close(here.x, next.x))
+            || (close(prev.y, here.y) && close(here.y, next.y));
+        if !repeated && !collinear {
+            kept.push(here);
+        }
+    }
+    Some(kept.split_off(fixed))
+}
+
 /// A block outline after a quarter turn: width and height swap about the
 /// exact centre, so repeated turns never drift.
 pub fn quarter_turn(r: Rect) -> Rect {
@@ -271,6 +328,78 @@ mod tests {
             flipped(Orientation::Right, false),
             (Orientation::Left, false)
         );
+    }
+
+    #[test]
+    fn dragging_a_segment_moves_it_and_keeps_the_ends_attached() {
+        let p = Point::new;
+        // Source outline/anchor, an elbow pair, destination anchor/outline.
+        let wire = [
+            p(40.0, 20.0),
+            p(45.0, 20.0),
+            p(70.0, 20.0),
+            p(70.0, 60.0),
+            p(95.0, 60.0),
+            p(100.0, 60.0),
+        ];
+        // The vertical middle segment moves right by 10.
+        assert_eq!(
+            drag_segment(&wire, 2, 2, 10.0),
+            Some(vec![p(80.0, 20.0), p(80.0, 60.0)])
+        );
+        // The first horizontal segment leaves the source anchor: the anchor
+        // stays and a jog joins it to the moved segment.
+        assert_eq!(
+            drag_segment(&wire, 2, 1, -10.0),
+            Some(vec![p(45.0, 10.0), p(70.0, 10.0), p(70.0, 60.0)])
+        );
+        // The last segment into the port ends above the anchor; the jog down
+        // to the anchor is drawn by the router.
+        assert_eq!(
+            drag_segment(&wire, 2, 3, 5.0),
+            Some(vec![p(70.0, 20.0), p(70.0, 65.0), p(95.0, 65.0)])
+        );
+        // Port stubs cannot be dragged.
+        assert_eq!(drag_segment(&wire, 2, 0, 5.0), None);
+        assert_eq!(drag_segment(&wire, 2, 4, 5.0), None);
+        // Dragging onto the source's line merges the collinear vertices,
+        // leaving one corner above the port.
+        let straight = [
+            p(40.0, 20.0),
+            p(45.0, 20.0),
+            p(70.0, 20.0),
+            p(70.0, 30.0),
+            p(95.0, 30.0),
+            p(100.0, 30.0),
+        ];
+        assert_eq!(
+            drag_segment(&straight, 2, 3, -10.0),
+            Some(vec![p(95.0, 20.0)])
+        );
+    }
+
+    /// Dragging runs on every pointer move, so it must stay linear in the
+    /// size of imported routes (from review: a quadratic pass took 1.7 s at
+    /// 100k points).
+    #[test]
+    fn dragging_long_routes_stays_linear() {
+        let n = 200_000;
+        let mut wire = vec![Point::new(-5.0, 0.0), Point::new(0.0, 0.0)];
+        wire.extend((1..n).map(|i| {
+            let step = (i / 2) as f64 * 10.0;
+            if i % 2 == 0 {
+                Point::new(step, step)
+            } else {
+                Point::new(step + 10.0, step)
+            }
+        }));
+        let last = *wire.last().unwrap();
+        wire.push(Point::new(last.x, last.y + 5.0));
+        wire.push(Point::new(last.x, last.y + 10.0));
+        let start = std::time::Instant::now();
+        let route = drag_segment(&wire, 2, n / 2, 5.0).unwrap();
+        assert!(route.len() > n / 2);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
