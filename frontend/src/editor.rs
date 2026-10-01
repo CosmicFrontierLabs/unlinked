@@ -383,7 +383,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
         html! {
             <div class="edit-bar editing">
                 <strong>{ format!("Editing v{}", base.version) }</strong>
-                <span class="muted">{ "Drag on empty space or Shift-click to select; Ctrl+C/Ctrl+V copies, Ctrl+R rotates, Ctrl+I flips, Delete removes; middle-drag pans." }</span>
+                <span class="muted">{ "Drag on empty space or Shift-click to select; Ctrl+C/Ctrl+V copies, Ctrl+G groups into a subsystem, Ctrl+R rotates, Ctrl+I flips, Delete removes; middle-drag pans." }</span>
                 <span class="spacer" />
                 <span>{ format!("{count} change{}", if count == 1 { "" } else { "s" }) }</span>
                 <button onclick={undo.reform(|_: MouseEvent| ())} disabled={count == 0 || *busy} title="Ctrl+Z">{ "Undo" }</button>

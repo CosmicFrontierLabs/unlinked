@@ -1292,6 +1292,29 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 ));
                 return;
             }
+            // Group the selected blocks into a new subsystem (Ctrl+G), named
+            // as Simulink names one, and select it.
+            if command && key == "g" && !selection.blocks().is_empty() {
+                e.prevent_default();
+                let Some(sid) = unlinked_model::edit::next_sid(&model) else {
+                    return;
+                };
+                let names: std::collections::HashSet<&str> =
+                    blocks.iter().map(|b| b.name.as_str()).collect();
+                let name = std::iter::once("Subsystem".to_string())
+                    .chain((1..).map(|i| format!("Subsystem{i}")))
+                    .find(|n| !names.contains(n.as_str()))
+                    .expect("some suffix is free");
+                let id = BlockId(sid.to_string());
+                on_edit.emit(Edit::CreateSubsystem {
+                    system: system_ref.clone(),
+                    ids: selection.blocks().iter().cloned().map(BlockId).collect(),
+                    id: id.clone(),
+                    name,
+                });
+                selection.set(Selection::Blocks(vec![id.0]));
+                return;
+            }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {
                 return;
             }
