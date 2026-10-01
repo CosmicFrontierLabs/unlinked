@@ -45,25 +45,32 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
         // What applies when the block does not store the parameter.
         let shown = stored.clone().or(p.implicit_default.map(str::to_string));
         let set = set(p.name, stored.clone());
+        // A choice among `values`; a current value outside them is shown as
+        // kept rather than as one of them.
+        let choice = |values: &[&'static str], set: Box<dyn Fn(String)>| {
+            let current = shown.clone().unwrap_or_default();
+            let known = values.contains(&current.as_str());
+            let onchange = Callback::from(move |e: Event| {
+                set(e.target_unchecked_into::<HtmlSelectElement>().value())
+            });
+            html! {
+                <select {onchange} disabled={readonly}>
+                    if !known {
+                        <option value={current.clone()} selected=true>
+                            { format!("{} (kept as is)", if current.is_empty() { "Not set" } else { &current }) }
+                        </option>
+                    }
+                    { for values.iter().map(|v| html! {
+                        <option value={v.to_string()} selected={*v == current}>{ p.label_for(v) }</option>
+                    }) }
+                </select>
+            }
+        };
         let control = match p.kind {
-            ParameterKind::Enum(values) => {
-                let current = shown.clone().unwrap_or_default();
-                let known = values.contains(&current.as_str());
-                let onchange = Callback::from(move |e: Event| {
-                    set(e.target_unchecked_into::<HtmlSelectElement>().value())
-                });
-                html! {
-                    <select {onchange} disabled={readonly}>
-                        if !known {
-                            <option value={current.clone()} selected=true>
-                                { format!("{} (kept as is)", if current.is_empty() { "Not set" } else { &current }) }
-                            </option>
-                        }
-                        { for values.iter().map(|v| html! {
-                            <option value={v.to_string()} selected={*v == current}>{ p.label_for(v) }</option>
-                        }) }
-                    </select>
-                }
+            ParameterKind::Enum(values) => choice(values, Box::new(set)),
+            // Only an on/off value is a checkbox.
+            ParameterKind::Boolean if !matches!(shown.as_deref(), Some("on" | "off")) => {
+                choice(&["on", "off"], Box::new(set))
             }
             ParameterKind::Boolean => {
                 let checked = shown.as_deref() == Some("on");
