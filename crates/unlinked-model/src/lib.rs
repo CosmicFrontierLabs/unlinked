@@ -10,6 +10,7 @@
 pub mod boundary;
 pub mod catalog;
 pub mod clipboard;
+pub mod config;
 pub mod diff;
 pub mod duplicate;
 pub mod edit;

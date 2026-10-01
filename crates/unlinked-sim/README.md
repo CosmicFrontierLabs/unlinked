@@ -178,3 +178,29 @@ is unverified and is not promised**: MathWorks documents its legacy MATLAB v4
 generator. Distribution and hold semantics are tested; this is not a
 cryptographic generator. References: [Random Number](https://uk.mathworks.com/help/simulink/slref/randomnumber.html)
 and [Uniform Random Number](https://www.mathworks.com/help/simulink/slref/uniformrandomnumber.html).
+
+## Editor diagnostics
+
+`diagnose::diagnose(&Model, &DiagnosticContext)` returns serializable findings
+with model, configuration, block (subsystem ID path and optional parameter), or
+snapshot-local line targets. `CheckMode::Static` runs structural/catalog checks,
+known literal mode restrictions, and missing bare workspace-variable/input
+checks without evaluating expressions. It always reports `NotChecked`, never
+simulation readiness. Compound expression errors need the optional compile check.
+
+`CheckMode::Compile` requires explicit `Options`; it accepts pure workspace
+expression overrides and constant root-input expressions. It never runs model,
+mask or initialization callbacks. Supply initialization values explicitly after
+an independently authorized evaluation. Imported settings are diagnosed but do
+not replace explicit run options. `Compiled` only means compilation accepted the
+snapshot and context, not that simulation will finish or be numerically correct.
+The compiler reports the first semantic failure; generated/ambiguous IDs fall
+back to a model target rather than guessing a highlighted source block.
+
+In browsers, run compile checks in disposable workers and terminate superseded
+workers. Tag every result with the request generation; line indices only apply
+to that snapshot. Static checks are bounded too, but debouncing/off-thread work
+is recommended for large files. Preflight caps are 5,000 blocks, 25,000 line,
+branch and vertex objects, depth 32, and 2 MiB serialized model/context. A budget
+refusal reports `Incomplete` and `truncated`; omitted warning display is reported
+separately. An incomplete report must not be shown as a clean model.

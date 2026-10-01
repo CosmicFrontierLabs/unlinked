@@ -27,6 +27,27 @@ fn require(block: &Block, key: &str, allowed: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Literal mode restrictions shared by compilation and editor diagnostics.
+pub(crate) fn literal_requirements(
+    kind: &str,
+) -> &'static [(&'static str, &'static [&'static str])] {
+    match kind {
+        "Integrator" => &[
+            ("ExternalReset", &["none"]),
+            ("InitialConditionSource", &["internal"]),
+            ("LimitOutput", &["off"]),
+            ("WrapState", &["off"]),
+            ("ShowStatePort", &["off"]),
+        ],
+        "Sin" => &[
+            ("SineType", &["Time based"]),
+            ("TimeSource", &["Use simulation time"]),
+        ],
+        "Switch" | "RelationalOperator" => &[("ZeroCross", &["off"])],
+        _ => &[],
+    }
+}
+
 fn period_ticks(
     block: &Block,
     options: &Options,
@@ -186,6 +207,9 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         // All accepted numeric paths are doubles (integer/fixed-point types
         // were rejected above), so integer-overflow saturation has no effect.
         require(block, "SaturateOnIntegerOverflow", &["off", "on"])?;
+        for (key, allowed) in literal_requirements(&block.block_type) {
+            require(block, key, allowed)?;
+        }
         let p = |key, default| parameter(block, key, default, &ws);
         let discrete = matches!(
             block.block_type.as_str(),
@@ -325,16 +349,12 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     after: p("After", "1")?,
                 }
             }
-            "Sin" => {
-                require(block, "SineType", &["Time based"])?;
-                require(block, "TimeSource", &["Use simulation time"])?;
-                Kind::Sine {
-                    amplitude: p("Amplitude", "1")?,
-                    frequency: p("Frequency", "1")?,
-                    phase: p("Phase", "0")?,
-                    bias: p("Bias", "0")?,
-                }
-            }
+            "Sin" => Kind::Sine {
+                amplitude: p("Amplitude", "1")?,
+                frequency: p("Frequency", "1")?,
+                phase: p("Phase", "0")?,
+                bias: p("Bias", "0")?,
+            },
             "RandomNumber" | "UniformRandomNumber" => {
                 let seed = p("Seed", "0")?;
                 if seed.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&seed) {
@@ -413,16 +433,9 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 lower: p("LowerLimit", "-0.5")?,
                 upper: p("UpperLimit", "0.5")?,
             },
-            "Integrator" => {
-                require(block, "ExternalReset", &["none"])?;
-                require(block, "InitialConditionSource", &["internal"])?;
-                require(block, "LimitOutput", &["off"])?;
-                require(block, "WrapState", &["off"])?;
-                require(block, "ShowStatePort", &["off"])?;
-                Kind::Integrator {
-                    initial: p("InitialCondition", "0")?,
-                }
-            }
+            "Integrator" => Kind::Integrator {
+                initial: p("InitialCondition", "0")?,
+            },
             "ZeroOrderHold" => Kind::SampleHold {
                 period_ticks: period,
             },
@@ -437,15 +450,12 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 if block.param("Criteria") != Some("u2 ~= 0") {
                     return Err(block_error(id, "Switch currently requires Criteria=u2 ~= 0; threshold criteria need datatype propagation"));
                 }
-                require(block, "ZeroCross", &["off"])?;
+
                 Kind::Switch
             }
-            "RelationalOperator" => {
-                require(block, "ZeroCross", &["off"])?;
-                Kind::Relational {
-                    operation: block.param("Operator").unwrap_or(">=").into(),
-                }
-            }
+            "RelationalOperator" => Kind::Relational {
+                operation: block.param("Operator").unwrap_or(">=").into(),
+            },
             "Logic" => {
                 let operation = block.param("Operator").unwrap_or("AND").to_string();
                 let inputs = if operation == "NOT" {
