@@ -52,6 +52,12 @@ pub struct DiagramProps {
     /// The check stopped listing problems at its limits, or did not finish.
     #[prop_or_default]
     pub problems_truncated: bool,
+    /// Starts a compile check of the shown model; unset while one runs.
+    #[prop_or_default]
+    pub on_compile: Option<Callback<()>>,
+    /// The state or outcome of the last compile check, if any.
+    #[prop_or_default]
+    pub compile_status: AttrValue,
     /// Opens the model settings, for problems with them.
     #[prop_or_default]
     pub on_settings: Option<Callback<()>>,
@@ -1929,8 +1935,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let problem_list = (*show_problems).then(|| {
         html! {
             <div class="problems-panel">
+                <div class="compile-check">
+                    <button onclick={props.on_compile.clone().map(|c| c.reform(|_: MouseEvent| ()))}
+                        disabled={props.on_compile.is_none()}
+                        title="Compile the model for the simulator, off the page's main thread, without simulating">
+                        { "Check compile" }
+                    </button>
+                    <span class="muted">{ &props.compile_status }</span>
+                </div>
                 if props.problems.is_empty() {
-                    <div class="muted">{ "No problems found by the static check." }</div>
+                    <div class="muted">{ "No problems found." }</div>
                 }
                 { for props.problems.iter().map(|d| html! {
                     <button class={classes!("problem-row", problem_class(d))} onclick={go_to(d)}>
@@ -1941,7 +1955,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if props.problems_truncated {
                     <div class="problem warning">{ "The check stopped at its limits: there may be more problems than listed." }</div>
                 }
-                <div class="muted">{ "Static check: structure, settings and simulator support. No simulation was run." }</div>
+                <div class="muted">{ "Checks structure, settings and simulator support. No simulation is run." }</div>
             </div>
         }
     });

@@ -277,7 +277,7 @@ fn model_solver(config: &SimConfig) -> Option<Solver> {
 /// each option that does not come from them: settings the model lacks or
 /// does not give as plain numbers, invalid ones, and solvers the simulator
 /// does not implement.
-fn initial_options(config: &SimConfig) -> (SimulationOptions, Vec<String>) {
+pub(crate) fn initial_options(config: &SimConfig) -> (SimulationOptions, Vec<String>) {
     let mut notes = Vec::new();
     let mut o = SimulationOptions::default();
     let number = |v: Option<&String>| {

@@ -775,6 +775,13 @@ button.active {
     background: var(--panel);
 }
 
+.compile-check {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    margin-bottom: 0.3rem;
+}
+
 .problem-place {
     color: var(--muted);
     min-width: 14rem;
