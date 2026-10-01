@@ -538,6 +538,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let drag = use_mut_ref(|| None::<Drag>);
     // Blocks copied with Ctrl+C.
     let clipboard = use_mut_ref(|| None::<Clipboard>);
+    // A block an action asked to create, selected once the model has it; a
+    // refused action leaves the selection as it was.
+    let select_created = use_mut_ref(|| None::<BlockId>);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -587,6 +590,26 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     {
         let selection = selection.clone();
         use_effect_with((*path).clone(), move |_| selection.set(Selection::Nothing));
+    }
+    // Select a block an action created, once it is in the shown system.
+    {
+        let (selection, select_created, model, path) = (
+            selection.clone(),
+            select_created.clone(),
+            props.model.clone(),
+            (*path).clone(),
+        );
+        use_effect_with(Rc::as_ptr(&props.model) as usize, move |_| {
+            let created = select_created.borrow_mut().take();
+            let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+            if let Some(id) = created.filter(|id| {
+                model
+                    .system_at(&refs)
+                    .is_some_and(|s| s.block(id).is_some())
+            }) {
+                selection.set(Selection::Blocks(vec![id.0]));
+            }
+        });
     }
 
     // Wheel zoom around the cursor. Registered by hand so the listener is
@@ -1187,10 +1210,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
         let annotations: Vec<Annotation> =
             system.map(|s| s.annotations.clone()).unwrap_or_default();
-        let (clipboard, model, on_error) = (
+        let (clipboard, model, on_error, select_created) = (
             clipboard.clone(),
             props.model.clone(),
             props.on_error.clone(),
+            select_created.clone(),
         );
         Callback::from(move |e: KeyboardEvent| {
             let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
@@ -1324,7 +1348,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     id: id.clone(),
                     name,
                 });
-                selection.set(Selection::Blocks(vec![id.0]));
+                *select_created.borrow_mut() = Some(id);
                 return;
             }
             if !matches!(e.key().as_str(), "Delete" | "Backspace") {

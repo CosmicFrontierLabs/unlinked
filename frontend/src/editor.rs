@@ -360,8 +360,16 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     Err(e) => return error.set(Some(e)),
                 };
                 // The edits keep their IDs from the old base; they only
-                // carry over if every one still applies to the new version.
-                match replay(&latest.model, &pending.concat()) {
+                // carry over if every one still applies to the new version,
+                // in its file as well as its IR (the file can refuse what
+                // the IR accepts, e.g. when grouping or expanding).
+                let edits = pending.concat();
+                let replayed = replay(&latest.model, &edits).and_then(|model| {
+                    unlinked_import::patch::apply_edits(&latest.path, &latest.bytes, &edits)
+                        .map(|_| model)
+                        .map_err(|e| e.to_string())
+                });
+                match replayed {
                     Ok(model) => {
                         error.set(Some(format!(
                             "Your {} edit{} now apply on top of v{}. Review, then save.",
