@@ -2,9 +2,9 @@
 //!
 //! Missing solver/start/stop/fixed-step values are unresolved, never silently
 //! replaced with a solver or timing default. An absent SolverType is inferred
-//! only from an explicit recognized solver. Missing RK45 tolerances use the
-//! documented Unlinked run defaults (1e-6 relative, 1e-9 absolute); this does not
-//! mutate or claim to reproduce Simulink defaults. RK45 observation spacing is
+//! only from an explicit recognized solver. Inactive settings and optional
+//! automatic settings are preserved without warnings. They are not translated
+//! into runtime values: callers still supply explicit run options. RK45 observation spacing is
 //! a separate run option, never inferred from FixedStep or MaxStep.
 //!
 //! Canonical solver names and types follow MathWorks' solver parameter reference:
@@ -181,6 +181,9 @@ fn number(
     active: bool,
     auto: bool,
 ) -> Option<f64> {
+    if !active {
+        return None;
+    }
     let Some(raw) = value else {
         if required {
             report.unresolved(
@@ -211,6 +214,9 @@ fn number(
         return None;
     }
     if auto && raw.eq_ignore_ascii_case("auto") {
+        if !required {
+            return None;
+        }
         report.unresolved(
             key,
             "Automatic selection requires an explicit run value; the stored setting is preserved.",
@@ -262,7 +268,18 @@ pub fn validate_config(config: &SimConfig) -> ConfigReport {
         simulation_supported: true,
         ..Default::default()
     };
-    let solver = value(config, config.solver.as_deref(), "Solver", &mut report);
+    let solver = value(config, config.solver.as_deref(), "Solver", &mut report)
+        .or_else(|| config.raw.get("SolverName").map(String::as_str));
+    if let (Some(solver), Some(name)) = (solver, config.raw.get("SolverName")) {
+        if solver.trim() != name.trim() {
+            report.emit(
+                Severity::Error,
+                "config_conflict",
+                "SolverName",
+                "Solver and SolverName disagree.",
+            );
+        }
+    }
     let descriptor = match solver {
         None => {
             report.unresolved(
@@ -400,12 +417,6 @@ pub fn validate_config(config: &SimConfig) -> ConfigReport {
         variable,
         true,
     );
-    if descriptor.is_some_and(|d| d.value == "ode45") {
-        report.emit(Severity::Warning,"config_output_sampling","FixedStep","RK45 uses a separate output sampling interval supplied with the run; FixedStep and MaxStep do not define that interval.");
-        if rel.is_none() || abs.is_none() {
-            report.emit(Severity::Warning,"config_run_defaults","AbsTol","Missing RK45 tolerances use Unlinked run defaults: relative 1e-6 and absolute 1e-9; stored configuration is unchanged.");
-        }
-    }
     let max = number(
         &mut report,
         "MaxStep",
@@ -454,8 +465,8 @@ pub fn validate_config(config: &SimConfig) -> ConfigReport {
         }
     }
     if variable {
-        for key in ["MaxStep", "MinStep", "InitialStep"] {
-            if config.raw.contains_key(key) {
+        for (key, parsed) in [("MaxStep", max), ("MinStep", min), ("InitialStep", initial)] {
+            if parsed.is_some() {
                 report.unsupported(key,"This stored internal-step constraint is not an Unlinked run option; it cannot be silently applied or replaced by the output sampling interval.");
             }
         }
@@ -613,12 +624,11 @@ mod tests {
         config.solver = Some("ode45".into());
         let report = validate_config(&config);
         assert!(report.is_valid() && report.simulation_supported);
-        assert!(has(&report, "config_output_sampling", "FixedStep"));
-        assert!(has(&report, "config_run_defaults", "AbsTol"));
+        assert!(report.diagnostics.is_empty());
         config.fixed_step = Some("auto".into());
         let report = validate_config(&config);
         assert!(report.simulation_supported);
-        assert!(report.unresolved);
+        assert!(!report.unresolved);
         config.raw.insert("SolverType".into(), "bogus".into());
         assert!(!validate_config(&config).is_valid());
     }
@@ -639,7 +649,7 @@ mod tests {
         config.raw.clear();
         config.raw.insert("AbsTol".into(), "auto".into());
         let report = validate_config(&config);
-        assert!(report.is_valid() && report.unresolved && !report.simulation_supported);
+        assert!(report.is_valid() && !report.unresolved && report.simulation_supported);
         config.raw.clear();
         config.raw.insert("MaxStep".into(), "0.1".into());
         config.raw.insert("MinStep".into(), "0.2".into());
@@ -671,11 +681,34 @@ mod tests {
             .all(|d| d.severity == Severity::Warning));
         config.raw.insert("RelTol".into(), "auto".into());
         let report = validate_config(&config);
-        assert!(report.is_valid() && report.unresolved && !report.simulation_supported);
-        assert!(has(&report, "config_unresolved", "RelTol"));
+        assert!(report.is_valid() && !report.unresolved && report.simulation_supported);
+        assert!(!has(&report, "config_unresolved", "RelTol"));
         config.solver = Some("ode4".into());
         let report = validate_config(&config);
-        assert!(report.is_valid() && report.unresolved && report.simulation_supported);
+        assert!(report.is_valid() && !report.unresolved && report.simulation_supported);
+    }
+    #[test]
+    fn inactive_and_optional_auto_settings_do_not_flood_the_problem_list() {
+        let mut config = fixed();
+        for key in ["RelTol", "AbsTol", "MaxStep", "MinStep", "InitialStep"] {
+            config.raw.insert(key.into(), "auto".into());
+        }
+        for solver in ["ode4", "ode45"] {
+            config.solver = Some(solver.into());
+            let report = validate_config(&config);
+            assert!(
+                report.diagnostics.is_empty(),
+                "{solver}: {:?}",
+                report.diagnostics
+            );
+            assert!(!report.unresolved && report.simulation_supported);
+        }
+        config.raw.insert("SolverName".into(), "ode4".into());
+        assert!(has(
+            &validate_config(&config),
+            "config_conflict",
+            "SolverName"
+        ));
     }
     #[test]
     fn raw_only_values_and_serialized_config_targets_work() {

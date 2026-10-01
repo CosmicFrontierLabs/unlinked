@@ -218,11 +218,63 @@ fn signed_count(
         count(block, "Inputs", "2", workspace, budget)
     }
 }
+pub(crate) fn supported_native_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "Constant"
+            | "Ground"
+            | "Clock"
+            | "DigitalClock"
+            | "Step"
+            | "Sin"
+            | "RandomNumber"
+            | "UniformRandomNumber"
+            | "Gain"
+            | "Bias"
+            | "Sum"
+            | "Add"
+            | "Product"
+            | "Integrator"
+            | "UnitDelay"
+            | "ZeroOrderHold"
+            | "Saturate"
+            | "Saturation"
+            | "TransferFcn"
+            | "DiscreteTransferFcn"
+            | "StateSpace"
+            | "Switch"
+            | "Logic"
+            | "RelationalOperator"
+            | "Abs"
+            | "Trigonometry"
+            | "Math"
+            | "Mux"
+            | "Demux"
+            | "Scope"
+            | "Display"
+            | "Inport"
+            | "Outport"
+            | "Terminator"
+            | "ToWorkspace"
+            | "Goto"
+            | "From"
+            | "GotoTagVisibility"
+            | "MatlabFunction"
+    )
+}
+
 fn describe(
     block: &mut Block,
     workspace: &Workspace,
     budget: &mut ArrayBudget,
 ) -> Result<Spec, Error> {
+    if !supported_native_type(&block.block_type) {
+        return Err(block_error(
+            &block.id.0,
+            format!("unsupported block type {}", block.block_type),
+        ));
+    }
+
     let id = &block.id.0;
     if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
         return Err(block_error(
