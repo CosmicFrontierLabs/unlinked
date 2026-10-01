@@ -90,13 +90,13 @@ impl Write for ByteLimit {
         Ok(())
     }
 }
-/// Limits include opaque data before cloning/compilation. Check recursive shape
-/// before serialization; neither traversal allocates an unbounded pending stack.
-fn bounded(model: &Model, context: &DiagnosticContext) -> bool {
+/// Cheap iterative snapshot check, also used before UI-thread serialization.
+/// Bounds diagnostic target/path amplification before any target clones.
+pub fn snapshot_shape_bounded(model: &Model) -> bool {
     let mut nodes = 25_000usize;
     let mut blocks = 5000usize;
-    let mut pending = vec![(&model.root, 0usize)];
-    while let Some((system, depth)) = pending.pop() {
+    let mut pending = vec![(&model.root, 0usize, 0usize)];
+    while let Some((system, depth, ancestor_bytes)) = pending.pop() {
         if depth > 32 {
             return false;
         }
@@ -109,11 +109,32 @@ fn bounded(model: &Model, context: &DiagnosticContext) -> bool {
         };
         nodes = left;
         for b in &system.blocks {
+            if b.id.0.len() > 1024 {
+                return false;
+            }
+            // Escaped slash paths can be twice as long as their stored names.
+            let own_bytes =
+                b.id.0
+                    .len()
+                    .saturating_add(b.id.0.bytes().filter(|b| *b == b'/').count())
+                    .saturating_add(b.name.len())
+                    .saturating_add(b.name.bytes().filter(|b| *b == b'/').count())
+                    .saturating_add(2);
+            let path_bytes = ancestor_bytes.saturating_add(own_bytes);
+            if path_bytes > 4096 {
+                return false;
+            }
             if let Some(child) = b.subsystem.as_deref() {
-                pending.push((child, depth + 1));
+                pending.push((child, depth + 1, path_bytes));
             }
         }
+        let endpoint_allowed = |ep: &Option<unlinked_model::Endpoint>| {
+            ep.as_ref().is_none_or(|ep| ep.block.0.len() <= 1024)
+        };
         for line in &system.lines {
+            if !endpoint_allowed(&line.src) || !endpoint_allowed(&line.dst) {
+                return false;
+            }
             let mut branches = vec![];
             let Some(left) = nodes.checked_sub(line.branches.len() + line.points.len()) else {
                 return false;
@@ -121,6 +142,9 @@ fn bounded(model: &Model, context: &DiagnosticContext) -> bool {
             nodes = left;
             branches.extend(line.branches.iter().map(|b| (b, 0usize)));
             while let Some((branch, depth)) = branches.pop() {
+                if !endpoint_allowed(&branch.dst) {
+                    return false;
+                }
                 if depth > 32 {
                     return false;
                 }
@@ -132,6 +156,13 @@ fn bounded(model: &Model, context: &DiagnosticContext) -> bool {
                 branches.extend(branch.branches.iter().map(|b| (b, depth + 1)));
             }
         }
+    }
+    true
+}
+/// Limits opaque data before cloning/compilation, after bounded shape traversal.
+fn bounded(model: &Model, context: &DiagnosticContext) -> bool {
+    if !snapshot_shape_bounded(model) || context.inputs.keys().any(|id| id.0.len() > 1024) {
+        return false;
     }
     let mut bytes = ByteLimit(2 * 1024 * 1024);
     serde_json::to_writer(&mut bytes, model).is_ok()
@@ -181,7 +212,7 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
         report.truncated = true;
         report.simulation = SimulationCheck::Incomplete;
         report.emit(Severity::Warning, "diagnostic_budget", DiagnosticTarget::Model,
-            "Diagnostics stopped: limit is 5,000 blocks, 25,000 line/branch/vertex objects, depth 32 and 2 MiB serialized model/context text.".into());
+            "Diagnostics stopped: limit is 5,000 blocks, 25,000 line/branch/vertex objects, depth 32, 1 KiB block/endpoint IDs, 4 KiB accumulated ID/name paths and 2 MiB serialized model/context text.".into());
         return report;
     }
     let structural = validate_structure(model);
