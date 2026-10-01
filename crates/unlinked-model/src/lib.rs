@@ -347,6 +347,19 @@ pub struct Endpoint {
     pub port: PortRef,
 }
 
+/// The SLX form: `12#out:1`, or `12#enable` for the single control ports.
+impl fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}#{}", self.block, self.port.kind.token())?;
+        match self.port.kind {
+            PortKind::In | PortKind::Out | PortKind::LConn | PortKind::RConn => {
+                write!(f, ":{}", self.port.index)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// A signal line. A line has one source and either a single destination or
 /// a tree of branches fanning out to several destinations. `points` are
 /// absolute canvas coordinates of the intermediate vertices.
