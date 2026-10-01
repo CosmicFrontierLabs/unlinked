@@ -282,3 +282,30 @@ fn split_root_grouping_writes_an_inline_child_and_preserves_other_parts() {
     .unwrap();
     assert_eq!(after, outer);
 }
+
+#[test]
+fn grouping_remaps_explicit_legacy_sid_endpoints() {
+    let (name, bytes) = fixtures().remove(0);
+    let text = String::from_utf8(bytes)
+        .unwrap()
+        .replace(" SID 2\n", " SID legacyGain\n")
+        .replace(" DstBlock g\n DstPort 1\n", " Dst \"legacyGain#in:1\"\n")
+        .replace(" SrcBlock g\n SrcPort 1\n", " Src \"legacyGain#out:1\"\n");
+    let model = unlinked_import::import(name, text.as_bytes()).unwrap();
+    for names in [vec!["g"], vec!["c", "g"]] {
+        let edit = Edit::CreateSubsystem {
+            system: vec![],
+            ids: names
+                .iter()
+                .map(|n| model.root.block_by_name(n).unwrap().id.clone())
+                .collect(),
+            id: BlockId(next_sid(&model).unwrap().to_string()),
+            name: "controller".into(),
+        };
+        let mut expected = model.clone();
+        apply_batch(&mut expected, std::slice::from_ref(&edit)).unwrap();
+        let output = unlinked_import::patch::apply_edits(name, text.as_bytes(), &[edit]).unwrap();
+        assert_eq!(unlinked_import::import(name, &output).unwrap(), expected);
+        assert!(!String::from_utf8(output).unwrap().contains("legacyGain#"));
+    }
+}

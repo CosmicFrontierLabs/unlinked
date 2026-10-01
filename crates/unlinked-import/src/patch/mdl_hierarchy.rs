@@ -112,6 +112,34 @@ fn rewrite(
     Ok(rewritten)
 }
 
+/// Persistent IDs assigned to legacy blocks must update both endpoint spellings.
+pub(super) fn remap_sids(line: &mut Section, map: &[(BlockId, BlockId)]) {
+    for (key, kind) in [("Src", PortKind::Out), ("Dst", PortKind::In)] {
+        if let Some(value) = line.prop(key) {
+            if let Some((sid, port)) = parse_endpoint(&value, kind) {
+                if let Some((_, new)) = map.iter().find(|(old, _)| old.0 == sid) {
+                    line.set_prop(
+                        key,
+                        &Endpoint {
+                            block: new.clone(),
+                            port,
+                        }
+                        .to_string(),
+                        false,
+                    );
+                }
+            }
+        }
+    }
+    for item in &mut line.items {
+        if let Item::Section(branch) = item {
+            if branch.tag == "Branch" {
+                remap_sids(branch, map);
+            }
+        }
+    }
+}
+
 pub(super) fn create(
     sys: &mut Section,
     resolved: &Resolved,
@@ -150,11 +178,14 @@ pub(super) fn create(
         .iter()
         .map(|r| Ok((recipe_index(r), build(r)?)))
         .collect::<Result<_, ImportError>>()?;
-    let child_lines: Vec<_> = plan
+    let mut child_lines: Vec<_> = plan
         .child_lines
         .iter()
         .map(build)
         .collect::<Result<_, _>>()?;
+    for line in &mut child_lines {
+        remap_sids(line, &plan.id_remap);
+    }
     let indent = child_indent(sys);
     let mut inner = new_section("System", &format!("{indent}  "), sys.eol());
     let selected: BTreeSet<_> = plan.selected_indices.iter().copied().collect();
