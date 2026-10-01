@@ -148,6 +148,44 @@ const MENU: [Action; 8] = [
     Action::SelectAll,
 ];
 
+/// What a click on `target` selects: a wire, a trunk, a block, an
+/// annotation of `annotations`, or nothing.
+fn hit(target: Option<web_sys::EventTarget>, annotations: &[Annotation]) -> Selection {
+    if let Some(dst) =
+        closest(target.clone(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"))
+    {
+        return Selection::Wire(dst);
+    }
+    if let Some(src) =
+        closest(target.clone(), "polyline.trunk-hit").and_then(|w| endpoint_of(&w, "src-"))
+    {
+        return Selection::Trunk(src);
+    }
+    if let Some(id) = block_group(target.clone()).and_then(|g| g.get_attribute("data-sid")) {
+        return Selection::Blocks(vec![id]);
+    }
+    closest(target, "[data-annotation]")
+        .and_then(|a| a.get_attribute("data-annotation")?.parse::<usize>().ok())
+        .and_then(|i| Some(Selection::Annotation(i, annotations.get(i)?.clone())))
+        .unwrap_or_default()
+}
+
+/// Whether `action` applies to `selection`; the keyboard, the toolbar and
+/// the context menu all offer exactly these. `subsystem` tells whether the
+/// selection is one subsystem block.
+fn available(action: Action, selection: &Selection, clipboard: bool, subsystem: bool) -> bool {
+    let blocks = !selection.blocks().is_empty();
+    match action {
+        Action::Copy | Action::Rotate | Action::Flip | Action::Group | Action::Nudge(..) => blocks,
+        Action::Expand => subsystem,
+        Action::Paste => clipboard,
+        Action::SelectAll => true,
+        Action::Delete => {
+            blocks || matches!(selection, Selection::Wire(_) | Selection::Annotation(..))
+        }
+    }
+}
+
 /// A button performing `action`: a toolbar button, or a context menu item
 /// showing its shortcut.
 fn action_button(action: Action, enabled: bool, act: &Callback<Action>, menu: bool) -> Html {
@@ -691,6 +729,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let drag = use_mut_ref(|| None::<Drag>);
     // Blocks copied with Ctrl+C.
     let clipboard = use_mut_ref(|| None::<Clipboard>);
+    let refresh = use_force_update();
     // A block an action asked to create, selected once the model has it; a
     // refused action leaves the selection as it was.
     let select_created = use_mut_ref(|| None::<BlockId>);
@@ -1317,47 +1356,30 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             if moved {
                 return;
             }
-            let target = e.target();
-            let wire = || {
-                closest(target.clone(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"))
-            };
-            let trunk = || {
-                closest(target.clone(), "polyline.trunk-hit").and_then(|w| endpoint_of(&w, "src-"))
-            };
-            let annotation = || {
-                closest(target.clone(), "[data-annotation]")?
-                    .get_attribute("data-annotation")?
-                    .parse::<usize>()
-                    .ok()
-            };
-            let block = || block_group(target.clone())?.get_attribute("data-sid");
-            selection.set(if let Some(dst) = wire() {
-                Selection::Wire(dst)
-            } else if let Some(src) = trunk() {
-                Selection::Trunk(src)
-            } else if let Some(id) = block() {
+            selection.set(match hit(e.target(), &annotations) {
                 // Shift-click adds or removes a block.
-                if e.shift_key() {
-                    let mut ids = selection.blocks().to_vec();
-                    match ids.iter().position(|s| *s == id) {
-                        Some(i) => {
-                            ids.remove(i);
+                Selection::Blocks(ids) if e.shift_key() => {
+                    let mut selected = selection.blocks().to_vec();
+                    for id in ids {
+                        match selected.iter().position(|s| *s == id) {
+                            Some(i) => {
+                                selected.remove(i);
+                            }
+                            None => selected.push(id),
                         }
-                        None => ids.push(id),
                     }
-                    Selection::Blocks(ids)
-                } else {
-                    Selection::Blocks(vec![id])
+                    Selection::Blocks(selected)
                 }
-            } else if let Some((index, a)) =
-                annotation().and_then(|i| Some((i, annotations.get(i)?)))
-            {
-                Selection::Annotation(index, a.clone())
-            } else {
-                Selection::Nothing
+                other => other,
             });
         })
     };
+    let lone_subsystem = matches!(
+        selection.blocks(),
+        [id] if system
+            .and_then(|s| s.block(&BlockId(id.clone())))
+            .is_some_and(|b| b.subsystem.is_some())
+    );
     // Editing actions, from the keyboard, the toolbar or the context menu.
     let act = {
         let (selection, on_edit, on_edits, system_ref) = (
@@ -1376,10 +1398,23 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_error.clone(),
             select_created.clone(),
         );
+        let (container, refresh) = (container.clone(), refresh.clone());
         Callback::from(move |action: Action| {
             let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
                 return;
             };
+            // Keep keyboard focus on the diagram after a button click.
+            if let Some(el) = container.cast::<HtmlElement>() {
+                let _ = el.focus();
+            }
+            if !available(
+                action,
+                &selection,
+                clipboard.borrow().is_some(),
+                lone_subsystem,
+            ) {
+                return;
+            }
             let chosen: Vec<&Block> = blocks
                 .iter()
                 .filter(|b| selection.blocks().contains(&b.id.0))
@@ -1397,6 +1432,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         ids: selection.blocks().iter().cloned().map(BlockId).collect(),
                         pastes: 0,
                     });
+                    // Paste becomes available.
+                    refresh.force_update();
                 }
                 Action::Paste => {
                     let mut clip = clipboard.borrow_mut();
@@ -1558,23 +1595,25 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     };
     let onkeydown = {
         let (act, selection, clipboard) = (act.clone(), selection.clone(), clipboard.clone());
+        let (editable, subsystem) = (props.on_edit.is_some(), lone_subsystem);
         Callback::from(move |e: KeyboardEvent| {
             let command = e.ctrl_key() || e.meta_key();
+            if !editable || e.alt_key() {
+                return;
+            }
             let key = e.key().to_ascii_lowercase();
-            let blocks = !selection.blocks().is_empty();
-            // Keys are only taken from the browser when they act on something.
             let action = match key.as_str() {
-                "c" if command && blocks => Action::Copy,
-                "v" if command && clipboard.borrow().is_some() => Action::Paste,
-                "r" if command && blocks => Action::Rotate,
-                "i" if command && blocks => Action::Flip,
+                "c" if command => Action::Copy,
+                "v" if command => Action::Paste,
+                "r" if command => Action::Rotate,
+                "i" if command => Action::Flip,
                 "a" if command => Action::SelectAll,
                 "g" if command && e.shift_key() => Action::Expand,
-                "g" if command && blocks => Action::Group,
-                "delete" | "backspace" if *selection != Selection::Nothing => Action::Delete,
+                "g" if command => Action::Group,
+                "delete" | "backspace" => Action::Delete,
                 // Arrows nudge the selection by a grid step, or one unit
                 // with Shift.
-                "arrowleft" | "arrowright" | "arrowup" | "arrowdown" if blocks && !command => {
+                "arrowleft" | "arrowright" | "arrowup" | "arrowdown" if !command => {
                     let step = if e.shift_key() { 1.0 } else { SNAP };
                     match key.as_str() {
                         "arrowleft" => Action::Nudge(-step, 0.0),
@@ -1585,8 +1624,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
                 _ => return,
             };
-            e.prevent_default();
-            act.emit(action);
+            // Keys are only taken from the browser when they act on something.
+            if available(action, &selection, clipboard.borrow().is_some(), subsystem) {
+                e.prevent_default();
+                act.emit(action);
+            }
         })
     };
     // Palette blocks are dragged in with HTML drag and drop.
@@ -1629,18 +1671,30 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let oncontextmenu = {
         let (menu, selection, editable) =
             (menu.clone(), selection.clone(), props.on_edit.is_some());
+        let annotations: Vec<Annotation> =
+            system.map(|s| s.annotations.clone()).unwrap_or_default();
         Callback::from(move |e: MouseEvent| {
             if !editable {
                 return;
             }
             e.prevent_default();
-            // Right-clicking an unselected block selects it alone.
-            if let Some(id) = block_group(e.target()).and_then(|g| g.get_attribute("data-sid")) {
-                if !selection.blocks().contains(&id) {
-                    selection.set(Selection::Blocks(vec![id]));
-                }
+            // The menu acts on what was right-clicked, as a click selects
+            // it, except that a block of the selection keeps the selection.
+            match hit(e.target(), &annotations) {
+                Selection::Blocks(ids) if ids.iter().all(|id| selection.blocks().contains(id)) => {}
+                other => selection.set(other),
             }
-            menu.set(Some((e.client_x(), e.client_y())));
+            // Kept inside the window, at roughly the menu's largest size.
+            let window = web_sys::window();
+            let size = |v: Option<wasm_bindgen::JsValue>| {
+                v.and_then(|v| v.as_f64()).unwrap_or(f64::MAX) as i32
+            };
+            let width = size(window.as_ref().and_then(|w| w.inner_width().ok()));
+            let height = size(window.as_ref().and_then(|w| w.inner_height().ok()));
+            menu.set(Some((
+                e.client_x().min(width - 240).max(0),
+                e.client_y().min(height - 260).max(0),
+            )));
         })
     };
     let ondblclick = {
@@ -1766,23 +1820,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
 
-    // Which actions apply to the current selection.
-    let lone_subsystem = matches!(
-        selection.blocks(),
-        [id] if system
-            .and_then(|s| s.block(&BlockId(id.clone())))
-            .is_some_and(|b| b.subsystem.is_some())
-    );
-    let blocks_selected = !selection.blocks().is_empty();
-    let something_selected = *selection != Selection::Nothing;
-    let enabled = |a: Action| match a {
-        Action::Copy | Action::Rotate | Action::Flip | Action::Group | Action::Nudge(..) => {
-            blocks_selected
-        }
-        Action::Expand => lone_subsystem,
-        Action::Delete => something_selected,
-        Action::Paste | Action::SelectAll => true,
-    };
+    let enabled =
+        |a: Action| available(a, &selection, clipboard.borrow().is_some(), lone_subsystem);
     let line_end = |class: &str, prefix: &str, ep: &Endpoint| {
         format!(
             ".diagram polyline.{class}[data-{prefix}sid=\"{}\"][data-{prefix}kind=\"{}\"][data-{prefix}index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
