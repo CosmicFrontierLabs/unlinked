@@ -62,7 +62,7 @@ pub(crate) fn variant_key(key: &str) -> bool {
     key.starts_with("Variant") && !matches!(key, "VariantControlMode" | "VariantActivationTime")
 }
 
-fn safe_selected(block: &Block) -> Result<(), EditError> {
+pub(crate) fn safe_selected(block: &Block) -> Result<(), EditError> {
     let bad = |reason: &str| {
         invalid(format!(
             "cannot move {:?} into a subsystem: {reason}",
@@ -122,7 +122,7 @@ fn safe_selected(block: &Block) -> Result<(), EditError> {
     Ok(())
 }
 
-fn destinations(line: &Line) -> (Vec<Endpoint>, bool) {
+pub(crate) fn destinations(line: &Line) -> (Vec<Endpoint>, bool) {
     let mut out = Vec::new();
     if let Some(dst) = &line.dst {
         out.push(dst.clone());
@@ -146,7 +146,7 @@ fn endpoint(block: &BlockId, kind: PortKind, index: u32) -> Endpoint {
     }
 }
 
-fn validate_endpoint(
+pub(crate) fn validate_endpoint(
     blocks: &BTreeMap<&BlockId, &Block>,
     ep: &Endpoint,
     source: bool,

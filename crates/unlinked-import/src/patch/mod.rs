@@ -5,6 +5,7 @@
 //! configuration sets, Stateflow, styling, unknown elements) is preserved.
 
 mod dom;
+mod expansion;
 mod mdl;
 mod slx;
 
@@ -21,6 +22,7 @@ struct Resolved {
     edit: Edit,
     route: Option<RouteUpdate>,
     hierarchy: Option<unlinked_model::hierarchy::CreatePlan>,
+    expansion: Option<unlinked_model::expand::ExpandPlan>,
     source_line_count: usize,
     /// Subsystem block names from the root.
     system: Vec<String>,
@@ -121,6 +123,13 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
             ),
             _ => None,
         };
+        let expansion = match edit {
+            Edit::ExpandSubsystem { system, id } => Some(
+                unlinked_model::expand::plan_expand(&model, system, id)
+                    .map_err(|e| failed(e.to_string()))?,
+            ),
+            _ => None,
+        };
         edit.apply(&mut model).map_err(|e| failed(e.to_string()))?;
         let sys = system_names(&model, edit.system())
             .and_then(|names| {
@@ -174,6 +183,7 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
             edit: edit.clone(),
             route,
             hierarchy,
+            expansion,
             source_line_count,
             system,
             names,

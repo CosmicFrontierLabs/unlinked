@@ -4,8 +4,11 @@
 //! within that system only. Only parts that change are rewritten; every
 //! other zip entry is copied raw.
 
+#[path = "slx_expand.rs"]
+mod expand;
 #[path = "slx_hierarchy.rs"]
 mod hierarchy;
+use unlinked_model::expand::removable_property as expansion_property;
 
 use super::dom::{self, Document, XElem, XNode};
 use super::{format_ports, parse_endpoint};
@@ -267,6 +270,13 @@ fn set_parameter(block: &mut XElem, name: &str, value: &str) {
 /// Apply an edit to the system element `parent`.
 fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError> {
     let edit = &resolved.edit;
+    if let Edit::ExpandSubsystem { .. } = edit {
+        let plan = resolved
+            .expansion
+            .as_ref()
+            .ok_or_else(|| ImportError::Edit("missing expansion plan".into()))?;
+        return expand::expand(parent, plan);
+    }
     if let Edit::CreateSubsystem { .. } = edit {
         let plan = resolved
             .hierarchy
@@ -332,6 +342,7 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
     }
     let sid = match edit {
         Edit::CreateSubsystem { .. }
+        | Edit::ExpandSubsystem { .. }
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
@@ -456,6 +467,7 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
             });
         }
         Edit::CreateSubsystem { .. }
+        | Edit::ExpandSubsystem { .. }
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
@@ -1003,6 +1015,10 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
                 .ok_or_else(|| ImportError::Xml("empty document".into()))??;
         }
         let allocated = match &resolved.edit {
+            Edit::ExpandSubsystem { .. } => resolved
+                .expansion
+                .as_ref()
+                .map(|plan| plan.watermark.to_string()),
             Edit::CreateSubsystem { .. } => resolved
                 .hierarchy
                 .as_ref()
@@ -1116,6 +1132,7 @@ mod tests {
             added: None,
             route: None,
             hierarchy: None,
+            expansion: None,
             source_line_count: 0,
             ports: None,
             renumbered: Vec::new(),
@@ -1183,6 +1200,7 @@ mod tests {
             added: None,
             route: None,
             hierarchy: None,
+            expansion: None,
             source_line_count: 0,
             ports: None,
             renumbered: Vec::new(),

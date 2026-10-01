@@ -3,8 +3,11 @@
 //! Blocks are found by the containing system's path and the block name
 //! (MDL lines refer to blocks by name).
 
+#[path = "mdl_expand.rs"]
+mod expand;
 #[path = "mdl_hierarchy.rs"]
 mod hierarchy;
+use unlinked_model::expand::removable_property as expansion_property;
 
 use super::{format_ports, parse_endpoint};
 use super::{Boundary, Resolved};
@@ -446,6 +449,18 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
     let sys = file
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
+    if let Edit::ExpandSubsystem { .. } = edit {
+        let plan = resolved
+            .expansion
+            .as_ref()
+            .ok_or_else(|| ImportError::Edit("missing expansion plan".into()))?;
+        expand::expand(sys, resolved, plan)?;
+        let root = file
+            .system_mut(&[])
+            .ok_or_else(|| ImportError::Mdl("no root system".into()))?;
+        root.set_prop(SID_WATERMARK, &plan.watermark.to_string(), false);
+        return Ok(());
+    }
     if let Edit::CreateSubsystem { .. } = edit {
         let plan = resolved
             .hierarchy
@@ -512,6 +527,7 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
     }
     let id = match edit {
         Edit::CreateSubsystem { .. }
+        | Edit::ExpandSubsystem { .. }
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
@@ -706,6 +722,7 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
             });
         }
         Edit::CreateSubsystem { .. }
+        | Edit::ExpandSubsystem { .. }
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
@@ -1041,6 +1058,7 @@ mod tests {
             added: None,
             route: None,
             hierarchy: None,
+            expansion: None,
             source_line_count: 0,
             ports: None,
             renumbered: Vec::new(),
