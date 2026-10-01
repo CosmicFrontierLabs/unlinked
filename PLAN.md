@@ -80,6 +80,13 @@ CI. Per-model import, render and simulation coverage is tracked in
     inside a plain subsystem updates the subsystem block's ports and moves the
     connections outside it with their signals (a wired port is only removed
     with consent).
+  - Subsystems: group selected native blocks into a new virtual subsystem
+    (Ctrl+G), with ports generated for the connections crossing its edge, and
+    expand a plain virtual subsystem stored inline back into its parent
+    (Ctrl+Shift+G or the inspector). Moved blocks keep their SIDs and file
+    records; grouping inside a split SLX system writes the new subsystem as
+    its own part. The editor dry-runs both against the file before accepting
+    them, since the file can refuse what the preview allows.
   - Lines: connect ports by dragging, disconnect, reroute by dragging a
     segment of a final leg or of a branched line's trunk, and name signals.
   - Annotations: add, move, edit plain or TeX-source text, and delete.
@@ -91,8 +98,14 @@ CI. Per-model import, render and simulation coverage is tracked in
   - Not yet: copying masked, linked, styled or subsystem blocks; editing
     rich-text annotation text; bus element, control (enable, trigger, action,
     reset) and physical port blocks inside subsystems, and port edits in
-    masked, linked, atomic or variant subsystems; renaming or deleting blocks
-    that own Stateflow charts; and editing chart contents.
+    masked, linked, atomic or variant subsystems; expanding subsystems stored
+    in their own SLX part (including ones just grouped in a split system),
+    masked, linked, conditional, atomic or variant ones, or ones whose wrapper
+    or ports carry settings that would be lost; grouping blocks other than
+    native catalog blocks or across named, physical or control connections;
+    updating references to moved blocks by path held elsewhere (such as
+    signal logging lists); renaming or deleting blocks that own Stateflow
+    charts; and editing chart contents.
 
 ### Simulation
 - Bounded, version-pinned simulation jobs over HTTP and a WebSocket stream,
@@ -146,8 +159,8 @@ These are deliberately out of scope today and are rejected when encountered:
   other than Dormand–Prince, algebraic loop solving, triggered/enabled and
   function-call subsystems, buses, MIMO state-space, fixed-point types,
   multi-instance model references.
-- **Editing**: subsystem hierarchy (non-plain port blocks, creating
-  subsystems from a selection), copying non-native blocks, rich-text
+- **Editing**: subsystem hierarchy beyond plain virtual subsystems (non-plain
+  port blocks, expanding split-part subsystems), copying non-native blocks, rich-text
   annotations, renaming/deleting blocks that own Stateflow charts, and
   editing chart contents.
 - **Scale-out**: simulation caps are per backend instance.
