@@ -171,7 +171,6 @@ enum Range {
     Finite,
     Positive,
     Nonnegative,
-    RelativeTolerance,
 }
 fn number(
     report: &mut ConfigReport,
@@ -245,13 +244,11 @@ fn number(
         Range::Finite => true,
         Range::Positive => n > 0.,
         Range::Nonnegative => n >= 0.,
-        Range::RelativeTolerance => n > 0. && n <= 1.,
     };
     if !valid {
         let message = match range {
             Range::Positive => "Value must be positive.",
             Range::Nonnegative => "Value must be nonnegative.",
-            Range::RelativeTolerance => "Unlinked relative tolerance must satisfy 0 < RelTol <= 1.",
             Range::Finite => unreachable!(),
         };
         report.emit(Severity::Error, "config_range", key, message);
@@ -379,15 +376,21 @@ pub fn validate_config(config: &SimConfig) -> ConfigReport {
     let variable = kind == Some(SolverKind::VariableStep);
     let rel = config.raw.get("RelTol").map(String::as_str);
     let abs = config.raw.get("AbsTol").map(String::as_str);
-    number(
+    // Simulink allows any positive relative tolerance, whereas the current
+    // Unlinked RK45 runtime limits it to one. That is compatibility, not validity.
+    // https://www.mathworks.com/help/simulink/gui/relativetolerance.html
+    let relative = number(
         &mut report,
         "RelTol",
         rel,
-        Range::RelativeTolerance,
+        Range::Positive,
         false,
         variable,
-        false,
+        true,
     );
+    if variable && relative.is_some_and(|value| value > 1.) {
+        report.unsupported("RelTol", "A relative tolerance above one is valid in Simulink but exceeds Unlinked's runtime limit; the stored value is preserved.");
+    }
     number(
         &mut report,
         "AbsTol",
@@ -625,7 +628,7 @@ mod tests {
         config.solver = Some("ode45".into());
         for (key, value) in [
             ("RelTol", "0"),
-            ("RelTol", "2"),
+            ("AbsTol", "0"),
             ("AbsTol", "-1"),
             ("AbsTol", "NaN"),
         ] {
@@ -650,6 +653,29 @@ mod tests {
             "config_step_range",
             "InitialStep"
         ));
+    }
+    #[test]
+    fn simulink_tolerance_validity_is_separate_from_active_runtime_support() {
+        let mut config = fixed();
+        config.raw.insert("RelTol".into(), "2".into());
+        let report = validate_config(&config);
+        assert!(report.is_valid() && report.simulation_supported);
+        assert!(!has(&report, "config_unsupported", "RelTol"));
+        config.solver = Some("ode45".into());
+        let report = validate_config(&config);
+        assert!(report.is_valid() && !report.simulation_supported && !report.unresolved);
+        assert!(has(&report, "config_unsupported", "RelTol"));
+        assert!(report
+            .diagnostics
+            .iter()
+            .all(|d| d.severity == Severity::Warning));
+        config.raw.insert("RelTol".into(), "auto".into());
+        let report = validate_config(&config);
+        assert!(report.is_valid() && report.unresolved && !report.simulation_supported);
+        assert!(has(&report, "config_unresolved", "RelTol"));
+        config.solver = Some("ode4".into());
+        let report = validate_config(&config);
+        assert!(report.is_valid() && report.unresolved && report.simulation_supported);
     }
     #[test]
     fn raw_only_values_and_serialized_config_targets_work() {
