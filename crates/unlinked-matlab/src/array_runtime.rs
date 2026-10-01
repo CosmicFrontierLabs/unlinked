@@ -252,7 +252,15 @@ impl Value {
         } else if indices.len() == 2 {
             let rows = index_positions(&indices[0], self.rows, true)?;
             let cols = index_positions(&indices[1], self.cols, true)?;
-            if rhs.data.len() != 1 && (rhs.rows != rows.len() || rhs.cols != cols.len()) {
+            // Indexed assignment compares dimensions after removing singleton
+            // dimensions: a column vector can fill a row slice (and vice versa),
+            // but a matrix cannot fill a vector slice merely by element count.
+            if rhs.data.len() != 1
+                && ![rows.len(), cols.len()]
+                    .into_iter()
+                    .filter(|&n| n != 1)
+                    .eq([rhs.rows, rhs.cols].into_iter().filter(|&n| n != 1))
+            {
                 return Err("indexed assignment shape mismatch".into());
             }
             let new_rows = rows

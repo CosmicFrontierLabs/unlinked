@@ -169,6 +169,7 @@ fn octave_result(name: &str) -> String {
 fn typed_projects_match_interpreter_and_octave() {
     let projects = Projects::new();
     typed_first_multioutput_assignments(&projects);
+    typed_vector_indexed_assignments(&projects);
     typed_library_exports_arrays_and_multiple_outputs_without_dynamic_environment(&projects);
     optional_typed_corpus(&projects);
     typed_codegen_edge_regressions(&projects);
@@ -654,5 +655,59 @@ fn typed_first_multioutput_assignments(projects: &Projects) {
             &reference,
             "first multi-output assignments vs Octave",
         );
+    }
+}
+
+// MathWorks: Detailed Rules for Indexed Assignment (nonsingleton dimensions
+// must agree in order and length, with scalar expansion as a separate case).
+fn typed_vector_indexed_assignments(projects: &Projects) {
+    let cases = [
+        "C=zeros(2,3);C(1,:)=[7;8;9];",
+        "C=zeros(3,2);C(:,2)=[7 8 9];",
+        "C=zeros(1,3);C(:,:)=[7;8;9];",
+        "C=zeros(3,1);C(:,:)=[7 8 9];",
+        "C=zeros(2,3);C(1,[true false true])=[7;9];",
+        "C=zeros(2,3);C(1,[3 1 3])=[7;8;9];",
+        "C=zeros(3,2);C([3 1 3],2)=[7 8 9];",
+        "C=[1 2;3 4];C(3,[4 2])=[7;8];",
+        "C=[1 2;3 4];C([4 2],3)=[7 8];",
+        "C=zeros(2,3);C([2 1],[3 2 3])=[1 2 3;4 5 6];",
+        "C=zeros(2,3);C([2 1],[3 1])=7;",
+        "C=zeros(2,3);C([6 1 6])=[7;8;9];",
+    ];
+    let mut script = String::new();
+    let mut reference_script = String::new();
+    let mut expected = Vec::new();
+    for source in cases {
+        let workspace = eval_script(source, &BTreeMap::new()).unwrap();
+        expected.extend(value_numbers(&workspace["C"]));
+        script.push_str(source);
+        script.push_str(&emit_result("C"));
+        reference_script.push_str(source);
+        reference_script.push_str(&octave_result("C"));
+    }
+    let actual = numbers(&projects.run("vector-assignment", &script, false, None));
+    assert_numbers(&actual, &expected, "vector assignments vs evaluator");
+    if let Some(reference) = octave(&reference_script) {
+        assert_numbers(&actual, &reference, "vector assignments vs Octave");
+    }
+    // Equal element counts alone must not permit matrix/vector or transposed
+    // matrix assignments. Wrong vector lengths must still fail as well.
+    for (i, source) in [
+        "C=zeros(2,3);C(:,:)=[1 2;3 4;5 6];",
+        "C=zeros(2,3);C(:,:)=1:6;",
+        "C=zeros(1,6);C(1,:)=reshape(1:6,2,3);",
+        "C=zeros(2,3);C(1,:)=[7;8];",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = eval_script(source, &BTreeMap::new()).unwrap_err();
+        assert!(error.to_string().contains("shape mismatch"), "{error}");
+        let error = projects.run_failure(&format!("vector-assignment-bad-{i}"), source);
+        assert!(error.contains("shape mismatch"), "{error}");
+        if let Some(result) = octave(&format!("try;{source}disp(0);catch;disp(1);end;")) {
+            assert_eq!(result, vec![1.]);
+        }
     }
 }
