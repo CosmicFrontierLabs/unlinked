@@ -124,7 +124,10 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
             _ => None,
         };
         let expansion = match edit {
-            Edit::ExpandSubsystem { system, id } => Some(unlinked_model::expand::plan_expand(&model, system, id).map_err(|e| failed(e.to_string()))?),
+            Edit::ExpandSubsystem { system, id } => Some(
+                unlinked_model::expand::plan_expand(&model, system, id)
+                    .map_err(|e| failed(e.to_string()))?,
+            ),
             _ => None,
         };
         edit.apply(&mut model).map_err(|e| failed(e.to_string()))?;

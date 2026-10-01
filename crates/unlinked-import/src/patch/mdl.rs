@@ -3,10 +3,10 @@
 //! Blocks are found by the containing system's path and the block name
 //! (MDL lines refer to blocks by name).
 
-#[path = "mdl_hierarchy.rs"]
-mod hierarchy;
 #[path = "mdl_expand.rs"]
 mod expand;
+#[path = "mdl_hierarchy.rs"]
+mod hierarchy;
 use super::expansion::property as expansion_property;
 
 use super::{format_ports, parse_endpoint};
@@ -450,10 +450,15 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
     if let Edit::ExpandSubsystem { .. } = edit {
-        let plan = resolved.expansion.as_ref().ok_or_else(||ImportError::Edit("missing expansion plan".into()))?;
-        expand::expand(sys,resolved,plan)?;
-        let root=file.system_mut(&[]).ok_or_else(||ImportError::Mdl("no root system".into()))?;
-        root.set_prop(SID_WATERMARK,&plan.watermark.to_string(),false);
+        let plan = resolved
+            .expansion
+            .as_ref()
+            .ok_or_else(|| ImportError::Edit("missing expansion plan".into()))?;
+        expand::expand(sys, resolved, plan)?;
+        let root = file
+            .system_mut(&[])
+            .ok_or_else(|| ImportError::Mdl("no root system".into()))?;
+        root.set_prop(SID_WATERMARK, &plan.watermark.to_string(), false);
         return Ok(());
     }
     if let Edit::CreateSubsystem { .. } = edit {
@@ -522,6 +527,7 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
     }
     let id = match edit {
         Edit::CreateSubsystem { .. }
+        | Edit::ExpandSubsystem { .. }
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
@@ -716,6 +722,7 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
             });
         }
         Edit::CreateSubsystem { .. }
+        | Edit::ExpandSubsystem { .. }
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }

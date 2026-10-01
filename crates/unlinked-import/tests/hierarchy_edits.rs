@@ -276,6 +276,21 @@ fn split_root_grouping_preserves_other_parts() {
         unlinked_import::import("split.slx", &output).unwrap(),
         expected
     );
+    let expand = Edit::ExpandSubsystem {
+        system: vec![],
+        id: expected
+            .root
+            .block_by_name("controller")
+            .unwrap()
+            .id
+            .clone(),
+    };
+    apply_batch(&mut expected, std::slice::from_ref(&expand)).unwrap();
+    let output = unlinked_import::patch::apply_edits("split.slx", &output, &[expand]).unwrap();
+    assert_eq!(
+        unlinked_import::import("split.slx", &output).unwrap(),
+        expected
+    );
     let mut archive = zip::ZipArchive::new(Cursor::new(output)).unwrap();
     let mut after = String::new();
     std::io::Read::read_to_string(
@@ -327,4 +342,99 @@ fn old_files_use_factory_defaults_without_new_release_parameters() {
         2,
         "wrapper and child System names"
     );
+}
+
+#[test]
+fn expansion_grafts_raw_branches_and_preserves_moved_block_metadata() {
+    for (name, bytes) in fixtures() {
+        let original = unlinked_import::import(name, &bytes).unwrap();
+        let create = group(&original);
+        let mut expected = original.clone();
+        create.apply(&mut expected).unwrap();
+        let id = expected
+            .root
+            .block_by_name("controller")
+            .unwrap()
+            .id
+            .clone();
+        let expand = Edit::ExpandSubsystem { system: vec![], id };
+        apply_batch(&mut expected, std::slice::from_ref(&expand)).unwrap();
+        let output = unlinked_import::patch::apply_edits(name, &bytes, &[create, expand]).unwrap();
+        assert_eq!(
+            unlinked_import::import(name, &output).unwrap(),
+            expected,
+            "{name}"
+        );
+        if name.ends_with("mdl") {
+            let text = String::from_utf8(output).unwrap();
+            assert_eq!(text.matches("ClassName OpaqueMetadata").count(), 4);
+            assert!(text.contains("preserve_branch"));
+        } else {
+            let mut archive = zip::ZipArchive::new(Cursor::new(output)).unwrap();
+            let mut text = String::new();
+            std::io::Read::read_to_string(
+                &mut archive.by_name("simulink/blockdiagram.xml").unwrap(),
+                &mut text,
+            )
+            .unwrap();
+            assert_eq!(text.matches("<Unknown flag=\"preserved\"/>").count(), 4);
+            assert!(text.contains("preserve_branch"));
+        }
+    }
+}
+
+#[test]
+fn expansion_refuses_conflicting_donor_and_discarded_wrapper_metadata() {
+    let (name, bytes) = fixtures().remove(0);
+    let model = unlinked_import::import(name, &bytes).unwrap();
+    let grouped = unlinked_import::patch::apply_edits(name, &bytes, &[group(&model)]).unwrap();
+    let text = String::from_utf8(grouped).unwrap();
+    for edited in [
+        text.replacen("preserve_line", "conflicting_metadata", 1),
+        text.replacen(
+            "Name\t\"controller\"",
+            "Name\t\"controller\"\n UserData important_metadata",
+            1,
+        ),
+    ] {
+        assert_ne!(edited, text);
+        let model = unlinked_import::import(name, edited.as_bytes()).unwrap();
+        let edit = Edit::ExpandSubsystem {
+            system: vec![],
+            id: model.root.block_by_name("controller").unwrap().id.clone(),
+        };
+        assert!(unlinked_import::patch::apply_edits(name, edited.as_bytes(), &[edit]).is_err());
+    }
+}
+
+#[test]
+fn standalone_expansion_allocates_legacy_child_ids_and_preserves_parent_order() {
+    let (name, bytes) = fixtures().remove(0);
+    let original = unlinked_import::import(name, &bytes).unwrap();
+    let grouped = unlinked_import::patch::apply_edits(name, &bytes, &[group(&original)]).unwrap();
+    let mut text = String::from_utf8(grouped).unwrap().replace(" SID 2\n", "");
+    // Append another unrelated block after the wrapper, exercising splice order.
+    let at = text.rfind(" }\n}\n").unwrap();
+    text.insert_str(at," Block {\n BlockType Constant\n Name tail\n SID 100\n Value 1\n Position [500,0,530,30]\n Ports [0,1]\n }\n");
+    let model = unlinked_import::import(name, text.as_bytes()).unwrap();
+    let edit = Edit::ExpandSubsystem {
+        system: vec![],
+        id: model.root.block_by_name("controller").unwrap().id.clone(),
+    };
+    let mut expected = model.clone();
+    apply_batch(&mut expected, std::slice::from_ref(&edit)).unwrap();
+    let bytes = unlinked_import::patch::apply_edits(name, text.as_bytes(), &[edit]).unwrap();
+    assert_eq!(unlinked_import::import(name, &bytes).unwrap(), expected);
+    assert!(
+        expected
+            .root
+            .block_by_name("g")
+            .unwrap()
+            .id
+            .0
+            .parse::<u64>()
+            .unwrap()
+            > 100
+    );
+    assert_eq!(expected.root.blocks.last().unwrap().name, "tail");
 }

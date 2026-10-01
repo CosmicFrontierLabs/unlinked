@@ -4,10 +4,10 @@
 //! within that system only. Only parts that change are rewritten; every
 //! other zip entry is copied raw.
 
-#[path = "slx_hierarchy.rs"]
-mod hierarchy;
 #[path = "slx_expand.rs"]
 mod expand;
+#[path = "slx_hierarchy.rs"]
+mod hierarchy;
 use super::expansion::property as expansion_property;
 
 use super::dom::{self, Document, XElem, XNode};
@@ -271,8 +271,11 @@ fn set_parameter(block: &mut XElem, name: &str, value: &str) {
 fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError> {
     let edit = &resolved.edit;
     if let Edit::ExpandSubsystem { .. } = edit {
-        let plan = resolved.expansion.as_ref().ok_or_else(||ImportError::Edit("missing expansion plan".into()))?;
-        return expand::expand(parent,plan);
+        let plan = resolved
+            .expansion
+            .as_ref()
+            .ok_or_else(|| ImportError::Edit("missing expansion plan".into()))?;
+        return expand::expand(parent, plan);
     }
     if let Edit::CreateSubsystem { .. } = edit {
         let plan = resolved
@@ -339,6 +342,7 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
     }
     let sid = match edit {
         Edit::CreateSubsystem { .. }
+        | Edit::ExpandSubsystem { .. }
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
@@ -463,6 +467,7 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
             });
         }
         Edit::CreateSubsystem { .. }
+        | Edit::ExpandSubsystem { .. }
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
@@ -1010,7 +1015,10 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
                 .ok_or_else(|| ImportError::Xml("empty document".into()))??;
         }
         let allocated = match &resolved.edit {
-            Edit::ExpandSubsystem { .. } => resolved.expansion.as_ref().map(|plan|plan.watermark.to_string()),
+            Edit::ExpandSubsystem { .. } => resolved
+                .expansion
+                .as_ref()
+                .map(|plan| plan.watermark.to_string()),
             Edit::CreateSubsystem { .. } => resolved
                 .hierarchy
                 .as_ref()
