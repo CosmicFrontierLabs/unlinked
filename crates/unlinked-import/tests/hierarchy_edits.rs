@@ -200,6 +200,9 @@ fn document_defaults_cannot_change_generated_boundary_semantics() {
   Block {
    BlockType SubSystem
    TreatAsAtomicUnit on
+   Variant off
+   VariantControlMode expression
+   VariantActivationTime "update diagram"
   }
  }
 "#,
@@ -308,4 +311,20 @@ fn grouping_remaps_explicit_legacy_sid_endpoints() {
         assert_eq!(unlinked_import::import(name, &output).unwrap(), expected);
         assert!(!String::from_utf8(output).unwrap().contains("legacyGain#"));
     }
+}
+
+#[test]
+fn old_files_use_factory_defaults_without_new_release_parameters() {
+    let (name, bytes) = fixtures().remove(0);
+    let model = unlinked_import::import(name, &bytes).unwrap();
+    let output = unlinked_import::patch::apply_edits(name, &bytes, &[group(&model)]).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("VarSizeSig"));
+    assert!(!text.contains("LatchByDelayingOutsideSignal"));
+    assert!(!text.contains("SFBlockType"));
+    assert_eq!(
+        text.matches("Name\t\"controller\"").count(),
+        2,
+        "wrapper and child System names"
+    );
 }

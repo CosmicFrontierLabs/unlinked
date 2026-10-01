@@ -19,3 +19,9 @@ An unchanged scalar MATLAB Function chart extracted from `rovSim_los.slx` is als
 All nine collected MATLAB functions compile to Rust and match Octave on the recorded test inputs. Additional differential tests cover arrays and initialization scripts. The pure function interpreter deliberately rejects printing; its tests distinguish original files from test-only projections with printing statements removed. Supported operations, bounds, and MATLAB/Octave differences are listed in the [compiler README](../crates/unlinked-matlab/README.md). The [simulator README](../crates/unlinked-sim/README.md) documents supported block and solver semantics.
 
 Refresh the default model inventory with `unlinked coverage /path/to/unlinked-test-cases/fixtures -o coverage.json`. Keep configured-input scenarios separate: accepting missing inputs as implicit constants would obscure meaningful compatibility failures.
+
+## Hierarchy edits
+
+Grouping supports ordinary native leaf blocks and unnamed ordinary crossing nets. It retains raw block records and partitions existing wire trees; it refuses masked, linked, chart-owning and scoped content. Tests compare the reimported file with the edited model and check simulation traces before and after grouping. They do not verify reopening in MathWorks Simulink.
+
+Moving a block changes its hierarchy path. Unmodeled path references, such as signal-logging lists or external tooling configuration, are preserved as source data but are not rewritten. Models that depend on those references require manual updates. New boundary parameters override document defaults only where those parameter names already exist, so older files are not populated with newer release-specific settings.

@@ -57,6 +57,11 @@ fn system<'a>(model: &'a Model, path: &[BlockId]) -> Result<&'a System, EditErro
     Ok(sys)
 }
 
+// These mode selectors are serialized even for ordinary Variant=off blocks.
+pub(crate) fn variant_key(key: &str) -> bool {
+    key.starts_with("Variant") && !matches!(key, "VariantControlMode" | "VariantActivationTime")
+}
+
 fn safe_selected(block: &Block) -> Result<(), EditError> {
     let bad = |reason: &str| {
         invalid(format!(
@@ -83,7 +88,7 @@ fn safe_selected(block: &Block) -> Result<(), EditError> {
         let value = value.trim();
         if (key.ends_with("Fcn") && !value.is_empty())
             || (key == "Commented" && !matches!(value, "" | "off"))
-            || ((key.starts_with("Variant") || key.starts_with("Mask") || key == "LinkStatus")
+            || ((variant_key(key) || key.starts_with("Mask") || key == "LinkStatus")
                 && !matches!(value, "" | "off" | "none"))
         {
             return Err(bad(&format!("scope-sensitive parameter {key}")));
@@ -190,7 +195,7 @@ fn generated_parameters(model: &Model, kind: &str) -> Result<BTreeMap<String, St
     let mut p = model.type_defaults.get(kind).cloned().unwrap_or_default();
     for (key, value) in &p {
         if (key.ends_with("Fcn") && !value.trim().is_empty())
-            || ((key.starts_with("Mask") || key.starts_with("Variant") || key == "LinkStatus")
+            || ((key.starts_with("Mask") || variant_key(key) || key == "LinkStatus")
                 && !matches!(value.trim(), "" | "off" | "none"))
         {
             return Err(invalid(format!(
@@ -222,14 +227,22 @@ fn generated_parameters(model: &Model, kind: &str) -> Result<BTreeMap<String, St
             ("Commented", "off"),
         ]
     };
-    p.extend(defaults.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    // Absent parameters use the source release's factory defaults. Do not add
+    // newer parameter names to old files just to restate those defaults.
+    for (key, value) in defaults {
+        if let Some(existing) = p.get_mut(*key) {
+            *existing = value.to_string();
+        }
+    }
     if kind == "Inport" {
         for key in [
             "OutputFunctionCall",
             "LatchInputForFeedbackSignals",
             "LatchByDelayingOutsideSignal",
         ] {
-            p.insert(key.into(), "off".into());
+            if let Some(existing) = p.get_mut(key) {
+                *existing = "off".into();
+            }
         }
     }
     Ok(p)
@@ -279,7 +292,7 @@ pub fn plan_create(
             || b.parameters.iter().any(|(k, v)| {
                 (k == "TreatAsAtomicUnit" && v != "off")
                     || (k == "SystemSampleTime" && v != "-1")
-                    || ((k.starts_with("Variant") || k.starts_with("Mask") || k.ends_with("Fcn"))
+                    || ((variant_key(k) || k.starts_with("Mask") || k.ends_with("Fcn"))
                         && !matches!(v.trim(), "" | "off" | "none"))
             })
             || b.ports.enable != 0
@@ -591,16 +604,29 @@ pub fn plan_create(
             }
         }
     }
+    let half_height = (incoming.len().max(outgoing.len()) as f64 * 14.).max(30.);
+    let wrapper_position = Rect::new(
+        center.x - 40.,
+        center.y - half_height,
+        center.x + 40.,
+        center.y + half_height,
+    );
+    if [
+        wrapper_position.left,
+        wrapper_position.top,
+        wrapper_position.right,
+        wrapper_position.bottom,
+    ]
+    .iter()
+    .any(|v| v.abs() > 1e9)
+    {
+        return Err(invalid("subsystem position exceeds canvas bounds"));
+    }
     let wrapper = Block {
         id: id.clone(),
         block_type: "SubSystem".into(),
         name: name.into(),
-        position: Rect::new(
-            center.x - 40.,
-            center.y - 30.,
-            center.x + 40.,
-            center.y + 30.,
-        ),
+        position: wrapper_position,
         orientation: Orientation::Right,
         mirrored: false,
         ports: PortCounts {

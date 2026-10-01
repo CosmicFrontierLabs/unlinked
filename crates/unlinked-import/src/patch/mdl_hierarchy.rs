@@ -188,6 +188,7 @@ pub(super) fn create(
     }
     let indent = child_indent(sys);
     let mut inner = new_section("System", &format!("{indent}  "), sys.eol());
+    inner.set_prop("Name", &plan.wrapper.name, false);
     let selected: BTreeSet<_> = plan.selected_indices.iter().copied().collect();
     let (mut block_index, mut line_index) = (0, 0);
     let mut retained = Vec::new();
@@ -197,15 +198,30 @@ pub(super) fn create(
                 let is_selected = selected.contains(&block_index);
                 block_index += 1;
                 if is_selected {
-                    // A legacy MDL path ID becomes a persistent numeric SID.
-                    if let Some(moved) = child
-                        .blocks
+                    let ordinal = plan
+                        .selected_indices
                         .iter()
-                        .find(|b| Some(b.name.as_str()) == block.prop("Name").as_deref())
+                        .position(|i| *i == block_index - 1)
+                        .unwrap();
+                    let moved = &child.blocks[ordinal];
+                    let original = plan
+                        .id_remap
+                        .iter()
+                        .find(|(_, new)| *new == moved.id)
+                        .map(|(old, _)| old)
+                        .unwrap_or(&moved.id);
+                    if block.prop("Name").as_deref() != Some(moved.name.as_str())
+                        || block
+                            .prop("SID")
+                            .as_ref()
+                            .is_some_and(|sid| sid != &original.0)
                     {
-                        if block.prop("SID").as_deref() != Some(moved.id.0.as_str()) {
-                            block.set_prop("SID", &moved.id.0, false);
-                        }
+                        return Err(ImportError::Edit(
+                            "serialized selected block identity differs from model".into(),
+                        ));
+                    }
+                    if block.prop("SID").as_deref() != Some(moved.id.0.as_str()) {
+                        block.set_prop("SID", &moved.id.0, false);
                     }
                     inner.items.push(Item::Section(block));
                 } else {

@@ -108,11 +108,17 @@ pub(super) fn create(
                 let is_selected = selected.contains(&block_index);
                 block_index += 1;
                 if is_selected {
-                    // SLX block SIDs are already persistent; never invent one
-                    // for an opaque record that lacked a resolvable identity.
-                    if block.attr("SID").is_none() {
+                    let ordinal = plan
+                        .selected_indices
+                        .iter()
+                        .position(|i| *i == block_index - 1)
+                        .unwrap();
+                    let moved = &plan.wrapper.subsystem.as_ref().unwrap().blocks[ordinal];
+                    if block.attr("SID").as_deref() != Some(moved.id.0.as_str())
+                        || block.attr("Name").as_deref() != Some(moved.name.as_str())
+                    {
                         return Err(ImportError::Edit(
-                            "grouping SLX blocks without SIDs is unsupported".into(),
+                            "serialized selected block identity differs from model".into(),
                         ));
                     }
                     let at = end_of(&inner);
