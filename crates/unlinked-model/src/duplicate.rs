@@ -1,7 +1,7 @@
 //! Conservative copy/paste of native palette blocks.
 //!
 //! External connections are deliberately omitted. Internal connections are
-//! rerouted, not translated; named nets require a signal-name edit first.
+//! rerouted, not translated; names of internal signal trees are preserved.
 use crate::catalog::{self, PortResolution};
 use crate::edit::{apply_batch, next_sid, system_names, Edit, EditError, SystemRef};
 use crate::{BlockId, BlockStyle, Model, Orientation, Point, PortKind};
@@ -178,7 +178,8 @@ pub fn duplicate(
             return Err(invalid("copy exceeds the 2000 edit budget"));
         }
     }
-    // A named net would otherwise silently lose its label on the duplicate.
+    let mut signal_names = Vec::new();
+    // Preserve one shared name on each copied internal signal tree.
     for line in &sys.lines {
         if line.name.as_ref().is_some_and(|name| !name.is_empty())
             && line
@@ -197,9 +198,15 @@ pub fn duplicate(
                 .flatten()
                 .any(|dst| selected.contains(&dst.block))
             {
-                return Err(invalid(
-                    "copying named internal signals requires a signal-name edit",
-                ));
+                let source = line.src.as_ref().expect("selected source above");
+                crate::route_edit::route_location(sys, source, true)?;
+                let mut src = source.clone();
+                src.block = mapped[&source.block].clone();
+                signal_names.push(Edit::SetSignalName {
+                    system: system.clone(),
+                    src,
+                    name: line.name.clone().expect("named line above"),
+                });
             }
         }
     }
@@ -225,6 +232,10 @@ pub fn duplicate(
         if edits.len() > MAX_EDITS {
             return Err(invalid("copy exceeds the 2000 edit budget"));
         }
+    }
+    edits.extend(signal_names);
+    if edits.len() > MAX_EDITS {
+        return Err(invalid("copy exceeds the 2000 edit budget"));
     }
     let mut preview = model.clone();
     apply_batch(&mut preview, &edits).map_err(|error| error.error)?;
@@ -390,10 +401,13 @@ mod tests {
         assert!(copy(&source, &["1"]).is_ok());
         source.root.blocks[0].orientation = Orientation::Right;
         source.root.lines[0].name = Some("label".into());
-        assert!(copy(&source, &["1", "2"])
-            .unwrap_err()
-            .to_string()
-            .contains("named internal"));
+        let edits = copy(&source, &["1", "2"]).unwrap();
+        let mut named_copy = source.clone();
+        apply_batch(&mut named_copy, &edits).unwrap();
+        assert_eq!(
+            named_copy.root.lines.last().unwrap().name.as_deref(),
+            Some("label")
+        );
         // External labels belong to the excluded external connection.
         assert!(copy(&source, &["1"]).is_ok());
         source.root.blocks[0].library_source = Some("library/source".into());

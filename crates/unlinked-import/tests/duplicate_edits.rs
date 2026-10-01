@@ -19,12 +19,25 @@ fn native_copy_preserves_parameters_and_internal_connections_in_both_formats() {
         let bytes = unlinked_import::patch::apply_edits(
             name,
             &bytes,
-            &[unlinked_model::edit::Edit::SetOrientation {
-                system: vec![],
-                id: "2".into(),
-                orientation: unlinked_model::Orientation::Up,
-                mirrored: true,
-            }],
+            &[
+                unlinked_model::edit::Edit::SetOrientation {
+                    system: vec![],
+                    id: "2".into(),
+                    orientation: unlinked_model::Orientation::Up,
+                    mirrored: true,
+                },
+                unlinked_model::edit::Edit::SetSignalName {
+                    system: vec![],
+                    src: unlinked_model::Endpoint {
+                        block: "1".into(),
+                        port: unlinked_model::PortRef {
+                            kind: PortKind::Out,
+                            index: 1,
+                        },
+                    },
+                    name: "reference & actual".into(),
+                },
+            ],
         )
         .unwrap();
         let model = unlinked_import::import(name, &bytes).unwrap();
@@ -43,6 +56,10 @@ fn native_copy_preserves_parameters_and_internal_connections_in_both_formats() {
         assert_eq!(actual, expected, "{name}");
         assert_eq!(actual.root.blocks.len(), 4);
         assert_eq!(actual.root.lines.len(), 2);
+        assert_eq!(
+            actual.root.lines[1].name.as_deref(),
+            Some("reference & actual")
+        );
         assert_eq!(actual.root.blocks[2].param("Value"), Some("7"));
         assert_eq!(actual.root.blocks[3].param("Gain"), Some("3"));
         assert_eq!(
