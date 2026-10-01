@@ -668,7 +668,10 @@ pub fn sim_config(trees: &[&Node], model: &Node) -> SimConfig {
             }
         }
     }
-    for key in ["Solver", "StartTime", "StopTime", "FixedStep", "SolverName"] {
+    for key in unlinked_model::edit::CONFIG_KEYS
+        .into_iter()
+        .chain(["SolverName"])
+    {
         if let Some(v) = model.prop(key) {
             raw.entry(key.to_string()).or_insert_with(|| v.to_string());
         }

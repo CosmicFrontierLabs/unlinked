@@ -13,7 +13,7 @@ use super::{format_ports, parse_endpoint};
 use super::{Boundary, Resolved};
 use crate::convert::parse_port;
 use crate::{ImportError, MAX_DEPTH, MAX_NODES};
-use unlinked_model::edit::{Edit, SID_WATERMARK};
+use unlinked_model::edit::{config_writes, Edit, SID_WATERMARK};
 use unlinked_model::geometry::to_rotation;
 use unlinked_model::{Block, PortKind, PortRef};
 use unlinked_model::{Orientation, Rect};
@@ -446,6 +446,9 @@ fn annotation_position(position: &Rect, existing: Option<&str>) -> String {
 
 fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError> {
     let (edit, path) = (&resolved.edit, &resolved.system);
+    if let Edit::SetConfig { key, value } = edit {
+        return set_config(file, key, value);
+    }
     let sys = file
         .system_mut(path)
         .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
@@ -531,7 +534,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
-        | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
+        | Edit::DeleteAnnotation { .. }
+        | Edit::SetConfig { .. } => unreachable!("applied above"),
         Edit::AddBlock { .. } => {
             let block = resolved
                 .added
@@ -732,7 +736,8 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         | Edit::Disconnect { .. }
         | Edit::SetRoute { .. }
         | Edit::SetTrunkRoute { .. }
-        | Edit::SetSignalName { .. } => {
+        | Edit::SetSignalName { .. }
+        | Edit::SetConfig { .. } => {
             unreachable!("applied above")
         }
     }
@@ -756,6 +761,37 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
             let bare = b.was_quoted("Port") == Some(false);
             b.set_prop("Port", number, bare);
         }
+    }
+    Ok(())
+}
+
+/// Write a solver setting where the importer reads it: the first solver
+/// component of the model's configuration sets, or the `Model` section
+/// itself in files without one.
+fn set_config(file: &mut MdlFile, key: &str, value: &str) -> Result<(), ImportError> {
+    fn solver(s: &mut Section) -> Option<&mut Section> {
+        if s.tag == "Simulink.SolverCC" {
+            return Some(s);
+        }
+        s.sections_mut().find_map(solver)
+    }
+    let model = file
+        .items
+        .iter_mut()
+        .find_map(|i| match i {
+            Item::Section(s) if s.tag == "Model" || s.tag == "Library" => Some(s),
+            _ => None,
+        })
+        .ok_or_else(|| ImportError::Mdl("no Model section".into()))?;
+    let has_solver = solver(model).is_some();
+    let target = if has_solver {
+        solver(model).expect("checked above")
+    } else {
+        model
+    };
+    for k in config_writes(key, |k| target.prop(k).is_some()) {
+        let bare = target.was_quoted(k) == Some(false);
+        target.set_prop(k, value, bare && is_bare_token(value));
     }
     Ok(())
 }

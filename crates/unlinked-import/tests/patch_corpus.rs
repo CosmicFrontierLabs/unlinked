@@ -329,6 +329,44 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
             }
         }
 
+        // Solver settings land where they are read, in the configuration
+        // part when the package has one.
+        let config = [
+            Edit::SetConfig {
+                key: "StopTime".into(),
+                value: "42".into(),
+            },
+            Edit::SetConfig {
+                key: "Solver".into(),
+                value: "ode4".into(),
+            },
+        ];
+        let mut expected = original.clone();
+        apply_batch(&mut expected, &config).unwrap();
+        match unlinked_import::patch::apply_edits(&name, &bytes, &config) {
+            Ok(patched) => {
+                let changed = changed_content(&bytes, &patched);
+                if changed.iter().any(|p| {
+                    !matches!(
+                        p.as_str(),
+                        "file" | "simulink/configSet0.xml" | "simulink/blockdiagram.xml"
+                    )
+                }) {
+                    failures.push(format!("{name}: config edit changed {changed:?}"));
+                }
+                match unlinked_import::import(&name, &patched) {
+                    Ok(actual)
+                        if actual.config != expected.config || actual.root != original.root =>
+                    {
+                        failures.push(format!("{name}: config edit reimports differently"));
+                    }
+                    Ok(_) => {}
+                    Err(e) => failures.push(format!("{name}: config edit does not import: {e}")),
+                }
+            }
+            Err(e) => failures.push(format!("{name}: config edit failed: {e}")),
+        }
+
         let edits = edits_for(&original);
         let mut expected = original.clone();
         for edit in &edits {

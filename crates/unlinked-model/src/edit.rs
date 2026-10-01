@@ -145,6 +145,56 @@ pub enum Edit {
         id: BlockId,
         name: String,
     },
+    /// Set one solver setting (see [`CONFIG_KEYS`]) to `value` verbatim.
+    /// Nothing is checked against the solver list or defaulted here.
+    SetConfig { key: String, value: String },
+}
+
+/// The solver settings [`Edit::SetConfig`] may change. They all belong to
+/// the configuration set's solver component, which is where they are
+/// written (or at model level in files that have none).
+pub const CONFIG_KEYS: [&str; 9] = [
+    "Solver",
+    "StartTime",
+    "StopTime",
+    "FixedStep",
+    "MaxStep",
+    "MinStep",
+    "InitialStep",
+    "RelTol",
+    "AbsTol",
+];
+
+/// The properties setting `key` writes, given which properties the file's
+/// solver settings already have: `Solver` and `SolverName` mirror each
+/// other, so setting the solver updates whichever exist.
+pub fn config_writes(key: &str, present: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    let Some(&key) = CONFIG_KEYS.iter().find(|k| **k == key) else {
+        return Vec::new();
+    };
+    if key != "Solver" {
+        return vec![key];
+    }
+    let mirrored: Vec<_> = ["Solver", "SolverName"]
+        .into_iter()
+        .filter(|k| present(k))
+        .collect();
+    if mirrored.is_empty() {
+        vec!["Solver"]
+    } else {
+        mirrored
+    }
+}
+
+fn set_config(config: &mut crate::SimConfig, key: &str, value: &str) {
+    for k in config_writes(key, |k| config.raw.contains_key(k)) {
+        config.raw.insert(k.to_string(), value.to_string());
+    }
+    let get = |k: &str| config.raw.get(k).cloned();
+    config.solver = get("Solver").or_else(|| get("SolverName"));
+    config.start_time = get("StartTime");
+    config.stop_time = get("StopTime");
+    config.fixed_step = get("FixedStep");
 }
 
 /// An edit that could not be applied, and its position in the batch.
@@ -360,6 +410,7 @@ impl Edit {
             | Edit::DeleteAnnotation { system, .. }
             | Edit::CreateSubsystem { system, .. }
             | Edit::ExpandSubsystem { system, .. } => system,
+            Edit::SetConfig { .. } => &[],
         }
     }
 
@@ -382,7 +433,8 @@ impl Edit {
             | Edit::MoveAnnotation { .. }
             | Edit::SetAnnotationText { .. }
             | Edit::DeleteAnnotation { .. }
-            | Edit::CreateSubsystem { .. } => None,
+            | Edit::CreateSubsystem { .. }
+            | Edit::SetConfig { .. } => None,
         }
     }
 
@@ -400,6 +452,18 @@ impl Edit {
             Edit::SetAnnotationText { text, .. } => check_annotation_text(text)?,
             Edit::DeleteAnnotation { .. } | Edit::ExpandSubsystem { .. } => {}
             Edit::CreateSubsystem { name, .. } => check_name(name)?,
+            Edit::SetConfig { key, value } => {
+                if !CONFIG_KEYS.contains(&key.as_str()) {
+                    return Err(EditError::Invalid(format!(
+                        "{key:?} is not an editable solver setting"
+                    )));
+                }
+                if value.len() > 4096 || value.chars().any(|c| c < ' ' || c == '\u{7F}') {
+                    return Err(EditError::Invalid(
+                        "solver settings are single lines of at most 4096 bytes".into(),
+                    ));
+                }
+            }
             Edit::MoveBlock { position, .. } => check_rect(position)?,
             Edit::SetSignalName { name, .. } => {
                 if name.len() > 4096
@@ -452,6 +516,10 @@ impl Edit {
         if let Edit::ExpandSubsystem { system, id } = self {
             return crate::expand::apply_expand(model, system, id);
         }
+        if let Edit::SetConfig { key, value } = self {
+            set_config(&mut model.config, key, value);
+            return Ok(());
+        }
         let remap = crate::boundary::boundary_remap(model, self)?;
         let charts = std::mem::take(&mut model.charts);
         let result = self.apply_to_diagram(model, &charts);
@@ -465,7 +533,9 @@ impl Edit {
 
     fn apply_to_diagram(&self, model: &mut Model, charts: &[Chart]) -> Result<(), EditError> {
         let id = match self {
-            Edit::CreateSubsystem { .. } | Edit::ExpandSubsystem { .. } => {
+            Edit::CreateSubsystem { .. }
+            | Edit::ExpandSubsystem { .. }
+            | Edit::SetConfig { .. } => {
                 unreachable!("handled before chart extraction")
             }
             Edit::AddAnnotation {
@@ -677,7 +747,8 @@ impl Edit {
             | Edit::SetAnnotationText { .. }
             | Edit::DeleteAnnotation { .. }
             | Edit::CreateSubsystem { .. }
-            | Edit::ExpandSubsystem { .. } => {
+            | Edit::ExpandSubsystem { .. }
+            | Edit::SetConfig { .. } => {
                 unreachable!("applied above")
             }
         }

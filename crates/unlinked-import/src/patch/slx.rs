@@ -15,13 +15,66 @@ use super::{format_ports, parse_endpoint};
 use super::{Boundary, Resolved};
 use crate::{ImportError, MAX_DEPTH, MAX_UNCOMPRESSED_BYTES};
 use std::io::{Cursor, Read, Write};
-use unlinked_model::edit::{Edit, SID_WATERMARK};
+use unlinked_model::edit::{config_writes, Edit, SID_WATERMARK};
 use unlinked_model::geometry::to_rotation;
 use unlinked_model::{Block, Endpoint, PortCounts, PortKind};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 const ROOT_PART: &str = "simulink/blockdiagram.xml";
+const CONFIG_PART: &str = "simulink/configSet0.xml";
+
+/// Write a solver setting where the importer reads it: the first solver
+/// component in the configuration set part, then in the block diagram,
+/// else the `<Model>` element's own properties.
+fn set_config(
+    parts: &mut [(String, Document, bool)],
+    key: &str,
+    value: &str,
+) -> Result<(), ImportError> {
+    fn solver(e: &mut XElem) -> Option<&mut XElem> {
+        if e.name == "Simulink.SolverCC"
+            || e.attr("ClassName").as_deref() == Some("Simulink.SolverCC")
+        {
+            return Some(e);
+        }
+        e.elements_mut().find_map(solver)
+    }
+    let found = [CONFIG_PART, ROOT_PART].into_iter().find_map(|name| {
+        let i = parts.iter().position(|(n, ..)| n == name)?;
+        let root = parts[i].1.root_mut()?;
+        solver(root).is_some().then_some(i)
+    });
+    let (i, model_level) = match found {
+        Some(i) => (i, false),
+        None => {
+            let i = parts
+                .iter()
+                .position(|(n, ..)| n == ROOT_PART)
+                .ok_or_else(|| ImportError::Xml(format!("{ROOT_PART} missing")))?;
+            (i, true)
+        }
+    };
+    let (_, doc, changed) = &mut parts[i];
+    *changed = true;
+    let root = doc
+        .root_mut()
+        .ok_or_else(|| ImportError::Xml("empty document".into()))?;
+    let target = if model_level {
+        root.elements_mut()
+            .find(|c| matches!(c.name.as_str(), "Model" | "Library" | "Subsystem"))
+            .ok_or_else(|| ImportError::Xml("no <Model> element".into()))?
+    } else {
+        solver(root).expect("found above")
+    };
+    for k in config_writes(key, |k| target.prop(k).is_some()) {
+        match target.prop_mut(k) {
+            Some(p) => p.set_text(value),
+            None => target.push_prop(k, value),
+        }
+    }
+    Ok(())
+}
 
 fn is_block_part(name: &str) -> bool {
     name == ROOT_PART || (name.starts_with("simulink/systems/") && name.ends_with(".xml"))
@@ -346,7 +399,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         | Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
         | Edit::SetAnnotationText { .. }
-        | Edit::DeleteAnnotation { .. } => unreachable!("applied above"),
+        | Edit::DeleteAnnotation { .. }
+        | Edit::SetConfig { .. } => unreachable!("applied above"),
         Edit::AddBlock { .. } => {
             let block = resolved
                 .added
@@ -477,7 +531,8 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
         | Edit::Disconnect { .. }
         | Edit::SetRoute { .. }
         | Edit::SetTrunkRoute { .. }
-        | Edit::SetSignalName { .. } => {
+        | Edit::SetSignalName { .. }
+        | Edit::SetConfig { .. } => {
             unreachable!("applied above")
         }
     }
@@ -975,17 +1030,21 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
     let package_metadata = edits
         .iter()
         .any(|r| matches!(r.edit, Edit::CreateSubsystem { .. }));
+    let config = edits
+        .iter()
+        .any(|r| matches!(r.edit, Edit::SetConfig { .. }));
     let mut read = 0u64;
     let mut occupied = std::collections::BTreeSet::new();
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(zip_err)?;
         let name = file.name().to_string();
         occupied.insert(name.clone());
-        if !is_block_part(&name)
-            && !(package_metadata
+        let wanted = is_block_part(&name)
+            || config && name == CONFIG_PART
+            || package_metadata
                 && (name.starts_with("simulink/systems/_rels/") && name.ends_with(".rels")
-                    || name == "[Content_Types].xml"))
-        {
+                    || name == "[Content_Types].xml");
+        if !wanted {
             continue;
         }
         let mut buf = String::new();
@@ -1001,6 +1060,10 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
     }
 
     for resolved in edits {
+        if let Edit::SetConfig { key, value } = &resolved.edit {
+            set_config(&mut parts, key, value)?;
+            continue;
+        }
         let at = locate(&parts, &resolved.system)?;
         system_at(&mut parts, &at)
             .map(|sys| apply_edit(sys, resolved))
