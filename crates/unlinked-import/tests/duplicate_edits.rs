@@ -16,6 +16,17 @@ fn native_copy_preserves_parameters_and_internal_connections_in_both_formats() {
         ("m.mdl", mdl.to_vec()),
         ("m.slx", zip.finish().unwrap().into_inner()),
     ] {
+        let bytes = unlinked_import::patch::apply_edits(
+            name,
+            &bytes,
+            &[unlinked_model::edit::Edit::SetOrientation {
+                system: vec![],
+                id: "2".into(),
+                orientation: unlinked_model::Orientation::Up,
+                mirrored: true,
+            }],
+        )
+        .unwrap();
         let model = unlinked_import::import(name, &bytes).unwrap();
         let edits = duplicate(
             &model,

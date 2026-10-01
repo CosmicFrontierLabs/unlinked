@@ -12,7 +12,7 @@ const MAX_SELECTION: usize = 256;
 
 /// Build an atomic duplicate action without modifying `model`.
 ///
-/// Until the edit vocabulary can preserve their metadata, styled, oriented,
+/// Until the edit vocabulary can preserve their metadata, styled,
 /// masked, linked, hierarchical, interface and chart-owning blocks are refused.
 /// Implicit catalog defaults are materialized to avoid substituting the palette's
 /// creation profile (notably Switch and ZeroOrderHold) for imported behavior.
@@ -105,11 +105,6 @@ pub fn duplicate(
         {
             return Err(reject("block owns a Stateflow chart"));
         }
-        if block.orientation != Orientation::Right || block.mirrored {
-            return Err(reject(
-                "copying rotated or mirrored blocks needs an orientation edit",
-            ));
-        }
         if block.style != BlockStyle::default() {
             return Err(reject("copying nondefault block styles is not supported"));
         }
@@ -162,6 +157,14 @@ pub fn duplicate(
             name,
             position,
         });
+        if block.orientation != Orientation::Right || block.mirrored {
+            edits.push(Edit::SetOrientation {
+                system: system.clone(),
+                id: new_id.clone(),
+                orientation: block.orientation,
+                mirrored: block.mirrored,
+            });
+        }
         for (name, value) in &parameters {
             edits.push(Edit::SetParameter {
                 system: system.clone(),
@@ -170,7 +173,7 @@ pub fn duplicate(
                 value: value.clone(),
             });
         }
-        expected.push((new_id, parameters, ports));
+        expected.push((new_id, parameters, ports, block.orientation, block.mirrored));
         if edits.len() > MAX_EDITS {
             return Err(invalid("copy exceeds the 2000 edit budget"));
         }
@@ -232,11 +235,15 @@ pub fn duplicate(
             .and_then(|b| b.subsystem.as_deref())
             .ok_or_else(|| EditError::NoSystem(system.clone()))?;
     }
-    for (id, parameters, ports) in expected {
+    for (id, parameters, ports, orientation, mirrored) in expected {
         let block = output
             .block(&id)
             .ok_or_else(|| EditError::NoBlock(id.clone()))?;
-        if block.parameters != parameters || block.ports != ports {
+        if block.parameters != parameters
+            || block.ports != ports
+            || block.orientation != orientation
+            || block.mirrored != mirrored
+        {
             return Err(invalid(
                 "duplicate edit vocabulary cannot preserve these block parameters",
             ));
@@ -352,6 +359,25 @@ mod tests {
         assert_eq!(copied.parameters["ZeroCross"], "on");
     }
     #[test]
+    fn duplicate_preserves_all_orientation_and_mirror_states() {
+        for orientation in [
+            Orientation::Right,
+            Orientation::Left,
+            Orientation::Up,
+            Orientation::Down,
+        ] {
+            for mirrored in [false, true] {
+                let mut source = model();
+                source.root.blocks[0].orientation = orientation;
+                source.root.blocks[0].mirrored = mirrored;
+                let edits = copy(&source, &["1"]).unwrap();
+                apply_batch(&mut source, &edits).unwrap();
+                let block = source.root.block(&"4".into()).unwrap();
+                assert_eq!((block.orientation, block.mirrored), (orientation, mirrored));
+            }
+        }
+    }
+    #[test]
     fn rejects_metadata_that_cannot_be_preserved() {
         let mut source = model();
         source.root.blocks[0].style.background = Some("red".into());
@@ -361,7 +387,7 @@ mod tests {
             .contains("styles"));
         source.root.blocks[0].style = BlockStyle::default();
         source.root.blocks[0].orientation = Orientation::Left;
-        assert!(copy(&source, &["1"]).is_err());
+        assert!(copy(&source, &["1"]).is_ok());
         source.root.blocks[0].orientation = Orientation::Right;
         source.root.lines[0].name = Some("label".into());
         assert!(copy(&source, &["1", "2"])
