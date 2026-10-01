@@ -3,8 +3,8 @@
 //! Blocks are found by the containing system's path and the block name
 //! (MDL lines refer to blocks by name).
 
-use super::Resolved;
 use super::{format_ports, parse_endpoint};
+use super::{Boundary, Resolved};
 use crate::convert::parse_port;
 use crate::{ImportError, MAX_DEPTH, MAX_NODES};
 use unlinked_model::edit::{Edit, SID_WATERMARK};
@@ -688,26 +688,6 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
                 }
                 _ => true,
             });
-            for (id, number) in &resolved.renumbered {
-                let other = resolved.name(id)?;
-                let Some(b) = sys
-                    .sections_mut()
-                    .find(|b| b.tag == "Block" && b.prop("Name").as_deref() == Some(other))
-                else {
-                    continue;
-                };
-                let interface = b.sections_mut().find(|l| {
-                    l.tag == "List" && l.prop("ListType").as_deref() == Some("InterfaceData")
-                });
-                let bus = interface.is_some();
-                if let Some(list) = interface {
-                    list.set_prop("PortNumber", number, false);
-                }
-                if !bus || b.prop("Port").is_some() {
-                    let bare = b.was_quoted("Port") == Some(false);
-                    b.set_prop("Port", number, bare);
-                }
-            }
         }
         Edit::AddAnnotation { .. }
         | Edit::MoveAnnotation { .. }
@@ -721,6 +701,137 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
         | Edit::SetSignalName { .. } => {
             unreachable!("applied above")
         }
+    }
+    // Deleting or renumbering a port block renumbers its siblings.
+    for (id, number) in &resolved.renumbered {
+        let other = resolved.name(id)?;
+        let Some(b) = sys
+            .sections_mut()
+            .find(|b| b.tag == "Block" && b.prop("Name").as_deref() == Some(other))
+        else {
+            continue;
+        };
+        let interface = b
+            .sections_mut()
+            .find(|l| l.tag == "List" && l.prop("ListType").as_deref() == Some("InterfaceData"));
+        let bus = interface.is_some();
+        if let Some(list) = interface {
+            list.set_prop("PortNumber", number, false);
+        }
+        if !bus || b.prop("Port").is_some() {
+            let bare = b.was_quoted("Port") == Some(false);
+            b.set_prop("Port", number, bare);
+        }
+    }
+    Ok(())
+}
+
+/// Update the subsystem block around an edited system: its port count and
+/// the connections outside it, per `boundary.remap`.
+fn apply_boundary(file: &mut MdlFile, boundary: &Boundary) -> Result<(), ImportError> {
+    let path = &boundary.system;
+    let sys = file
+        .system_mut(path)
+        .ok_or_else(|| ImportError::Mdl(format!("no system at {path:?}")))?;
+    let name = boundary.name.as_str();
+    let block = sys
+        .sections_mut()
+        .find(|b| b.tag == "Block" && b.prop("Name").as_deref() == Some(name))
+        .ok_or_else(|| ImportError::Edit(format!("no block {name:?}")))?;
+    let sid = block.prop("SID");
+    block.set_prop("Ports", &format_ports(&boundary.ports), true);
+    let remap = &boundary.remap;
+    let (forms, default_kind) = match remap.kind {
+        PortKind::Out => (SRC_FORMS, PortKind::Out),
+        _ => (DST_FORMS, PortKind::In),
+    };
+    // The port index an endpoint has on the subsystem block, if it is one.
+    let index_of = |s: &Section| -> Option<u32> {
+        let [sid_key, block_key, port_key] = forms;
+        if let Some(v) = s.prop(sid_key) {
+            let (block, port) = parse_endpoint(&v, default_kind)?;
+            return (Some(block) == sid.as_deref() && port.kind == remap.kind)
+                .then_some(port.index);
+        }
+        if s.prop(block_key).as_deref() != Some(name) {
+            return None;
+        }
+        let port = parse_port(s.prop(port_key).as_deref().unwrap_or("1"), default_kind)?;
+        (port.kind == remap.kind).then_some(port.index)
+    };
+    let new_index = |old: u32| remap.map.get(old as usize - 1).copied().flatten();
+    let gone = |s: &Section| index_of(s).is_some_and(|i| i >= 1 && new_index(i).is_none());
+    // Connections on removed ports go (the IR already refused them unless
+    // disconnecting) and the rest move to their new numbers. As in the IR,
+    // only what this cuts is removed; other dangling wiring stays.
+    let leads_nowhere = |s: &Section| {
+        DST_FORMS[..2].iter().all(|k| s.prop(k).is_none())
+            && !s.sections().any(|b| b.tag == "Branch")
+    };
+    fn cut(
+        s: &mut Section,
+        gone: &dyn Fn(&Section) -> bool,
+        leads_nowhere: &dyn Fn(&Section) -> bool,
+    ) -> bool {
+        let mut cut_any = gone(s);
+        if cut_any {
+            for key in DST_FORMS {
+                s.remove_prop(key);
+            }
+        }
+        s.items.retain_mut(|item| match item {
+            Item::Section(b) if b.tag == "Branch" => {
+                let below = cut(b, gone, leads_nowhere);
+                cut_any |= below;
+                !(below && leads_nowhere(b))
+            }
+            _ => true,
+        });
+        cut_any
+    }
+    sys.items.retain_mut(|item| match item {
+        Item::Section(l) if l.tag == "Line" => match remap.kind {
+            PortKind::Out => !gone(l),
+            _ => !(cut(l, &gone, &leads_nowhere) && leads_nowhere(l)),
+        },
+        _ => true,
+    });
+    fn renumber(
+        s: &mut Section,
+        index_of: &dyn Fn(&Section) -> Option<u32>,
+        new_index: &dyn Fn(u32) -> Option<u32>,
+        forms: Forms,
+        sid: Option<&str>,
+        kind: PortKind,
+        deep: bool,
+    ) {
+        if let Some(n) = index_of(s).filter(|&i| i >= 1).and_then(new_index) {
+            let [sid_key, _, port_key] = forms;
+            match s.prop(sid_key) {
+                Some(_) => {
+                    let ep = format!("{}#{}:{n}", sid.unwrap_or_default(), kind.token());
+                    let bare = s.was_quoted(sid_key) == Some(false);
+                    s.set_prop(sid_key, &ep, bare);
+                }
+                None => s.set_prop(port_key, &n.to_string(), true),
+            }
+        }
+        if deep {
+            for b in s.sections_mut().filter(|b| b.tag == "Branch") {
+                renumber(b, index_of, new_index, forms, sid, kind, true);
+            }
+        }
+    }
+    for line in sys.sections_mut().filter(|l| l.tag == "Line") {
+        renumber(
+            line,
+            &index_of,
+            &new_index,
+            forms,
+            sid.as_deref(),
+            remap.kind,
+            remap.kind != PortKind::Out,
+        );
     }
     Ok(())
 }
@@ -869,6 +980,9 @@ pub(super) fn apply(text: &str, edits: &[Resolved]) -> Result<String, ImportErro
     let mut file = parse(text)?;
     for resolved in edits {
         apply_edit(&mut file, resolved)?;
+        if let Some(boundary) = &resolved.boundary {
+            apply_boundary(&mut file, boundary)?;
+        }
     }
     Ok(file.to_text())
 }
@@ -911,6 +1025,7 @@ mod tests {
             route: None,
             ports: None,
             renumbered: Vec::new(),
+            boundary: None,
         }
     }
 

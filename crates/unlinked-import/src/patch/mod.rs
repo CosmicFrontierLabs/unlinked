@@ -10,6 +10,7 @@ mod slx;
 
 use crate::{decode_text, import, ImportError};
 use std::collections::HashMap;
+use unlinked_model::boundary::{boundary_remap, BoundaryRemap};
 use unlinked_model::catalog::interface_port_number;
 use unlinked_model::edit::{structural_regression, system_names, Edit};
 use unlinked_model::{Block, BlockId, PortCounts, PortKind};
@@ -30,6 +31,19 @@ struct Resolved {
     /// New port numbers of other port blocks in the system: their `Port`
     /// and, for bus elements, the interface `PortNumber`.
     renumbered: Vec<(BlockId, String)>,
+    /// How the edit changes the ports of the subsystem it is inside.
+    boundary: Option<Boundary>,
+}
+
+/// A subsystem block whose ports an edit inside it changes.
+struct Boundary {
+    /// Subsystem block names from the root to the system holding the block.
+    system: Vec<String>,
+    /// The subsystem block's name there.
+    name: String,
+    remap: BoundaryRemap,
+    /// Its port counts afterwards.
+    ports: PortCounts,
 }
 
 impl Resolved {
@@ -67,15 +81,31 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
             .map(|b| (b.id.clone(), b.name.clone()))
             .collect();
         let ports_before = edit.block().and_then(|id| sys.block(id)).map(|b| b.ports);
-        // Deleting a port block renumbers its siblings.
+        // Deleting or renumbering a port block renumbers its siblings.
         let ports_numbered: Vec<(BlockId, Option<u32>)> = match edit {
             Edit::DeleteBlock { .. } => sys
                 .blocks
                 .iter()
                 .map(|b| (b.id.clone(), interface_port_number(b).ok()))
                 .collect(),
+            Edit::SetParameter { name, .. } if name == "Port" => sys
+                .blocks
+                .iter()
+                .map(|b| (b.id.clone(), interface_port_number(b).ok()))
+                .collect(),
             _ => Vec::new(),
         };
+        // The subsystem block's identity before the edit, if its ports change.
+        let remap = boundary_remap(&model, edit).map_err(|e| failed(e.to_string()))?;
+        let boundary_at = remap
+            .as_ref()
+            .map(|r| {
+                let outer = system_names(&model, &r.parent_system)
+                    .ok_or_else(|| failed("no system around the subsystem".into()))?;
+                let name = system.last().cloned().unwrap_or_default();
+                Ok::<_, ImportError>((outer, name))
+            })
+            .transpose()?;
         edit.apply(&mut model).map_err(|e| failed(e.to_string()))?;
         let sys = system_names(&model, edit.system())
             .and_then(|names| {
@@ -108,6 +138,23 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
                 (before != Some(now)).then(|| (id, now.to_string()))
             })
             .collect();
+        let boundary = match (remap, boundary_at) {
+            (Some(remap), Some((outer, name))) => {
+                let path: Vec<&str> = outer.iter().map(String::as_str).collect();
+                let ports = model
+                    .system_at(&path)
+                    .and_then(|s| s.block(&remap.parent))
+                    .map(|b| b.ports)
+                    .ok_or_else(|| failed("the subsystem block is missing".into()))?;
+                Some(Boundary {
+                    system: outer,
+                    name,
+                    remap,
+                    ports,
+                })
+            }
+            _ => None,
+        };
         resolved.push(Resolved {
             edit: edit.clone(),
             route,
@@ -116,6 +163,7 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
             added,
             ports,
             renumbered,
+            boundary,
         });
     }
     structural_regression(&original, &model).map_err(|e| ImportError::Edit(e.to_string()))?;

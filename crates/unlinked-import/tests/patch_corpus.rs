@@ -177,6 +177,38 @@ fn structural_edits(model: &Model, edits: &mut Vec<Edit>) {
             dst,
         });
     }
+    // Make the last input of a plain, untouched root subsystem its first,
+    // which reorders the connections outside it.
+    let renumber = model
+        .root
+        .blocks
+        .iter()
+        .filter(|b| !edits.iter().any(|e| e.block() == Some(&b.id)) && !deleted.contains(&b.id))
+        .find_map(|b| {
+            let inports: Vec<_> = b
+                .subsystem
+                .as_ref()?
+                .blocks
+                .iter()
+                .filter(|p| p.block_type == "Inport")
+                .collect();
+            let last = inports
+                .iter()
+                .find(|p| p.param("Port") == Some(inports.len().to_string().as_str()))?;
+            let edit = Edit::SetParameter {
+                system: vec![b.id.clone()],
+                id: last.id.clone(),
+                name: "Port".into(),
+                value: "1".into(),
+            };
+            (inports.len() >= 2
+                && matches!(
+                    unlinked_model::boundary::boundary_remap(model, &edit),
+                    Ok(Some(_))
+                ))
+            .then_some(edit)
+        });
+    edits.extend(renumber);
     // Turn and flip a block the batch has not touched.
     let untouched = model
         .root
@@ -306,6 +338,7 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
                         "connect into an existing line"
                     }
                     Edit::Disconnect { .. } => "disconnect",
+                    Edit::SetParameter { name, .. } if name == "Port" => "subsystem port reorder",
                     _ => "other",
                 })
                 .or_insert(0) += 1;
@@ -359,7 +392,11 @@ fn patched_corpus_models_reimport_to_the_edited_ir() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-    for kind in ["connect into an existing line", "disconnect"] {
+    for kind in [
+        "connect into an existing line",
+        "disconnect",
+        "subsystem port reorder",
+    ] {
         assert!(exercised.get(kind).copied().unwrap_or(0) > 0, "no {kind}");
     }
     eprintln!("structural edits exercised: {exercised:?}");

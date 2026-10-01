@@ -397,12 +397,33 @@ fn closest(target: Option<web_sys::EventTarget>, selector: &str) -> Option<Eleme
 /// The edits deleting blocks `ids`, or `None` if the user declines. Blocks
 /// with lines attached are only deleted, lines included, after confirming;
 /// otherwise the edits refuse to touch lines at all.
-fn confirm_delete(system: &SystemRef, ids: &[BlockId], lines: &[Line]) -> Option<Vec<Edit>> {
+fn confirm_delete(
+    model: &Model,
+    system: &SystemRef,
+    ids: &[BlockId],
+    lines: &[Line],
+) -> Option<Vec<Edit>> {
     let attached = lines
         .iter()
         .filter(|l| ids.iter().any(|id| touches(l, id)))
         .count();
-    let disconnect = if attached == 0 {
+    // Port blocks of a subsystem whose port is wired outside it: deleting
+    // them removes that outer connection too.
+    let outside = ids
+        .iter()
+        .filter(|id| {
+            let edit = Edit::DeleteBlock {
+                system: system.clone(),
+                id: (*id).clone(),
+                disconnect: DisconnectPolicy::Disconnect,
+            };
+            matches!(
+                unlinked_model::boundary::boundary_remap(model, &edit),
+                Ok(Some(remap)) if unlinked_model::boundary::cuts_outside(model, &remap)
+            )
+        })
+        .count();
+    let disconnect = if attached == 0 && outside == 0 {
         DisconnectPolicy::Reject
     } else {
         let what = if ids.len() == 1 {
@@ -410,11 +431,26 @@ fn confirm_delete(system: &SystemRef, ids: &[BlockId], lines: &[Line]) -> Option
         } else {
             format!("these {} blocks", ids.len())
         };
-        let message = format!(
-            "Delete {what} and the {attached} line{} connected to {}?",
-            if attached == 1 { "" } else { "s" },
-            if ids.len() == 1 { "it" } else { "them" }
-        );
+        let mut cut = Vec::new();
+        if attached > 0 {
+            cut.push(format!(
+                "the {attached} line{} connected to {}",
+                if attached == 1 { "" } else { "s" },
+                if ids.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        if outside > 0 {
+            cut.push(format!(
+                "the connection{} to {} outside the subsystem",
+                if outside == 1 { "" } else { "s" },
+                if outside == 1 {
+                    "its port"
+                } else {
+                    "their ports"
+                }
+            ));
+        }
+        let message = format!("Delete {what} and {}?", cut.join(" and "));
         if !gloo_utils::window()
             .confirm_with_message(&message)
             .unwrap_or(false)
@@ -1288,7 +1324,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 Selection::Blocks(ids) if !ids.is_empty() => {
                     e.prevent_default();
                     let ids: Vec<BlockId> = ids.iter().cloned().map(BlockId).collect();
-                    if let Some(group) = confirm_delete(&system_ref, &ids, &lines) {
+                    if let Some(group) = confirm_delete(&model, &system_ref, &ids, &lines) {
                         on_edits.emit(group);
                         selection.set(Selection::Nothing);
                     }
@@ -1607,6 +1643,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if let Some(b) = selected_block {
                     <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
                         system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
+                        model={props.model.clone()}
                         on_edit={on_edit.clone()} on_open={Callback::from({
                         let path = path.clone();
                         move |name: String| {
@@ -1854,6 +1891,9 @@ struct InspectorProps {
     system: SystemRef,
     /// Lines of that system, to tell whether deleting the block cuts any.
     lines: Rc<Vec<Line>>,
+    /// The whole model, to tell whether deleting a subsystem's port block
+    /// cuts a connection outside it.
+    model: Rc<Model>,
     on_open: Callback<String>,
     on_edit: Option<Callback<Edit>>,
 }
@@ -1924,10 +1964,15 @@ fn inspector(props: &InspectorProps) -> Html {
         None => html! { <h3>{ b.name.replace('\n', " ") }</h3> },
     };
     let delete = props.on_edit.clone().map(|on_edit| {
-        let (system, id, lines) = (props.system.clone(), b.id.clone(), props.lines.clone());
+        let (system, id, lines, model) = (
+            props.system.clone(),
+            b.id.clone(),
+            props.lines.clone(),
+            props.model.clone(),
+        );
         let onclick = Callback::from(move |_: MouseEvent| {
-            for edit in
-                confirm_delete(&system, std::slice::from_ref(&id), &lines).unwrap_or_default()
+            for edit in confirm_delete(&model, &system, std::slice::from_ref(&id), &lines)
+                .unwrap_or_default()
             {
                 on_edit.emit(edit);
             }
