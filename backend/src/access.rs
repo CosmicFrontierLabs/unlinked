@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::async_trait;
 use axum::extract::{FromRequestParts, RawPathParams};
 use axum::http::request::Parts;
 use diesel::prelude::*;
@@ -210,7 +209,6 @@ async fn path_uuid(parts: &mut Parts, state: &Arc<AppState>, name: &str) -> ApiR
         .ok_or(ApiError::NotFound)
 }
 
-#[async_trait]
 impl FromRequestParts<Arc<AppState>> for ProjectAccess {
     type Rejection = ApiError;
 
@@ -226,7 +224,6 @@ impl FromRequestParts<Arc<AppState>> for ProjectAccess {
     }
 }
 
-#[async_trait]
 impl FromRequestParts<Arc<AppState>> for OrgAccess {
     type Rejection = ApiError;
 
