@@ -494,11 +494,13 @@ pub fn model_editor(props: &EditorProps) -> Html {
         })
     };
     {
-        // A view that cannot edit leaves any draft alone, as does one with
-        // a draft on offer. Once the edits move to another version (saved,
-        // or reapplied on the latest), the old version's draft goes.
+        // A view that cannot edit leaves drafts alone, as does one with a
+        // draft on offer. Only a draft this editor wrote is ever removed
+        // here (once its edits are saved, reverted, undone or moved to
+        // another version), so one it could not read, say from another
+        // version of the app, is kept.
         let file_id = props.file_id;
-        let drafted = use_mut_ref(|| props.base.version_id);
+        let owned = use_mut_ref(|| None::<Uuid>);
         use_effect_with(
             (
                 (*pending).clone(),
@@ -507,12 +509,19 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 editing,
             ),
             move |(pending, version_id, offered, editing)| {
-                if *editing && !offered {
-                    let before = std::mem::replace(&mut *drafted.borrow_mut(), *version_id);
-                    if before != *version_id {
-                        store_draft(file_id, before, &[]);
-                    }
+                if !*editing || *offered {
+                    return;
+                }
+                let mut owned = owned.borrow_mut();
+                if let Some(before) = owned.filter(|v| v != version_id) {
+                    store_draft(file_id, before, &[]);
+                    *owned = None;
+                }
+                if !pending.is_empty() {
                     store_draft(file_id, *version_id, pending);
+                    *owned = Some(*version_id);
+                } else if owned.take().is_some() {
+                    store_draft(file_id, *version_id, &[]);
                 }
             },
         );
@@ -546,8 +555,11 @@ pub fn model_editor(props: &EditorProps) -> Html {
         })
     };
     let discard_draft = {
-        let draft = draft.clone();
-        Callback::from(move |_: MouseEvent| draft.set(None))
+        let (draft, file_id, version_id) = (draft.clone(), props.file_id, base.version_id);
+        Callback::from(move |_: MouseEvent| {
+            store_draft(file_id, version_id, &[]);
+            draft.set(None);
+        })
     };
     // A save asked for from the keyboard, made once the render after the
     // request has the edits it should include.
