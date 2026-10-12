@@ -6,9 +6,11 @@
 //! run) gets a new generation number; tasks drop results for any other
 //! generation, so a stale stream or response can never overwrite newer data.
 
+mod comparison;
 mod export;
 mod form;
 mod inspector;
+use comparison::ReferenceTrace;
 use form::RunForm;
 use inspector::Measurements;
 
@@ -201,6 +203,9 @@ struct Controller {
     task: Option<AbortHandle>,
     last_refresh: f64,
     requested_options: Option<SimulationOptions>,
+    /// Independent of the current run; retained when starting/loading another.
+    reference: Option<ReferenceTrace>,
+    reference_generation: u64,
 }
 
 impl Controller {
@@ -295,12 +300,32 @@ impl Controller {
             fig.plot_styled(ax, &self.time[..n], &y[..n], &style)
                 .map_err(err)?;
         }
-        if !self.plotted.is_empty() {
-            let labels = self
-                .plotted
-                .iter()
-                .map(|&i| label(&self.signals[i].name).to_string())
-                .collect();
+        let mut labels: Vec<String> = self
+            .plotted
+            .iter()
+            .map(|&i| label(&self.signals[i].name).to_string())
+            .collect();
+        // Current lines stay first: streaming refreshes update those indices.
+        // Reference lines use their original sample times, with no interpolation.
+        if let Some(reference) = &self.reference {
+            for &i in &self.plotted {
+                let signal = &self.signals[i];
+                let Some((time, values)) = reference.column(&signal.id) else {
+                    continue;
+                };
+                let style = js_sys::Object::new();
+                js_sys::Reflect::set(&style, &"color".into(), &inspector::color(i).into())
+                    .map_err(err)?;
+                js_sys::Reflect::set(&style, &"ls".into(), &"--".into()).map_err(err)?;
+                fig.plot_styled(ax, time, values, &style).map_err(err)?;
+                labels.push(format!(
+                    "{} (reference v{})",
+                    label(&signal.name),
+                    reference.version
+                ));
+            }
+        }
+        if !labels.is_empty() {
             fig.legend(ax, labels).map_err(err)?;
         }
         if let Some(limits) = limits.filter(|l| l.len() == 4) {
@@ -568,6 +593,65 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     };
     // Bumped whenever the plot must be rebuilt (new data set or selection).
     let rebind = use_reload();
+    let reference_loading = use_state(|| false);
+    let reference_error = use_state(|| None::<String>);
+    let clear_reference = {
+        let (ctl, loading, error, rebind) = (
+            ctl.clone(),
+            reference_loading.clone(),
+            reference_error.clone(),
+            rebind.clone(),
+        );
+        Callback::from(move |_: MouseEvent| {
+            let mut c = ctl.borrow_mut();
+            c.reference_generation += 1;
+            c.reference = None;
+            drop(c);
+            loading.set(false);
+            error.set(None);
+            rebind.dispatch(());
+        })
+    };
+    let compare_run = {
+        let (ctl, loading, error, rebind) = (
+            ctl.clone(),
+            reference_loading.clone(),
+            reference_error.clone(),
+            rebind.clone(),
+        );
+        move |id: Uuid| {
+            let (ctl, loading, error, rebind) =
+                (ctl.clone(), loading.clone(), error.clone(), rebind.clone());
+            Callback::from(move |_: MouseEvent| {
+                let ticket = {
+                    let mut c = ctl.borrow_mut();
+                    c.reference_generation += 1;
+                    c.reference_generation
+                };
+                loading.set(true);
+                error.set(None);
+                let (ctl, loading, error, rebind) =
+                    (ctl.clone(), loading.clone(), error.clone(), rebind.clone());
+                spawn_local(async move {
+                    let result = api::simulation_result(id)
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(ReferenceTrace::from_result);
+                    if ctl.borrow().reference_generation != ticket {
+                        return;
+                    }
+                    match result {
+                        Ok(reference) => {
+                            ctl.borrow_mut().reference = Some(reference);
+                            rebind.dispatch(());
+                        }
+                        Err(e) => error.set(Some(e)),
+                    }
+                    loading.set(false);
+                });
+            })
+        }
+    };
     // Presentation only: generated signals stay in the trace and plot.
     let show_generated = use_state(|| false);
     let signal_query = use_state(String::new);
@@ -632,6 +716,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 let (sender, run_id) = {
                     let mut c = ctl.borrow_mut();
                     let live = (c.sender.take(), c.run_id.take());
+                    c.reference_generation += 1;
                     c.reset();
                     live
                 };
@@ -1096,7 +1181,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         <button class="primary run-button" onclick={run} disabled={validation.is_err()}>{ "▶ Run" }</button>
                     }
                     <span class="sim-status" role="status" aria-live="polite">{ status }</span>
-                    <button onclick={export_csv} disabled={samples == 0 || running} title="Download all recorded signals">{ "Export CSV" }</button>
+                    <button onclick={export_csv} disabled={samples == 0 || running} title="Download all recorded signals from the current run">{ "Export CSV" }</button>
                 </div>
             </div>
             if let Some(error) = &*export_error { <p class="error" role="alert">{error}</p> }
@@ -1181,6 +1266,18 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                             if let Some(id) = c.run_id { <span title={id.to_string()}>{ format!("Run {}", &id.to_string()[..8]) }</span> }
                         </div>
                     }
+                if let Some(reference) = &c.reference {
+                    <section class="comparison-banner" aria-label="Run comparison">
+                        <div><strong>{format!("Reference v{} · run {}",reference.version,&reference.id.to_string()[..8])}</strong>
+                            <p>{"Solid: current run · Dashed: reference. Signals matched by recorded ID; each run keeps its own time grid."}</p>
+                            <p class="comparison-count">{format!("{} of {} selected signals matched", c.plotted.iter().filter(|&&i| reference.column(&c.signals[i].id).is_some()).count(),c.plotted.len())}</p>
+                            if Some(reference.id) == c.run_id { <p>{"The current and reference runs are the same."}</p> }
+                        </div>
+                        <button onclick={clear_reference.clone()}>{"Remove comparison"}</button>
+                    </section>
+                }
+                if *reference_loading { <div class="comparison-loading"><span role="status">{"Loading comparison…"}</span><button onclick={clear_reference.clone()}>{"Cancel comparison"}</button></div> }
+                if let Some(error) = &*reference_error { <p class="comparison-error error" role="alert">{error}</p> }
                 <div class="plot-actions"><button onclick={fit_plot} disabled={c.signals.is_empty()}>{ "Fit plot" }</button><span>{ "Scroll to zoom · drag to pan" }</span></div>
                 <div class="plot-host" ref={plot_host}>
                     <canvas id={canvas_id.clone()} hidden={c.signals.is_empty()} onmousedown={pan_plot} onwheel={zoom_plot} />
@@ -1232,6 +1329,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                                     <button class={classes!("run-history-item", (c.run_id == Some(r.id)).then_some("active"))} disabled={running} onclick={load_run(r.clone())} aria-label={format!("Load v{} {:?} run from {} ({})", r.file_version, r.status, r.created_at.format("%Y-%m-%d %H:%M:%S UTC"), &r.id.to_string()[..8])} aria-pressed={(c.run_id == Some(r.id)).to_string()}>
                                         { format!("v{} · {:?}", r.file_version, r.status) }
                                     </button>
+                                    <button class={classes!("compare-run", c.reference.as_ref().is_some_and(|reference| reference.id == r.id).then_some("active"))}
+                                        onclick={compare_run(r.id)} disabled={running || *reference_loading || samples == 0 || c.run_id == Some(r.id) || r.status == SimulationStatus::Running}
+                                        aria-label={format!("Compare with v{} run {}",r.file_version,&r.id.to_string()[..8])}
+                                        aria-pressed={c.reference.as_ref().is_some_and(|reference| reference.id == r.id).to_string()}>{"Compare"}</button>
                                     <div class="muted">{ r.created_at.format("%Y-%m-%d %H:%M:%S").to_string() }</div>
                                 </li>
                             }) }
