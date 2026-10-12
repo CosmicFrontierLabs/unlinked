@@ -10,13 +10,14 @@ parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--url',required=True)
 parser.add_argument('--model',required=True)
 parser.add_argument('--browser')
+parser.add_argument('--engine', choices=['chromium', 'firefox', 'webkit'], default='chromium')
 args=parser.parse_args()
 with sync_playwright() as p:
-    browser=p.chromium.launch(headless=True,**({'executable_path':args.browser} if args.browser else {}))
+    browser=getattr(p, args.engine).launch(headless=True,**({'executable_path':args.browser} if args.browser else {}))
     page=browser.new_page(viewport={'width':1440,'height':1000})
     errors=[]
     page.on('pageerror',lambda e:errors.append(str(e)))
-    page.goto(args.url+'/api/auth/dev-login')
+    page.request.get(args.url+'/api/auth/dev-login')
     file_id=args.model.split('/files/')[1]
     history_url=args.url+'/api/files/'+file_id+'/simulations'
     run=copy.deepcopy(page.request.get(history_url).json()[0])
@@ -42,6 +43,7 @@ with sync_playwright() as p:
     sim=page.get_by_role('region',name='Simulation',exact=True)
     stop=sim.get_by_label('Stop time (s)',exact=True)
     stop.fill('12')
+    sim.locator('.sim-primary-options select').select_option('euler')
     sim.get_by_role('button',name=re.compile('^Load .*'+run['id'][:8])).click()
     expect(sim.locator('.sim-status')).to_contain_text('3 samples')
     expect(stop).to_have_value('12')
@@ -52,6 +54,7 @@ with sync_playwright() as p:
     expect(details).to_contain_text('deleted-port')
     details.get_by_role('button',name='Use recorded setup').click()
     expect(stop).to_have_value('8')
+    expect(sim.locator('.sim-primary-options select')).to_have_value('rk45')
     expect(sim.get_by_label('Output step (s)',exact=True)).to_have_value('0.25')
     sim.get_by_text('Solver settings & workspace',exact=True).click()
     expect(sim.get_by_label('Start time (s)',exact=True)).to_have_value('2')

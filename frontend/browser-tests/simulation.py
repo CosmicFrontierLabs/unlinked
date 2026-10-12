@@ -14,10 +14,11 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--url', required=True)
 parser.add_argument('--model', required=True)
 parser.add_argument('--browser')
+parser.add_argument('--engine', choices=['chromium', 'firefox', 'webkit'], default='chromium')
 args = parser.parse_args()
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True, **({'executable_path': args.browser} if args.browser else {}))
+    browser = getattr(p, args.engine).launch(headless=True, **({'executable_path': args.browser} if args.browser else {}))
     page = browser.new_page(viewport={'width': 1440, 'height': 1000})
     errors, requests, cancelled = [], [], []
     sockets = []
@@ -47,7 +48,7 @@ with sync_playwright() as p:
                     'created_at':'2026-10-12T00:00:00Z', 'finished_at':'2026-10-12T00:00:01Z'}}))
         socket.on_message(receive)
     page.route_web_socket('**/ws/simulations', socket_handler)
-    page.goto(args.url + '/api/auth/dev-login')
+    page.request.get(args.url + '/api/auth/dev-login')
     page.goto(args.url + args.model)
     page.evaluate("() => { window.closedSimulationSockets = 0; const close = WebSocket.prototype.close; WebSocket.prototype.close = function(...args) { window.closedSimulationSockets++; return close.apply(this, args); }; }")
     expect(page.locator('.diagram')).to_be_visible()

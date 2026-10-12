@@ -719,6 +719,30 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     );
     // Selected init script as (file, pinned version number).
     let init_script = use_state(|| None::<(Uuid, i32)>);
+    let init_select = use_node_ref();
+    let solver_select = use_node_ref();
+    {
+        let (init_select, solver_select) = (init_select.clone(), solver_select.clone());
+        let pinned = init_script
+            .map(|(id, version)| format!("{id}@{version}"))
+            .unwrap_or_default();
+        let solver = solver_name(options.solver);
+        // `selected` sets an option's default, not its live selection after
+        // interaction. Reconcile the property after dynamic options render,
+        // including when a recorded setup changes the selected version.
+        use_effect(move || {
+            if let Some(select) = init_select.cast::<HtmlSelectElement>() {
+                if select.value() != pinned {
+                    select.set_value(&pinned);
+                }
+            }
+            if let Some(select) = solver_select.cast::<HtmlSelectElement>() {
+                if select.value() != solver {
+                    select.set_value(solver);
+                }
+            }
+        });
+    }
     let setup_notice = use_state(|| None::<String>);
     {
         let notice = setup_notice.clone();
@@ -1093,7 +1117,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             .into_iter()
             .collect();
         html! {
-            <select onchange={set_init.clone()} disabled={state.active()}>
+            <select ref={init_select.clone()} onchange={set_init.clone()} disabled={state.active()}>
                 <option value="" selected={pinned.is_none()}>{ "none" }</option>
                 {for old_versions.into_iter().map(|(id, version)| html! {
                     <option value={format!("{id}@{version}")} selected={pinned == Some((id, version))}>{format!("{} (recorded v{version})", files.iter().find(|f| f.id == id).map(|f| f.path.clone()).unwrap_or_default())}</option>
@@ -1425,7 +1449,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     { number_field("stop", "Stop time (s)", &o.stop, |o| &mut o.stop) }
                     { number_field("step", "Output step (s)", &o.step, |o| &mut o.step) }
                     <label>{ "Solver" }
-                        <select onchange={set_solver} disabled={running}>
+                        <select ref={solver_select} onchange={set_solver} disabled={running}>
                             <option value="rk45" selected={o.solver == Solver::Rk45}>{ "RK45 · adaptive" }</option>
                             <option value="rk4" selected={o.solver == Solver::Rk4}>{ "RK4 · fixed step" }</option>
                             <option value="euler" selected={o.solver == Solver::Euler}>{ "Euler · fixed step" }</option>
