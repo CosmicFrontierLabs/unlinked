@@ -138,6 +138,14 @@ CI. Per-model import, render and simulation coverage is tracked in
   with per-user and global caps, quotas, cancellation, deadlines and stored
   results. Live plots use [rizzma](https://crates.io/crates/rizzma) with
   labeled time and value axes; traces export as CSV.
+- The browser retains simulation state and plot zoom across Diagram/Simulate tabs.
+  Signal search, bounded signal lists, sample cursors, interval measurements,
+  and reference-run overlays support inspecting recorded traces. Comparisons
+  match recorded signal IDs and keep each run's own time grid. CSV exports
+  the current trace; reference overlays do not alter it.
+- Recorded settings are inspectable and can be explicitly copied into the
+  next run form, preserving unmatched current root inputs. Initialization
+  scripts retain their recorded version; missing scripts prevent reuse.
 - Solvers: Euler, RK4, adaptive Dormand–Prince 5(4).
 - Blocks: sources (Constant, Clock, Step, Sine), Gain, Bias, Sum, Product,
   Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
