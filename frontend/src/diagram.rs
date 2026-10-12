@@ -1732,16 +1732,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             move |(_, path, _)| {
                 let refs: Vec<&str> = path.iter().map(String::as_str).collect();
                 match (model.system_at(&refs), run) {
-                    (Some(sys), Some(run)) => port_sources(&model, path, sys, &run),
-                    _ => Vec::new(),
+                    (Some(sys), Some(run)) => (
+                        port_sources(&model, path, sys, &run),
+                        display_sources(&model, path, sys, &run),
+                    ),
+                    _ => Default::default(),
                 }
             },
         )
     };
     let values: Vec<(Point, String)> = match &run {
         Some(run) => sources
+            .0
             .iter()
             .filter_map(|(p, indices)| Some((*p, value_label(run, indices)?)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let displays: Vec<(Rect, String)> = match &run {
+        Some(run) => sources
+            .1
+            .iter()
+            .filter_map(|(r, indices)| Some((*r, value_label(run, indices)?)))
             .collect(),
         None => Vec::new(),
     };
@@ -3515,6 +3527,27 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     </g>
                 }
             });
+            // Display blocks show their value inside, sized to the block.
+            let shown_in = (*show_values && !displays.is_empty()).then(|| {
+                html! {
+                    <g class={classes!("display-values", stale.then_some("stale"))}>
+                        { for displays.iter().map(|(r, text)| {
+                            let size = (r.height() * 0.5).min(r.width() / (text.chars().count().max(1) as f64 * 0.62));
+                            html! {
+                                <>
+                                    <rect x={(r.left + 2.0).to_string()} y={(r.top + 2.0).to_string()}
+                                        width={(r.width() - 4.0).max(0.0).to_string()}
+                                        height={(r.height() - 4.0).max(0.0).to_string()} />
+                                    <text x={((r.left + r.right) / 2.0).to_string()} y={((r.top + r.bottom) / 2.0).to_string()}
+                                        font-size={size.to_string()} text-anchor="middle" dominant-baseline="central">
+                                        { text }
+                                    </text>
+                                </>
+                            }
+                        }) }
+                    </g>
+                }
+            });
             // Guides overhang what they line up a little.
             let overhang = 12.0 / view.scale;
             let lined_up = guides.iter().map(|g| {
@@ -3545,6 +3578,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         { for rerouting }
                         { for lined_up }
                         { for labels }
+                        { for shown_in }
                     </svg>
                 </>
             }
@@ -4207,6 +4241,32 @@ fn scope_signals(
         }
     }
     ids
+}
+
+/// The shown system's Display blocks and the recorded signals into them,
+/// which they show inside, as Simulink's Display blocks do while it runs.
+fn display_sources(
+    model: &Model,
+    path: &[String],
+    sys: &System,
+    run: &ShownRun,
+) -> Vec<(Rect, Vec<usize>)> {
+    sys.blocks
+        .iter()
+        .filter(|b| b.block_type == "Display")
+        .filter_map(|b| {
+            let input = Endpoint {
+                block: b.id.clone(),
+                port: PortRef {
+                    kind: PortKind::In,
+                    index: 1,
+                },
+            };
+            let src = unlinked_model::edit::line_into(sys, &input)?.src.as_ref()?;
+            let indices = run.signal_indices(model, path, src);
+            (!indices.is_empty()).then_some((b.position, indices))
+        })
+        .collect()
 }
 
 /// Where the shown system's lines get port value labels, and the recorded
