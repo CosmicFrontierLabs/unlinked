@@ -1391,8 +1391,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         let Some(e) = e.dyn_ref::<TouchEvent>() else {
                             return;
                         };
+                        // Touches on controls and panels over the canvas
+                        // (a result list being scrolled, say) are theirs.
+                        let over_control = closest(
+                            e.target(),
+                            "button, input, select, textarea, a, .quick-insert, .shortcut-help, nav.crumbs",
+                        )
+                        .is_some();
                         let now = points(e);
-                        *gesture.borrow_mut() = (!now.is_empty()).then(|| (*view.borrow(), now));
+                        *gesture.borrow_mut() = (!now.is_empty() && !over_control)
+                            .then(|| (*view.borrow(), now));
                     }
                 };
                 let moved = {
