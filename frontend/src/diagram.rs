@@ -1508,6 +1508,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let select_created = use_mut_ref(|| None::<BlockId>);
     // The open context menu's client position.
     let menu = use_state(|| None::<(i32, i32)>);
+    // Whether the context menu shows its Arrange commands.
+    let arranging = use_state(|| false);
     let show_problems = use_state(|| false);
     let help = use_state(|| false);
     // Whether the find box is open.
@@ -3122,6 +3124,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let oncontextmenu = {
         let (menu, selection, editable) =
             (menu.clone(), selection.clone(), props.on_edit.is_some());
+        let arranging = arranging.clone();
         let annotations: Vec<Annotation> =
             system.map(|s| s.annotations.clone()).unwrap_or_default();
         Callback::from(move |e: MouseEvent| {
@@ -3137,6 +3140,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
             // Placed where it is drawn, once its items are known.
             menu.set(Some((e.client_x(), e.client_y())));
+            arranging.set(false);
         })
     };
     // Add a block, or an annotation selected so its text can be typed in
@@ -3577,6 +3581,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
 
     let enabled =
         |a: Action| available(a, &selection, clipboard.borrow().is_some(), lone_subsystem);
+    // The context menu's Arrange commands that apply, and the items it
+    // shows (the quick insert or Arrange count as one each).
+    let arrange: Vec<Action> = MENU
+        .into_iter()
+        .filter(|&a| matches!(a, Action::Arrange(_)) && enabled(a))
+        .collect();
+    let menu_items = MENU
+        .into_iter()
+        .filter(|&a| !matches!(a, Action::Arrange(_)) && enabled(a))
+        .count()
+        + 1
+        + usize::from(!arrange.is_empty())
+        + if *arranging { arrange.len() } else { 0 };
     let line_end = |class: &str, prefix: &str, ep: &Endpoint| {
         format!(
             ".diagram polyline.{class}[data-{prefix}sid=\"{}\"][data-{prefix}kind=\"{}\"][data-{prefix}index=\"{}\"] {{ stroke: rgba(255, 158, 100, 0.55); }}",
@@ -4016,7 +4033,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 <span class="tool-group zoom-group">
                     <button class="tool icon" title="Zoom out (Ctrl+-)"
                         onclick={zoom_by.reform(|_: MouseEvent| 1.0 / 1.25)}>{ icons::zoom_out() }</button>
-                    <span class="zoom" title="Zoom">{ format!("{:.0}%", v.scale * 100.0) }</span>
+                    <button class="tool zoom" title="Zoom to 100% (Ctrl+0)" aria-label="Zoom to 100%"
+                        onclick={zoom_by.reform(move |_: MouseEvent| 1.0 / v.scale)}>
+                        { format!("{:.0}%", v.scale * 100.0) }
+                    </button>
                     <button class="tool icon" title="Zoom in (Ctrl+=)"
                         onclick={zoom_by.reform(|_: MouseEvent| 1.25)}>{ icons::zoom_in() }</button>
                     <button class="tool icon" title="Fit to view (Space)"
@@ -4314,7 +4334,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         let menu = menu.clone();
                         Callback::from(move |e: MouseEvent| { e.prevent_default(); menu.set(None) })
                     }}>
-                        <div class="context-menu" style={menu_place(x, y, MENU.iter().filter(|&&a| enabled(a)).count() + 1)}>
+                        <div class="context-menu" style={menu_place(x, y, menu_items)}>
                             // On empty canvas: the quick insert, where the
                             // menu opened.
                             if *selection == Selection::Nothing {
@@ -4340,7 +4360,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                     <span>{ "Add block here…" }</span><span class="shortcut">{ "Double-click" }</span>
                                 </button>
                             }
-                            { for MENU.iter().filter(|&&a| enabled(a)).map(|&a| action_button(a, true, &act, true)) }
+                            { for MENU.iter().filter(|&&a| enabled(a) && !matches!(a, Action::Arrange(_)))
+                                .map(|&a| action_button(a, true, &act, true)) }
+                            // Lining up, spacing and sizing, folded under
+                            // one item as Simulink's Arrange menu.
+                            if !arrange.is_empty() {
+                                <button class="menu-item" aria-expanded={arranging.to_string()} onclick={{
+                                    let arranging = arranging.clone();
+                                    Callback::from(move |e: MouseEvent| {
+                                        // Kept open: the click is not a choice.
+                                        e.stop_propagation();
+                                        arranging.set(!*arranging);
+                                    })
+                                }}>
+                                    <span>{ "Arrange" }</span>
+                                    <span class="shortcut">{ if *arranging { "▾" } else { "▸" } }</span>
+                                </button>
+                                if *arranging {
+                                    <div class="submenu">
+                                        { for arrange.iter().map(|&a| action_button(a, true, &act, true)) }
+                                    </div>
+                                }
+                            }
                         </div>
                     </div>
                 }
