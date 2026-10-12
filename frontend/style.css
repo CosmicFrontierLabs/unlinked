@@ -1008,13 +1008,24 @@ button.active {
     overflow: visible;
 }
 
-.overlay line.wire-preview,
+.overlay polyline.wire-preview,
 .overlay polyline.route-preview,
 .overlay rect.resize-outline {
     stroke: var(--orange);
     stroke-width: 1.5;
     stroke-dasharray: 4 3;
     fill: none;
+}
+
+.overlay polyline.wire-preview.snapped {
+    stroke: var(--green);
+    stroke-dasharray: none;
+}
+
+.overlay circle.snap-ring {
+    fill: rgba(158, 206, 106, 0.25);
+    stroke: var(--green);
+    stroke-width: 1.5;
 }
 
 .overlay rect.select-box {
