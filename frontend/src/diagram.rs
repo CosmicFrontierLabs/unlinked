@@ -4067,6 +4067,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if let Some(line) = selected_line {
                     <LineInspector line={Rc::new(line.clone())} system={system_ref.clone()}
                         blocks={level_blocks.clone()}
+                        on_select={{
+                            let (selection, reveal) = (selection.clone(), reveal.clone());
+                            let container = container.clone();
+                            Callback::from(move |id: BlockId| {
+                                reveal.emit(id.0.clone());
+                                selection.set(Selection::Blocks(vec![id.0]));
+                                // Back on the canvas, where keys act on it.
+                                if let Some(el) = container.cast::<HtmlElement>() {
+                                    let _ = el.focus();
+                                }
+                            })
+                        }}
                         on_edit={on_edit.clone()}
                         recorded={results.as_ref().zip(run.clone()).zip(line.src.as_ref()).and_then(|((r, run), src)| {
                             let indices = run.signal_indices(&props.model, &path, src);
@@ -4590,6 +4602,8 @@ struct LineInspectorProps {
     /// What the shown run recorded for the line's signal.
     #[prop_or_default]
     recorded: Option<Rc<Recorded>>,
+    /// Selects a block at one of the line's ends.
+    on_select: Callback<BlockId>,
 }
 
 /// A line's signal as the shown run recorded it.
@@ -4737,6 +4751,16 @@ fn line_inspector(props: &LineInspectorProps) -> Html {
             ep.port.index
         )
     };
+    // An end, which selects its block when clicked, to follow the line.
+    let end_link = |ep: &Endpoint| {
+        let (on_select, id) = (props.on_select.clone(), ep.block.clone());
+        html! {
+            <button type="button" class="line-end" title="Select this block"
+                onclick={Callback::from(move |_: MouseEvent| on_select.emit(id.clone()))}>
+                { describe(ep) }
+            </button>
+        }
+    };
     let mut ends = Vec::new();
     let mut pending = vec![(line.dst.as_ref(), &line.branches)];
     while let Some((dst, branches)) = pending.pop() {
@@ -4773,8 +4797,11 @@ fn line_inspector(props: &LineInspectorProps) -> Html {
             <h3>{ "Line" }</h3>
             <table>
                 <tr><th>{ "Signal name" }</th><td>{ name_field }</td></tr>
-                <tr><th>{ "From" }</th><td>{ line.src.as_ref().map(describe).unwrap_or_else(|| "(none)".into()) }</td></tr>
-                { for ends.iter().map(|ep| html! { <tr><th>{ "To" }</th><td>{ describe(ep) }</td></tr> }) }
+                <tr><th>{ "From" }</th><td>{ match &line.src {
+                    Some(src) => end_link(src),
+                    None => html! { "(none)" },
+                } }</td></tr>
+                { for ends.iter().map(|ep| html! { <tr><th>{ "To" }</th><td>{ end_link(ep) }</td></tr> }) }
             </table>
             if let Some(r) = &props.recorded {
                 <section class="recorded">
