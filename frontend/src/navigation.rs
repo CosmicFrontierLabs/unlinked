@@ -118,7 +118,13 @@ pub fn use_navigation_guard(message: Option<String>) {
                     history_state.unwrap_or(wasm_bindgen::JsValue::NULL),
                 ))
             });
-            click
+            let unload = EventListener::new_with_options(
+                &window,
+                "beforeunload",
+                EventListenerOptions::enable_prevent_default(),
+                |event| event.prevent_default(),
+            );
+            (click, unload)
         });
         move || {
             LEAVE_GUARD.with(|guard| *guard.borrow_mut() = None);

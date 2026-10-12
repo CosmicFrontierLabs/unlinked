@@ -618,8 +618,17 @@ enum Content {
     /// The imported model and the exact version it was read from (the
     /// base edits are saved against).
     Model(Rc<unlinked_model::Model>, Base),
-    Text(String),
-    Binary,
+    Text(String, Uuid, i32),
+    Binary(Uuid, i32),
+}
+
+impl Content {
+    fn version(&self) -> (Uuid, i32) {
+        match self {
+            Self::Model(_, base) => (base.version_id, base.version),
+            Self::Text(_, id, number) | Self::Binary(id, number) => (*id, *number),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -723,8 +732,8 @@ pub fn file_page(props: &FileProps) -> Html {
                 }
             } else {
                 match String::from_utf8(bytes) {
-                    Ok(s) => Content::Text(s),
-                    Err(_) => Content::Binary,
+                    Ok(s) => Content::Text(s, version_id, version),
+                    Err(_) => Content::Binary(version_id, version),
                 }
             })
         },
@@ -794,7 +803,7 @@ pub fn file_page(props: &FileProps) -> Html {
     let matlab_file =
         matches!(&*file, Fetch::Ready(f) if f.path.to_ascii_lowercase().ends_with(".m"));
     let selected_version = match &*content {
-        Fetch::Ready(Content::Model(_, base)) => Some(base.version_id),
+        Fetch::Ready(content) => Some(content.version().0),
         _ => version_id,
     };
     let version_list = move |vs: &Vec<FileVersionInfo>| -> Html {
@@ -831,20 +840,11 @@ pub fn file_page(props: &FileProps) -> Html {
     };
 
     let shown_version = match &*content {
-        Fetch::Ready(Content::Model(_, base)) => Some(base.version),
-        Fetch::Ready(_) => match &*versions {
-            Fetch::Ready(vs) => if let Some(id) = version_id {
-                vs.iter().find(|v| v.id == id)
-            } else {
-                vs.first()
-            }
-            .map(|v| v.version),
-            _ => None,
-        },
+        Fetch::Ready(content) => Some(content.version().1),
         _ => None,
     };
     let loaded_version_id = match &*content {
-        Fetch::Ready(Content::Model(_, base)) => Some(base.version_id),
+        Fetch::Ready(content) => Some(content.version().0),
         _ => version_id,
     };
     let newer_available = match (&*file, shown_version) {
@@ -908,7 +908,7 @@ pub fn file_page(props: &FileProps) -> Html {
                 </section>
             </>
         },
-        Content::Text(t) if matlab_file => html! {
+        Content::Text(t, _, _) if matlab_file => html! {
             <>
                 <div class="tabs">
                     { tab_button(Tab::Diagram, "Source") }
@@ -921,8 +921,8 @@ pub fn file_page(props: &FileProps) -> Html {
                 }
             </>
         },
-        Content::Text(t) => html! { <pre class="source">{ t }</pre> },
-        Content::Binary => html! { <p class="muted">{ "Binary file; use Download." }</p> },
+        Content::Text(t, _, _) => html! { <pre class="source">{ t }</pre> },
+        Content::Binary(_, _) => html! { <p class="muted">{ "Binary file; use Download." }</p> },
     });
 
     html! {

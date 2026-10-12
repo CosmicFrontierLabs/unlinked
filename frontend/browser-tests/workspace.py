@@ -98,7 +98,7 @@ with sync_playwright() as p:
     page.get_by_role('button', name='Simulate', exact=True).click()
     expect(diagram).to_be_hidden()
     expect(simulation).to_be_visible()
-    expect(simulation.get_by_role('status')).to_contain_text('unsaved changes')
+    expect(simulation.locator('.workspace-notice')).to_contain_text('unsaved changes')
     page.locator('body').click(position={'x': 8, 'y': 8})
     page.keyboard.press('Control+z')
     page.get_by_role('button', name='Diagram', exact=True).click()
@@ -128,6 +128,31 @@ with sync_playwright() as p:
     assert page.evaluate('window.workspaceCanvas === document.querySelector(".plot-host canvas")')
     page.wait_for_timeout(150)
     assert canvas.screenshot() == plot_before, 'Plot appearance/zoom changed after tab switch'
+    # Text uploads also keep body, badge, and download pinned until opened.
+    metadata.clear()
+    metadata.update(copy.deepcopy(original_info))
+    metadata['path'] = 'review.m'
+    old_id = metadata['latest']['id']
+    old_number = metadata['latest']['version']
+    page.route(resource + '/versions/*/content', lambda route: route.fulfill(
+        status=200, content_type='text/plain',
+        body='a = 1;' if old_id in route.request.url else 'a = 2;'))
+    page.reload()
+    expect(page.locator('pre.source')).to_have_text('a = 1;')
+    metadata['latest']['id'] = str(uuid.uuid4())
+    metadata['latest']['version'] = old_number + 1
+    page.locator('.file-bar input[type=file]').set_input_files(
+        {'name': 'review.m', 'mimeType': 'text/plain', 'buffer': b'a = 2;'})
+    expect(page.get_by_role('button', name='Open newer version')).to_be_visible()
+    expect(page.locator('pre.source')).to_have_text('a = 1;')
+    expect(page.locator('.version-badge')).to_have_text(f'v{old_number}')
+    expect(page.get_by_role('link', name='Download', exact=True)).to_have_attribute(
+        'href', f'/api{args.model}/versions/{old_id}/content')
+    page.get_by_role('button', name='Open newer version').click()
+    expect(page.locator('pre.source')).to_have_text('a = 2;')
+    expect(page.locator('.version-badge')).to_have_text(f'v{old_number + 1}')
+    expect(page.get_by_role('link', name='Download', exact=True)).to_have_attribute(
+        'href', f"/api{args.model}/versions/{metadata['latest']['id']}/content")
     assert not errors, errors
     print('PASS: history visibility, edits retained, hidden shortcuts disabled, visible undo restored, results retained; no browser errors')
     browser.close()
