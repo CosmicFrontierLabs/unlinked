@@ -119,7 +119,7 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
         if draft.trim().is_empty() {
             fallback.copied()
         } else {
-            draft.parse::<f64>().ok().filter(|v| v.is_finite())
+            draft.trim().parse::<f64>().ok().filter(|v| v.is_finite())
         }
     };
     let ia = cursor(&a, c.time.first()).and_then(|v| nearest(&c.time, v));
