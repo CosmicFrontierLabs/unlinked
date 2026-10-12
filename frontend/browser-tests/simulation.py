@@ -137,6 +137,8 @@ with sync_playwright() as p:
     query.fill('')
     page.screenshot(path='/tmp/unlinked-inspector-desktop.png')
     page.set_viewport_size({'width': 430, 'height': 932})
+    expect(sim.locator('.signal-list')).to_be_hidden()
+    sim.locator('.mobile-signals-toggle').click()
     expect(query).to_be_visible()
     page.screenshot(path='/tmp/unlinked-inspector-mobile.png')
     page.set_viewport_size({'width': 1440, 'height': 1000})
