@@ -3898,7 +3898,32 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         let menu = menu.clone();
                         Callback::from(move |e: MouseEvent| { e.prevent_default(); menu.set(None) })
                     }}>
-                        <div class="context-menu" style={menu_place(x, y, MENU.iter().filter(|&&a| enabled(a)).count())}>
+                        <div class="context-menu" style={menu_place(x, y, MENU.iter().filter(|&&a| enabled(a)).count() + 1)}>
+                            // On empty canvas: the quick insert, where the
+                            // menu opened.
+                            if *selection == Selection::Nothing {
+                                <button class="menu-item" onclick={{
+                                    let (quick, container, rendered, view) =
+                                        (quick.clone(), container.clone(), rendered.clone(), view.clone());
+                                    Callback::from(move |_: MouseEvent| {
+                                        let el = container.cast::<HtmlElement>();
+                                        let vb = (*rendered).as_ref().ok().and_then(|svg| view_box(svg));
+                                        if let (Some(el), Some([vx, vy, ..])) = (el, vb) {
+                                            let r = el.get_bounding_client_rect();
+                                            let (px, py) = (x as f64 - r.left(), y as f64 - r.top());
+                                            let at = Point::new(
+                                                (px - view.x) / view.scale + vx,
+                                                (py - view.y) / view.scale + vy,
+                                            );
+                                            let px = px.min(r.width() - 330.0).max(0.0);
+                                            let py = py.min(r.height() - 420.0).max(0.0);
+                                            quick.set(Some((px, py, at)));
+                                        }
+                                    })
+                                }}>
+                                    <span>{ "Add block here…" }</span><span class="shortcut">{ "Double-click" }</span>
+                                </button>
+                            }
                             { for MENU.iter().filter(|&&a| enabled(a)).map(|&a| action_button(a, true, &act, true)) }
                         </div>
                     </div>
