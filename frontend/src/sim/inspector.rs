@@ -70,10 +70,20 @@ fn number(v: f64) -> String {
     if !v.is_finite() {
         return "—".into();
     }
-    if v != 0.0 && (v.abs() < 0.0001 || v.abs() >= 1e7) {
-        format!("{v:.5e}")
+    if v == 0.0 {
+        return "0".into();
+    }
+    // Six significant digits keep small magnitudes useful without flooding rows.
+    let exponent = v.abs().log10().floor() as i32;
+    if !(-3..6).contains(&exponent) {
+        return format!("{v:.5e}");
+    }
+    let decimals = (5 - exponent).max(0) as usize;
+    let formatted = format!("{v:.decimals$}");
+    if decimals == 0 {
+        formatted
     } else {
-        format!("{v:.6}")
+        formatted
             .trim_end_matches('0')
             .trim_end_matches('.')
             .to_string()
@@ -106,7 +116,7 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
     };
     let c = props.controller.borrow();
     let cursor = |draft: &str, fallback: Option<&f64>| {
-        if draft.is_empty() {
+        if draft.trim().is_empty() {
             fallback.copied()
         } else {
             draft.parse::<f64>().ok().filter(|v| v.is_finite())
@@ -114,16 +124,18 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
     };
     let ia = cursor(&a, c.time.first()).and_then(|v| nearest(&c.time, v));
     let ib = cursor(&b, c.time.last()).and_then(|v| nearest(&c.time, v));
-    let input =
-        |name: &'static str, draft: &UseStateHandle<String>, default: Option<&f64>, valid: bool| {
-            let state = draft.clone();
-            let oninput = Callback::from(move |e: InputEvent| {
-                state.set(e.target_unchecked_into::<HtmlInputElement>().value())
-            });
-            html! { <label>{ name }<input type="text" inputmode="decimal" aria-label={name}
-            value={(**draft).clone()} placeholder={default.map(|v| number(*v))}
-            aria-invalid={(!valid).to_string()} {oninput} /></label> }
-        };
+    let input = |name: &'static str,
+                 draft: &UseStateHandle<String>,
+                 default: Option<&f64>,
+                 valid: bool| {
+        let state = draft.clone();
+        let oninput = Callback::from(move |e: InputEvent| {
+            state.set(e.target_unchecked_into::<HtmlInputElement>().value())
+        });
+        html! { <label>{ name }<input type="text" inputmode="decimal" aria-label={name}
+        value={(**draft).clone()} placeholder={default.map(|v| number(*v))}
+        aria-invalid={(!valid).to_string()} aria-describedby={(!valid).then_some("measurement-cursor-error")} {oninput} /></label> }
+    };
     let mode = |stats: bool, name: &'static str| {
         let intervals = intervals.clone();
         let onclick = {
@@ -134,10 +146,11 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
     };
     html! {
         <section class="signal-measurements" aria-label="Signal measurements">
-            <button class="measurements-toggle" onclick={toggle} aria-expanded={expanded.to_string()}>
+            <button class="measurements-toggle" onclick={toggle} aria-expanded={expanded.to_string()} aria-controls="measurement-content">
                 { if *expanded { "▾ Measurements" } else { "▸ Measurements" } }
             </button>
             if *expanded {
+                <div id="measurement-content">
                 <div class="measurement-controls">
                     { input("Cursor A (s)", &a, c.time.first(), ia.is_some()) }
                     { input("Cursor B (s)", &b, c.time.last(), ib.is_some()) }
@@ -172,7 +185,8 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
                         </table></div>
                     }
                     if *intervals { <p class="muted measurement-note">{ "Statistics include both endpoint samples, weight each sample equally, and omit nonfinite values." }</p> }
-                } else { <p class="field-error">{ "Enter finite cursor times to inspect recorded samples." }</p> }
+                } else { <p id="measurement-cursor-error" class="field-error" role="alert">{ "Enter finite cursor times to inspect recorded samples." }</p> }
+                </div>
             }
         </section>
     }
@@ -181,6 +195,13 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn measurements_use_significant_digits_without_negative_zero() {
+        assert_eq!(number(-0.0), "0");
+        assert_eq!(number(0.00012345), "1.23450e-4");
+        assert_eq!(number(12345.67), "12345.7");
+        assert_eq!(number(1.5), "1.5");
+    }
     #[test]
     fn nearest_samples_clamp_and_break_ties_to_left() {
         let t = [1.0, 2.0, 5.0];

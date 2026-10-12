@@ -23,7 +23,7 @@ use shared::{
     Solver,
 };
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use unlinked_model::config::solver_descriptor;
 use unlinked_model::SimConfig;
@@ -839,19 +839,55 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         let filter = current_version_only.clone();
         Callback::from(move |_: Event| filter.set(!*filter))
     };
-    let visible_signals: Vec<usize> = {
+    let signal_revision = {
         let c = ctl.borrow();
-        let query = signal_query.trim().to_lowercase();
-        picker_order(&c.signals, &props.outports, *show_generated)
-            .into_iter()
-            .filter(|&i| {
-                c.signals[i].name.to_lowercase().contains(&query)
-                    || c.signals[i].id.to_lowercase().contains(&query)
-            })
-            .collect()
+        (c.generation, c.signals.len())
     };
+    let search_index = {
+        let ctl = ctl.clone();
+        use_memo(signal_revision, move |_| {
+            ctl.borrow()
+                .signals
+                .iter()
+                .map(|s| format!("{} {}", s.name.to_lowercase(), s.id.to_lowercase()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let ordered_signals = {
+        let ctl = ctl.clone();
+        use_memo(
+            (signal_revision, props.outports.clone(), *show_generated),
+            move |(_, outports, generated)| {
+                picker_order(&ctl.borrow().signals, outports, *generated)
+            },
+        )
+    };
+    let matching_signals = use_memo(
+        (
+            signal_query.trim().to_lowercase(),
+            ordered_signals,
+            search_index,
+        ),
+        |(query, order, index)| {
+            if query.is_empty() {
+                return (**order).clone();
+            }
+            order
+                .iter()
+                .copied()
+                .filter(|&i| index[i].contains(query))
+                .collect::<Vec<_>>()
+        },
+    );
+    // Keep large traces usable without constructing thousands of controls.
+    // Bulk actions apply to the rows shown; search exposes any other signal.
+    let visible_signals: Vec<usize> = matching_signals.iter().take(200).copied().collect();
     let select_visible = |selected: bool| {
-        let (ctl, rebind, visible) = (ctl.clone(), rebind.clone(), visible_signals.clone());
+        let (ctl, rebind, visible) = (
+            ctl.clone(),
+            rebind.clone(),
+            visible_signals.iter().copied().collect::<HashSet<_>>(),
+        );
         Callback::from(move |_: MouseEvent| {
             let mut c = ctl.borrow_mut();
             if selected {
@@ -873,6 +909,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     }
     let c = ctl.borrow();
     let samples = c.time.len();
+    let plotted: HashSet<usize> = c.plotted.iter().copied().collect();
     let generated_count = c.signals.iter().filter(|s| is_generated(s)).count();
     let status = match &*state {
         RunState::Idle => html! { <span class="muted">{ "Ready" }</span> },
@@ -1045,13 +1082,14 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         <button onclick={select_visible(true)} disabled={visible_signals.is_empty()}>{ "Select visible" }</button>
                         <button onclick={select_visible(false)} disabled={visible_signals.is_empty()}>{ "Clear visible" }</button>
                     </div>
+                    if matching_signals.len() > visible_signals.len() { <p class="muted signal-count">{ format!("Showing {} of {} matches. Refine search to find more.", visible_signals.len(), matching_signals.len()) }</p> }
                     <div class="signal-options">
                     if visible_signals.is_empty() { <p class="muted">{ if c.signals.is_empty() { "Signals appear after a run starts." } else { "No matching signals." } }</p> }
                     { for visible_signals.iter().copied().map(|i| {
                         let s = &c.signals[i];
                         html! {
                             <label class={classes!("signal", is_generated(s).then_some("generated"))} title={format!("{} ({})", s.name, s.id)}>
-                                <input type="checkbox" checked={c.plotted.contains(&i)} onchange={toggle_signal(i)} />
+                                <input type="checkbox" checked={plotted.contains(&i)} onchange={toggle_signal(i)} />
                                 <span class="signal-swatch" style={format!("background:{}", inspector::color(i))} />
                                 <span class="signal-name">{ label(&s.name) }</span>
                             </label>
@@ -1068,10 +1106,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     <label class="signal toggle"><input type="checkbox" checked={*current_version_only} onchange={toggle_version_filter} />{ format!("Only v{}", props.version) }</label>
                     { view(&runs, |rs: &Vec<SimulationRun>| html! {
                         <ul class="plain runs">
-                            if rs.is_empty() { <li class="muted">{ "No previous runs." }</li> }
+                            if !rs.iter().any(|r| !*current_version_only || r.file_version == props.version) { <li class="muted">{ "No matching previous runs." }</li> }
                             { for rs.iter().filter(|r| !*current_version_only || r.file_version == props.version).map(|r| html! {
                                 <li>
-                                    <button class={classes!("run-history-item", (c.run_id == Some(r.id)).then_some("active"))} disabled={running} onclick={load_run(r.clone())} aria-pressed={(c.run_id == Some(r.id)).to_string()}>
+                                    <button class={classes!("run-history-item", (c.run_id == Some(r.id)).then_some("active"))} disabled={running} onclick={load_run(r.clone())} aria-label={format!("Load v{} {:?} run from {} ({})", r.file_version, r.status, r.created_at.format("%Y-%m-%d %H:%M:%S UTC"), &r.id.to_string()[..8])} aria-pressed={(c.run_id == Some(r.id)).to_string()}>
                                         { format!("v{} · {:?}", r.file_version, r.status) }
                                     </button>
                                     <div class="muted">{ r.created_at.format("%Y-%m-%d %H:%M:%S").to_string() }</div>

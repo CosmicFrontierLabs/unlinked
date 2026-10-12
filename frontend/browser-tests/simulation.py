@@ -146,6 +146,24 @@ with sync_playwright() as p:
     sockets[-1].send(json.dumps(delayed))
     expect(sim.get_by_role('status')).to_contain_text('Stopped')
     expect(run).to_be_enabled()
+    # Large metadata sets stay bounded in the picker but searchable in full.
+    run.click()
+    expect(sim.get_by_role('status')).to_contain_text('Connecting')
+    deadline = time.monotonic() + 5
+    while len(requests) < 4 and time.monotonic() < deadline:
+        page.wait_for_timeout(20)
+    assert len(requests) == 4
+    sockets[-1].send(json.dumps({'type':'SimulationStarted', 'run_id':run_id,
+        'signals':[{'id':str(i), 'name':f'model/signal-{i}:1'} for i in range(5000)]}))
+    expect(sim.locator('.signal-options input')).to_have_count(200)
+    expect(sim.locator('.signal-count')).to_contain_text('200 of 5000')
+    query.fill('signal-4999:1')
+    expect(sim.locator('.signal-options input')).to_have_count(1)
+    sim.get_by_role('button', name='Select visible').click()
+    expect(sim.locator('.signal-options input')).to_be_checked()
+    query.fill('')
+    sim.get_by_role('button', name='■ Stop', exact=True).click()
+    expect(sim.get_by_role('status')).to_contain_text('Stopped')
     assert not errors, errors
     page.screenshot(path='/tmp/unlinked-simulation-controls.png')
     print('PASS: numeric drafts, validation/budget, progress, locked settings, retained active stream, Stop with/without run ID; no jobs created or browser errors')
