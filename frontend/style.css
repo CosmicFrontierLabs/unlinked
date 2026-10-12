@@ -1629,3 +1629,18 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
     .topbar .user-name { max-width: 120px; }
     .topbar .avatar { display: none; }
 }
+/* Parameter help and validation remain usable with keyboard and touch. */
+.dialog-label-row { display: flex; align-items: center; justify-content: space-between; gap: .4rem; }
+.dialog-label-row label { flex: 1; }
+.parameter-help-button { border-radius: 50%; padding: 0; width: 24px; height: 24px; flex: 0 0 24px; font-size: .8rem; color: var(--blue); }
+.parameter-help-button[aria-expanded=true] { border-color: var(--blue); }
+.parameter-help-text { font-size: .8rem; line-height: 1.5; color: #a9b1d6; margin: .25rem 0; }
+.parameter-search { width: 100%; margin-top: .6rem; }
+.dialog-field input[aria-invalid=true], .dialog-field select[aria-invalid=true], .setting input[aria-invalid=true], .setting select[aria-invalid=true] { border-color: var(--red); }
+.settings-panel .setting > label, .settings-panel > .muted, .parameter-dialog .muted { color: #a9b1d6; }
+.setting-inactive input { color: #a9b1d6; }
+.setting small { font-size: .75rem; line-height: 1.4; }
+.settings-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); }
+.settings-grid input, .settings-grid select { min-width: 0; max-width: 100%; }
+
+.settings-panel .setting > label { font-size: .8rem; }
