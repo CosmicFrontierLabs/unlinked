@@ -35,6 +35,9 @@ const REFRESH_MS: f64 = 120.0;
 
 #[derive(Properties, PartialEq)]
 pub struct SimProps {
+    /// Whether the simulation workspace is visible. Streaming survives tab changes.
+    #[prop_or(true)]
+    pub active: bool,
     /// Project holding the model; its `.m` files are offered as init scripts.
     pub project_id: Uuid,
     pub file_id: Uuid,
@@ -484,7 +487,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
 
     {
         let (ctl, plot_host, canvas_id) = (ctl.clone(), plot_host.clone(), canvas_id.clone());
-        use_effect_with(rebind.0, move |_| {
+        use_effect_with((rebind.0, props.active), move |(_, active)| {
+            if !active {
+                return;
+            }
             let width = plot_host
                 .cast::<web_sys::HtmlElement>()
                 .map(|e| e.client_width() as f64)

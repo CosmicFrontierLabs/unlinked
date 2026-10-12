@@ -639,6 +639,16 @@ pub fn file_page(props: &FileProps) -> Html {
     let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
     let tab = use_state(|| Tab::Diagram);
+    let history_open = use_state(|| false);
+    let diagram_dirty = use_state(|| false);
+    let on_dirty_change = {
+        let diagram_dirty = diagram_dirty.clone();
+        Callback::from(move |dirty: bool| diagram_dirty.set(dirty))
+    };
+    let toggle_history = {
+        let history_open = history_open.clone();
+        Callback::from(move |_: MouseEvent| history_open.set(!*history_open))
+    };
     let project = use_fetch(project_id, api::project);
     let file = use_fetch((project_id, file_id, reload.0), move |(p, f, _)| {
         api::file(p, f)
@@ -803,6 +813,7 @@ pub fn file_page(props: &FileProps) -> Html {
         let tab = tab.clone();
         html! {
             <button class={classes!("tab", (*tab == t).then_some("active"))}
+                aria-pressed={(*tab == t).to_string()}
                 onclick={Callback::from(move |_: MouseEvent| tab.set(t))}>{ label }</button>
         }
     };
@@ -811,23 +822,30 @@ pub fn file_page(props: &FileProps) -> Html {
         // fresh navigation state instead of keeping a stale subsystem path.
         Content::Model(m, base) => html! {
             <>
-                <div class="tabs">
+                <div class="tabs" role="group" aria-label="Model workspace">
                     { tab_button(Tab::Diagram, "Diagram") }
                     { tab_button(Tab::Simulate, "Simulate") }
+                    <span class="workspace-caption">{ "Diagram edits and run results stay open when you switch views." }</span>
                 </div>
-                if *tab == Tab::Diagram {
-                    // Keyed by the loaded model so a different version
-                    // remounts with fresh navigation and edit state.
+                // Keep both workspaces mounted. Switching views must not
+                // discard edits, reset navigation, or cancel a simulation.
+                <section class="workspace-pane" hidden={*tab != Tab::Diagram} aria-label="Diagram">
                     <ModelEditor key={format!("{:p}", Rc::as_ptr(m))} {project_id} {file_id}
-                        base={base.clone()} can_edit={editor}
+                        base={base.clone()} can_edit={editor} active={*tab == Tab::Diagram}
+                        on_dirty_change={on_dirty_change.clone()}
                         fit_key={AttrValue::from(format!("{:p}", Rc::as_ptr(m)))}
                         on_saved={on_saved.clone()} />
-                } else if let Some(version) = shown_version {
-                    <SimulationPanel key={version} {project_id} {file_id} {version} config={m.config.clone()}
+                </section>
+                <section class="workspace-pane" hidden={*tab != Tab::Simulate} aria-label="Simulation">
+                    if *diagram_dirty {
+                        <p class="workspace-notice" role="status">{ format!("The diagram has unsaved changes. Simulation uses saved v{}. Save your diagram to include those changes.", base.version) }</p>
+                    }
+                    <SimulationPanel key={format!("{file_id}:{}", base.version)} {project_id} {file_id}
+                        version={base.version} active={*tab == Tab::Simulate} config={m.config.clone()}
                         has_random_sources={m.walk().iter().any(|(_, sys)| sys.blocks.iter().any(|b| matches!(b.block_type.as_str(), "RandomNumber" | "UniformRandomNumber")))}
                         inputs={m.root.blocks.iter().filter(|b| b.block_type == "Inport").map(|b| (b.id.0.clone(), b.name.clone())).collect::<Vec<_>>()}
                         outports={m.root.blocks.iter().filter(|b| b.block_type == "Outport").map(|b| b.name.clone()).collect::<Vec<_>>()} />
-                }
+                </section>
             </>
         },
         Content::Text(t) if matlab_file => html! {
@@ -850,10 +868,23 @@ pub fn file_page(props: &FileProps) -> Html {
     html! {
         <div class="page-fill">
             <div class="subbar file-bar">
-                <Link<Route> to={Route::Project { project_id }}>{ "← Project" }</Link<Route>>
-                { view(&file, |f: &FileInfo| html! { <strong>{ &f.path }</strong> }) }
+                <nav class="file-breadcrumbs" aria-label="File breadcrumb">
+                    <Link<Route> to={Route::Home}>{ "Projects" }</Link<Route>>
+                    <span aria-hidden="true">{ "/" }</span>
+                    <Link<Route> to={Route::Project { project_id }}>
+                        { match &*project { Fetch::Ready(p) => p.name.clone(), _ => "Project".into() } }
+                    </Link<Route>>
+                    <span aria-hidden="true">{ "/" }</span>
+                    { view(&file, |f: &FileInfo| html! { <strong title={f.path.clone()}>{ &f.path }</strong> }) }
+                </nav>
+                if let Some(version) = shown_version {
+                    <span class="version-badge">{ format!("v{version}") }</span>
+                }
                 <span class="spacer" />
                 { error_line(&error) }
+                <button onclick={toggle_history} aria-expanded={history_open.to_string()} aria-controls="file-history">
+                    { if *history_open { "Hide history" } else { "History" } }
+                </button>
                 <a class="button" href={match version_id {
                     Some(v) => format!("/api/projects/{project_id}/files/{file_id}/versions/{v}/content"),
                     None => format!("/api/projects/{project_id}/files/{file_id}/content"),
@@ -868,8 +899,8 @@ pub fn file_page(props: &FileProps) -> Html {
             </div>
             <div class="file-body">
                 <div class="file-main">{ body }</div>
-                <aside class="history">
-                    <h4>{ "History" }</h4>
+                <aside id="file-history" class="history" hidden={!*history_open} aria-label="Version history">
+                    <h4>{ "Version history" }</h4>
                     { view(&versions, version_list) }
                 </aside>
             </div>
