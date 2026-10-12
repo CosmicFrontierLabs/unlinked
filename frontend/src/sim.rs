@@ -320,22 +320,23 @@ pub(crate) fn initial_options(config: &SimConfig) -> (SimulationOptions, Vec<Str
     o.stop = take(
         "Stop",
         config.stop_time.as_ref(),
-        &|v| v > start,
+        &|v| v >= start,
         start + 10.0,
     );
     o.solver = model_solver(config).unwrap_or(Solver::Rk45);
     let span = o.stop - o.start;
+    let default_step = if span == 0.0 { 0.01 } else { span / 1000.0 };
     match o.solver {
         Solver::Euler | Solver::Rk4 => {
             o.step = take(
                 "Output step",
                 config.fixed_step.as_ref(),
                 &|v| v > 0.0,
-                span / 1000.0,
+                default_step,
             );
         }
         Solver::Rk45 => {
-            o.step = span / 1000.0;
+            o.step = default_step;
             o.relative_tolerance = take(
                 "Rel tol",
                 config.raw.get("RelTol"),
@@ -740,6 +741,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             options.set(o);
         })
     };
+    let reset_options = {
+        let (options, config) = (options.clone(), props.config.clone());
+        Callback::from(move |_: MouseEvent| options.set(RunForm::from(initial_options(&config).0)))
+    };
     let set_solver = {
         let options = options.clone();
         Callback::from(move |e: Event| {
@@ -850,7 +855,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         html! {
             <label class={classes!("sim-number", error.is_some().then_some("invalid"))}>
                 <span>{ title }</span>
-                <input type="text" inputmode="decimal" value={value.to_string()} disabled={running}
+                <input type="text" inputmode="decimal" aria-label={title} value={value.to_string()} disabled={running}
                     aria-invalid={error.is_some().to_string()} aria-describedby={error.map(|_| error_id.clone())}
                     oninput={set_num(field)} />
                 if let Some(error) = error { <small id={error_id} class="field-error">{ error }</small> }
@@ -899,7 +904,13 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     </span>
                 </div>
                 <details class="sim-options-details">
-                    <summary>{ "Solver settings & workspace" }</summary>
+                    <summary>{ "Solver settings & workspace" }
+                        if let Some(errors) = errors {
+                            if errors.keys().any(|key| matches!(*key, "start" | "rtol" | "atol")) {
+                                <span class="field-error">{ " · settings need attention" }</span>
+                            }
+                        }
+                    </summary>
                     <div class="sim-advanced-options">
                         { number_field("start", "Start time (s)", &o.start, |o| &mut o.start) }
                         if o.solver == Solver::Rk45 {
@@ -908,11 +919,11 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         }
                         <label title="Runs the pinned version of a project .m script to initialize numeric workspace variables.">{ "Initialization script" }{ init_picker }</label>
                         <label class="grow">{ "Workspace overrides" }
-                            <textarea rows="3" value={(*workspace).clone()} oninput={set_workspace} disabled={running} placeholder="K = 2
-    w = 2*pi*5" />
+                            <textarea rows="3" value={(*workspace).clone()} oninput={set_workspace} disabled={running} placeholder={"K = 2\nw = 2*pi*5"} />
                             <small>{ "One NAME = expression per line. Overrides take precedence over the script." }</small>
                         </label>
                     </div>
+                    <button class="reset-run-settings" onclick={reset_options} disabled={running}>{ "Reset solver settings" }</button>
                 </details>
                 if !props.inputs.is_empty() {
                     <fieldset class="sim-inputs">
