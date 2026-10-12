@@ -21,6 +21,7 @@ use auth::{Login, Session, SessionProvider, UserMenu};
 use local_viewer::LocalViewer;
 use pages::{ComparePage, Dashboard, FilePage, OrgPage, ProjectPage};
 use uuid::Uuid;
+use wasm_bindgen::JsCast;
 use yew::prelude::*;
 use yew_router::prelude::*;
 
@@ -96,19 +97,62 @@ pub fn app() -> Html {
     html! {
         <SessionProvider>
             <BrowserRouter>
-                <header class="topbar">
-                    <Link<Route> to={Route::Home} classes="brand">{ "Unlinked" }</Link<Route>>
-                    <nav>
-                        <Link<Route> to={Route::LocalView}>{ "Open local model" }</Link<Route>>
-                        <Link<Route> to={Route::Transpile}>{ "MATLAB to Rust" }</Link<Route>>
-                    </nav>
-                    <UserMenu />
-                </header>
-                <main>
+                <AppHeader />
+                <main id="main-content" tabindex="-1">
                     <Switch<Route> render={switch} />
                 </main>
             </BrowserRouter>
         </SessionProvider>
+    }
+}
+
+/// Navigation stays readable on narrow screens and identifies the active area.
+#[function_component(AppHeader)]
+fn app_header() -> Html {
+    let route = use_route::<Route>();
+    let projects = matches!(
+        route,
+        Some(
+            Route::Home
+                | Route::Org { .. }
+                | Route::Project { .. }
+                | Route::File { .. }
+                | Route::FileVersion { .. }
+                | Route::Compare { .. }
+        )
+    );
+    let navigator = use_navigator().expect("router navigator");
+    let link = |to: Route, text: &'static str, current: bool| {
+        let href = to.to_path();
+        let navigator = navigator.clone();
+        let onclick = Callback::from(move |e: MouseEvent| {
+            if e.button() == 0 && !e.ctrl_key() && !e.meta_key() && !e.shift_key() && !e.alt_key() {
+                e.prevent_default();
+                navigator.push(&to);
+            }
+        });
+        html! { <a {href} {onclick} class={classes!(current.then_some("current"))} aria-current={current.then_some("page")}>{text}</a> }
+    };
+    let skip = Callback::from(|e: MouseEvent| {
+        e.prevent_default();
+        if let Some(main) = gloo_utils::document()
+            .get_element_by_id("main-content")
+            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = main.focus();
+        }
+    });
+    html! {
+        <header class="topbar">
+            <a class="skip-link" href="#main-content" onclick={skip}>{ "Skip to content" }</a>
+            <Link<Route> to={Route::Home} classes="brand">{ "Unlinked" }</Link<Route>>
+            <nav aria-label="Main navigation">
+                {link(Route::Home, "Projects", projects)}
+                {link(Route::LocalView, "Open local model", route == Some(Route::LocalView))}
+                {link(Route::Transpile, "MATLAB to Rust", route == Some(Route::Transpile))}
+            </nav>
+            <UserMenu />
+        </header>
     }
 }
 

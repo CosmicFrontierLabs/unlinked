@@ -49,6 +49,8 @@ pub fn session_provider(props: &ProviderProps) -> Html {
 #[function_component(UserMenu)]
 pub fn user_menu() -> Html {
     let session = use_context::<Session>().expect("session context");
+    let signing_out = use_state(|| false);
+    let error = use_state(|| None::<String>);
     let Some(user) = session.user() else {
         return if session.loaded() {
             html! { <a href="/login">{ "Sign in" }</a> }
@@ -56,19 +58,37 @@ pub fn user_menu() -> Html {
             html! {}
         };
     };
-    let logout = Callback::from(|_: MouseEvent| {
-        spawn_local(async {
-            let _ = api::logout().await;
-            let _ = gloo_utils::window().location().set_href("/");
-        });
-    });
+    let logout = {
+        let (signing_out, error) = (signing_out.clone(), error.clone());
+        Callback::from(move |_: MouseEvent| {
+            if *signing_out || !crate::navigation::confirm_leave() {
+                return;
+            }
+            signing_out.set(true);
+            error.set(None);
+            let (signing_out, error) = (signing_out.clone(), error.clone());
+            spawn_local(async move {
+                match api::logout().await {
+                    Ok(()) => {
+                        crate::navigation::allow_confirmed_leave();
+                        let _ = gloo_utils::window().location().set_href("/");
+                    }
+                    Err(e) => {
+                        signing_out.set(false);
+                        error.set(Some(e.to_string()));
+                    }
+                }
+            });
+        })
+    };
     html! {
         <div class="user">
             if let Some(url) = &user.avatar_url {
                 <img class="avatar" src={url.clone()} alt="" />
             }
-            <span>{ user.name.clone().unwrap_or_else(|| user.email.clone()) }</span>
-            <button onclick={logout}>{ "Sign out" }</button>
+            <span class="user-name" title={user.email.clone()}>{ user.name.clone().unwrap_or_else(|| user.email.clone()) }</span>
+            <button onclick={logout} disabled={*signing_out}>{ if *signing_out { "Signing out…" } else { "Sign out" } }</button>
+            if let Some(error) = &*error { <span class="logout-error" role="alert">{error}</span> }
         </div>
     }
 }
