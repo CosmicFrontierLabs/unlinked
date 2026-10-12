@@ -4069,9 +4069,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         blocks={level_blocks.clone()}
                         on_select={{
                             let (selection, reveal) = (selection.clone(), reveal.clone());
+                            let container = container.clone();
                             Callback::from(move |id: BlockId| {
                                 reveal.emit(id.0.clone());
                                 selection.set(Selection::Blocks(vec![id.0]));
+                                // Back on the canvas, where keys act on it.
+                                if let Some(el) = container.cast::<HtmlElement>() {
+                                    let _ = el.focus();
+                                }
                             })
                         }}
                         on_edit={on_edit.clone()}
