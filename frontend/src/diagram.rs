@@ -4348,7 +4348,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     if let (Some((src, (left, top), before)), Some(on_edit)) = ((*naming).clone(), on_edit.clone()) {
                         <input class="rename-in-place" ref={name_field.clone()} value={before.clone()}
                             aria-label="Signal name" placeholder="Signal name"
-                            style={format!("left: {left}px; top: {top}px; width: 160px;")}
+                            // Kept inside the canvas as it is now, so focusing the
+                            // field never scrolls the canvas to show it.
+                            style={format!("left: min({left}px, calc(100% - 172px)); top: min({top}px, calc(100% - 34px)); width: 160px;")}
                             onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
                             ondblclick={Callback::from(|e: MouseEvent| e.stop_propagation())}
                             onkeydown={{
