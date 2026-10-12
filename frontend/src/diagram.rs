@@ -3153,6 +3153,27 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             },
         )
     };
+    // What a selected Scope shows from the shown run, found again only for
+    // another model, level, block or set of recorded signals.
+    let scope_shows = {
+        let (model, run) = (props.model.clone(), run.clone());
+        use_memo(
+            (
+                Rc::as_ptr(&props.model) as usize,
+                (*path).clone(),
+                selected_block
+                    .filter(|b| b.block_type == "Scope")
+                    .map(|b| b.id.clone()),
+                run.as_ref().map(|r| Rc::as_ptr(&r.signals) as usize),
+            ),
+            move |(_, path, id, _)| {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                let (sys, id, run) = (model.system_at(&refs)?, id.as_ref()?, run.as_ref()?);
+                let ids = scope_signals(&model, path, sys, id, run);
+                (!ids.is_empty()).then_some(ids)
+            },
+        )
+    };
     // A line selected by the input it drives or the source of its trunk;
     // ends shared by several lines (in imported models) select none.
     let selected_line = system.and_then(|s| match &*selection {
@@ -4051,11 +4072,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
                 if let Some(b) = (*inspected).clone() {
                     <Inspector block={b.clone()} chart={selected_chart.map(|c| Rc::new(c.clone()))}
-                        on_open_scope={(b.block_type == "Scope").then(|| {
-                            let (r, run, sys) = (results.as_ref()?, run.as_ref()?, system?);
-                            let ids = scope_signals(&props.model, &path, sys, &b.id, run);
-                            (!ids.is_empty()).then(|| r.on_show_signals.reform(move |()| ids.clone()))
-                        }).flatten()}
+                        on_open_scope={results.as_ref().zip((*scope_shows).clone()).map(|(r, ids)| {
+                            r.on_show_signals.reform(move |()| ids.clone())
+                        })}
                         system={system_ref.clone()} lines={level_lines.clone()}
                         model={props.model.clone()} problems={Rc::new(block_problems)}
                         on_edit={on_edit.clone()} on_open={Callback::from({
