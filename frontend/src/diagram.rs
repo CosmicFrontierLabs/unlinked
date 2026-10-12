@@ -1712,10 +1712,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 .filter(|b| selection.blocks().contains(&b.id.0))
                 .collect();
             match action {
-                // Copy, then delete what was copied.
+                // Copy, then delete what was copied; only blocks that can
+                // be pasted back are cut, and then nothing else changes.
                 Action::Cut => {
                     let ids: Vec<BlockId> =
                         selection.blocks().iter().cloned().map(BlockId).collect();
+                    if let Err(e) =
+                        unlinked_model::clipboard::paste(&model, &system_ref, &ids, 0, &model)
+                    {
+                        if let Some(on_error) = &on_error {
+                            on_error.emit(format!("Cannot cut: {e}"));
+                        }
+                        return;
+                    }
                     if let Some(group) = confirm_delete(&model, &system_ref, &ids, &lines) {
                         *clipboard.borrow_mut() = Some(Clipboard {
                             model: model.clone(),
