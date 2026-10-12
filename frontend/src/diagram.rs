@@ -1379,10 +1379,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 let r = container
                     .cast::<HtmlElement>()
                     .map(|el| el.get_bounding_client_rect());
-                hover.set(
-                    over.zip(r)
-                        .map(|(id, r)| (id, cx - r.left() + 14.0, cy - r.top() + 18.0)),
-                );
+                // Below right of the pointer, kept inside the canvas at
+                // roughly the card's largest size.
+                hover.set(over.zip(r).map(|(id, r)| {
+                    let x = (cx - r.left() + 14.0).min(r.width() - 300.0).max(0.0);
+                    let y = (cy - r.top() + 18.0).min(r.height() - 130.0).max(0.0);
+                    (id, x, y)
+                }));
             }
             match drag.borrow_mut().as_mut() {
                 Some(Drag::Resize {
@@ -2736,7 +2739,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         <div class="viewer">
             <div class="toolbar">
                 <button class={classes!("tool", "icon", (*side).then_some("active"))}
-                    title="Model browser and library"
+                    title="Model browser and library" aria-expanded={side.to_string()}
                     onclick={{
                         let side = side.clone();
                         Callback::from(move |_: MouseEvent| side.set(!*side))
@@ -2817,10 +2820,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop} {oncontextmenu}>
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
-                    if let Some(b) = hover.as_ref().and_then(|(id, x, y)| {
-                        Some((system?.block(&BlockId(id.clone()))?, *x, *y))
-                    }) {
-                        <HoverCard block={Rc::new(b.0.clone())} x={b.1} y={b.2} />
+                    if let Some((id, x, y)) = &*hover {
+                        <HoverCard model={props.model.clone()} path={(*path).clone()}
+                            id={BlockId(id.clone())} x={*x} y={*y} />
                     }
                     // Over the canvas, as Simulink's address bar.
                     <nav class="crumbs" onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
@@ -2922,7 +2924,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
 
 #[derive(Properties, PartialEq)]
 struct HoverCardProps {
-    block: Rc<Block>,
+    /// The model, and the block shown by the system it is in and its ID:
+    /// looked up rather than copied, as a subsystem holds its contents.
+    model: Rc<Model>,
+    path: Vec<String>,
+    id: BlockId,
     /// Position inside the diagram container, in pixels.
     x: f64,
     y: f64,
@@ -2933,7 +2939,14 @@ struct HoverCardProps {
 #[function_component(HoverCard)]
 fn hover_card(props: &HoverCardProps) -> Html {
     const SHOWN: usize = 4;
-    let b = &props.block;
+    let refs: Vec<&str> = props.path.iter().map(String::as_str).collect();
+    let Some(b) = props
+        .model
+        .system_at(&refs)
+        .and_then(|s| s.block(&props.id))
+    else {
+        return html! {};
+    };
     let descriptor = catalog::find(&b.block_type).filter(|_| b.mask.is_none());
     let parameters: Vec<(String, String)> = match descriptor {
         Some(d) => d
