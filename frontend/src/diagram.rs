@@ -9,7 +9,7 @@ use crate::dialog::ParameterDialog;
 use crate::find::{FindBlocks, Found};
 use crate::icons;
 use crate::palette::{
-    recent_blocks, remember_block, BlockPalette, Pick, QuickInsert, PALETTE_DRAG,
+    has_port, recent_blocks, remember_block, BlockPalette, Pick, QuickInsert, PALETTE_DRAG,
 };
 use crate::results::{ResultsContext, ShownRun};
 use gloo_events::{EventListener, EventListenerOptions};
@@ -1494,8 +1494,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // Whether the find box is open.
     let finding = use_state(|| false);
     // The open quick insert: where it shows in the container, in pixels,
-    // and the diagram point it adds at.
-    let quick = use_state(|| None::<(f64, f64, Point)>);
+    // the diagram point it adds at, and the dangling end of a dropped
+    // connection the added block is wired to.
+    let quick = use_state(|| None::<(f64, f64, Point, Option<Endpoint>)>);
     // Blocks added lately, offered first by the library and quick insert.
     let recent = use_state(|| Rc::new(recent_blocks()));
     // A block being renamed in place: where its name shows in the
@@ -2349,6 +2350,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let (selection, view) = (selection.clone(), view.clone());
         let (model, on_error) = (props.model.clone(), props.on_error.clone());
         let (drag_lines, guides) = (drag_lines.clone(), guides.clone());
+        let (quick, container) = (quick.clone(), container.clone());
         let blocks: Vec<(String, Rect)> = system
             .map(|s| {
                 s.blocks
@@ -2377,10 +2379,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 // Dropped on a port of the opposite direction: connect,
                 // whichever end the drag started from.
                 Some(Drag::Wire { from, target }) => {
+                    let dropped = *wire_preview;
                     wire_preview.set(None);
                     let to = target.or_else(|| {
                         closest(e.target(), "circle.port-hit").and_then(|c| endpoint_of(&c, ""))
                     });
+                    // Released over empty canvas, as in Simulink: the quick
+                    // insert offers a block to end the connection at.
+                    let empty = closest(
+                        e.target(),
+                        "g.block, [data-annotation], polyline, circle, rect.resize-handle",
+                    )
+                    .is_none();
+                    let rect = container
+                        .cast::<HtmlElement>()
+                        .map(|el| el.get_bounding_client_rect());
+                    if let (None, true, "mouseup", Some((_, end, false)), Some(r)) =
+                        (&to, empty, e.type_().as_str(), dropped, rect)
+                    {
+                        let x = (e.client_x() as f64 - r.left()).min(r.width() - 330.0);
+                        let y = (e.client_y() as f64 - r.top()).min(r.height() - 420.0);
+                        quick.set(Some((x.max(0.0), y.max(0.0), end, Some(from.clone()))));
+                    }
                     let pair = match to {
                         Some(to) if is_source(from.port.kind) && !is_source(to.port.kind) => {
                             Some((from, to))
@@ -3097,22 +3117,67 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.model.clone(),
         );
         let (on_edit, system_ref, recent) = (on_edit.clone(), system_ref.clone(), recent.clone());
+        let on_edits = props.on_edit.clone();
         let annotation_count = system.map_or(0, |s| s.annotations.len());
-        Callback::from(move |(pick, at): (Pick, Point)| {
-            let Some(on_edit) = &on_edit else {
+        Callback::from(move |(pick, at, wire): (Pick, Point, Option<Endpoint>)| {
+            let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
                 return;
             };
             match pick {
                 Pick::Block(type_key) => {
-                    if let Some(edit) = add_block_at(&model, &system_ref, type_key, at) {
-                        if let Edit::AddBlock { id, .. } = &edit {
+                    // Wired to a dropped connection's end, the block sits
+                    // beside it: after a source, before a destination.
+                    let w = catalog::find(type_key).map_or(0.0, |d| d.default_size[0]);
+                    let centre = match &wire {
+                        Some(end) if is_source(end.port.kind) => Point::new(at.x + w / 2.0, at.y),
+                        Some(_) => Point::new(at.x - w / 2.0, at.y),
+                        None => at,
+                    };
+                    let Some(edit) = add_block_at(&model, &system_ref, type_key, centre) else {
+                        return;
+                    };
+                    let Edit::AddBlock { id, .. } = &edit else {
+                        return;
+                    };
+                    match wire {
+                        // To its first input or from its first output; the
+                        // quick insert offers only blocks that have it.
+                        Some(end) => {
+                            let kind = if is_source(end.port.kind) {
+                                PortKind::In
+                            } else {
+                                PortKind::Out
+                            };
+                            if !has_port(type_key, kind) {
+                                return;
+                            }
+                            let new = Endpoint {
+                                block: id.clone(),
+                                port: PortRef { kind, index: 1 },
+                            };
+                            let (src, dst) = if kind == PortKind::In {
+                                (end, new)
+                            } else {
+                                (new, end)
+                            };
                             *select_created.borrow_mut() = Some(id.clone());
+                            on_edits.emit(vec![
+                                edit,
+                                Edit::Connect {
+                                    system: system_ref.clone(),
+                                    src,
+                                    dst,
+                                },
+                            ]);
                         }
-                        on_edit.emit(edit);
-                        recent.set(Rc::new(remember_block(type_key)));
+                        None => {
+                            *select_created.borrow_mut() = Some(id.clone());
+                            on_edit.emit(edit);
+                        }
                     }
+                    recent.set(Rc::new(remember_block(type_key)));
                 }
-                Pick::Annotation => {
+                Pick::Annotation if wire.is_none() => {
                     let Some(sid) = unlinked_model::edit::next_sid(&model) else {
                         return;
                     };
@@ -3134,6 +3199,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     };
                     selection.set(Selection::Annotation(annotation_count, added));
                 }
+                Pick::Annotation => {}
             }
         })
     };
@@ -3165,7 +3231,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     // Kept inside the canvas, at roughly its largest size.
                     let x = (e.client_x() as f64 - r.left()).min(r.width() - 330.0);
                     let y = (e.client_y() as f64 - r.top()).min(r.height() - 420.0);
-                    quick.set(Some((x.max(0.0), y.max(0.0), at)));
+                    quick.set(Some((x.max(0.0), y.max(0.0), at, None)));
                 }
                 return;
             }
@@ -3993,7 +4059,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                             (el.client_width() as f64 / 2.0 - view.x) / view.scale + vx,
                                             (el.client_height() as f64 / 2.0 - view.y) / view.scale + vy,
                                         );
-                                        add_at.emit((Pick::Block(type_key), at));
+                                        add_at.emit((Pick::Block(type_key), at, None));
                                     }
                                 })
                             }} />
@@ -4142,13 +4208,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                 })
                             }} />
                     }
-                    if let Some((x, y, at)) = *quick {
+                    if let Some((x, y, at, wire)) = (*quick).clone() {
                         <QuickInsert {x} {y} recent={(*recent).clone()}
+                            needs={wire.as_ref().map(|end| if is_source(end.port.kind) { PortKind::In } else { PortKind::Out })}
                             on_pick={{
                                 let (add_at, quick, container) = (add_at.clone(), quick.clone(), container.clone());
                                 Callback::from(move |pick: Pick| {
                                     quick.set(None);
-                                    add_at.emit((pick, at));
+                                    add_at.emit((pick, at, wire.clone()));
                                     if let Some(el) = container.cast::<HtmlElement>() {
                                         let _ = el.focus();
                                     }
@@ -4235,7 +4302,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                             );
                                             let px = px.min(r.width() - 330.0).max(0.0);
                                             let py = py.min(r.height() - 420.0).max(0.0);
-                                            quick.set(Some((px, py, at)));
+                                            quick.set(Some((px, py, at, None)));
                                         }
                                     })
                                 }}>

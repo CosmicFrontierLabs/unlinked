@@ -5,9 +5,9 @@ use crate::diagram::{pref, set_pref};
 use crate::icons;
 use std::collections::HashMap;
 use std::rc::Rc;
-use unlinked_model::catalog::{self, BlockDescriptor};
+use unlinked_model::catalog::{self, BlockDescriptor, PortResolution};
 use unlinked_model::edit::Edit;
-use unlinked_model::{BlockId, Model, Rect, SourceFormat};
+use unlinked_model::{BlockId, Model, PortKind, Rect, SourceFormat};
 use unlinked_render::{render_system_svg, RenderOptions, Theme};
 use web_sys::{DragEvent, HtmlInputElement, KeyboardEvent};
 use yew::prelude::*;
@@ -222,21 +222,44 @@ pub struct QuickInsertProps {
     pub on_close: Callback<()>,
     /// Blocks added recently, offered first before anything is typed.
     pub recent: Rc<Vec<&'static str>>,
+    /// Ending a dropped connection: the kind of port a pick must have.
+    #[prop_or_default]
+    pub needs: Option<PortKind>,
 }
 
 /// What the quick insert offers for `query`: the best matching blocks, then
 /// an annotation when nothing is typed yet or the query names one.
-fn quick_picks(query: &str, recent: &[&'static str]) -> Vec<Pick> {
+/// Whether a new block of type `type_key`, with its default parameters,
+/// has a port of `kind` (numbered 1).
+pub(crate) fn has_port(type_key: &str, kind: PortKind) -> bool {
+    let Some(descriptor) = catalog::find(type_key) else {
+        return false;
+    };
+    match descriptor.resolve_ports(&descriptor.creation_parameters()) {
+        PortResolution::Known(counts) => match kind {
+            PortKind::In => counts.inputs > 0,
+            PortKind::Out => counts.outputs > 0,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// What the quick insert offers for `query`; ending a dropped connection,
+/// only blocks with a port of kind `needs`.
+fn quick_picks(query: &str, recent: &[&'static str], needs: Option<PortKind>) -> Vec<Pick> {
     let q = query.trim().to_lowercase();
-    let annotation = ["annotation", "text", "note", "comment"]
-        .iter()
-        .any(|word| word.starts_with(&q));
+    let annotation = needs.is_none()
+        && ["annotation", "text", "note", "comment"]
+            .iter()
+            .any(|word| word.starts_with(&q));
     // Before anything is typed, the recently used come first.
     let first: &[&'static str] = if q.is_empty() { recent } else { &[] };
     let found = search(query).into_iter().map(|b| b.type_key);
     let mut keys: Vec<&'static str> = first.to_vec();
     keys.extend(found.filter(|k| !first.contains(k)));
     keys.into_iter()
+        .filter(|k| needs.is_none_or(|kind| has_port(k, kind)))
         .take(MAX_MATCHES)
         .map(Pick::Block)
         .chain(annotation.then_some(Pick::Annotation))
@@ -260,7 +283,7 @@ pub fn quick_insert(props: &QuickInsertProps) -> Html {
             }
         });
     }
-    let picks = quick_picks(&query, &props.recent);
+    let picks = quick_picks(&query, &props.recent, props.needs);
     let current = (*chosen).min(picks.len().saturating_sub(1));
     // Keep the chosen row in view as the arrows move through a long list.
     {
@@ -383,23 +406,40 @@ mod tests {
 
     #[test]
     fn annotation_is_offered_only_when_asked_for() {
-        assert_eq!(quick_picks("", &[]).last(), Some(&Pick::Annotation));
-        assert_eq!(quick_picks("ann", &[]), vec![Pick::Annotation]);
-        assert!(quick_picks("text", &[]).contains(&Pick::Annotation));
-        assert!(!quick_picks("gain", &[]).contains(&Pick::Annotation));
-        assert!(quick_picks("zzzz", &[]).is_empty());
+        assert_eq!(quick_picks("", &[], None).last(), Some(&Pick::Annotation));
+        assert_eq!(quick_picks("ann", &[], None), vec![Pick::Annotation]);
+        assert!(quick_picks("text", &[], None).contains(&Pick::Annotation));
+        assert!(!quick_picks("gain", &[], None).contains(&Pick::Annotation));
+        assert!(quick_picks("zzzz", &[], None).is_empty());
+    }
+
+    #[test]
+    fn ending_a_connection_offers_only_blocks_that_can_end_it() {
+        // After an output: blocks with an input, and no annotation.
+        let after = quick_picks("", &["Constant", "Scope"], Some(PortKind::In));
+        assert!(after.contains(&Pick::Block("Scope")));
+        assert!(!after.contains(&Pick::Block("Constant")));
+        assert!(!after.contains(&Pick::Annotation));
+        // Before an input: blocks with an output.
+        let before = quick_picks("", &["Constant", "Scope"], Some(PortKind::Out));
+        assert!(before.contains(&Pick::Block("Constant")));
+        assert!(!before.contains(&Pick::Block("Scope")));
+        assert!(quick_picks("ann", &[], Some(PortKind::Out)).is_empty());
     }
 
     #[test]
     fn recent_blocks_come_first_until_something_is_typed() {
         let recent = ["Saturate", "Gain"];
-        let picks = quick_picks("", &recent);
+        let picks = quick_picks("", &recent, None);
         assert_eq!(&picks[..2], &[Pick::Block("Saturate"), Pick::Block("Gain")]);
         assert_eq!(
             picks.iter().filter(|p| **p == Pick::Block("Gain")).count(),
             1
         );
-        assert_ne!(quick_picks("con", &recent)[0], Pick::Block("Saturate"));
+        assert_ne!(
+            quick_picks("con", &recent, None)[0],
+            Pick::Block("Saturate")
+        );
     }
 
     #[test]
