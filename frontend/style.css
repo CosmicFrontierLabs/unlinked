@@ -1232,6 +1232,29 @@ button.tool.run-button.running {
     stroke: #ffffff;
 }
 
+.overlay .display-values rect {
+    fill: var(--bg);
+}
+
+.overlay .display-values text {
+    fill: #9ece6a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.diagram.light .overlay .display-values rect {
+    fill: #ffffff;
+}
+
+.diagram.light .overlay .display-values text {
+    fill: #2d6a00;
+}
+
+.overlay .display-values.stale text,
+.diagram.light .overlay :is(.display-values, .port-values).stale text {
+    fill: var(--muted);
+    font-style: italic;
+}
+
 .overlay .port-values.stale text {
     fill: var(--muted);
     font-style: italic;
