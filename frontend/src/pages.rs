@@ -653,12 +653,12 @@ pub fn file_page(props: &FileProps) -> Html {
     let history_open = use_state(|| false);
     let simulation_running = use_state(|| false);
     let shown_run = use_state(|| None::<Rc<crate::results::ShownRun>>);
-    let requested_signal = use_state(|| None::<(u64, String)>);
+    let requested_signals = use_state(|| None::<crate::results::PlotRequest>);
     let on_result = {
-        let (shown_run, requested_signal) = (shown_run.clone(), requested_signal.clone());
+        let (shown_run, requested_signals) = (shown_run.clone(), requested_signals.clone());
         Callback::from(move |run: Option<Rc<crate::results::ShownRun>>| {
             if run.is_none() {
-                requested_signal.set(None);
+                requested_signals.set(None);
             }
             shown_run.set(run);
         })
@@ -680,16 +680,29 @@ pub fn file_page(props: &FileProps) -> Html {
         let controls = simulation_controls.clone();
         use_callback((), move |next, _| controls.set(next))
     };
-    let on_plot = {
-        let (requested_signal, tab) = (requested_signal.clone(), tab.clone());
-        Callback::from(move |id: String| {
-            let serial = requested_signal
-                .as_ref()
-                .map_or(0, |(serial, _)| serial.wrapping_add(1));
-            requested_signal.set(Some((serial, id)));
+    let plot_serial = use_mut_ref(|| 0_u64);
+    let request_plot = {
+        let (requested, tab, serial) =
+            (requested_signals.clone(), tab.clone(), plot_serial.clone());
+        Callback::from(move |(ids, replace): (Vec<String>, bool)| {
+            if ids.is_empty() {
+                return;
+            }
+            let next = {
+                let mut serial = serial.borrow_mut();
+                *serial = serial.wrapping_add(1);
+                *serial
+            };
+            requested.set(Some(crate::results::PlotRequest {
+                serial: next,
+                ids,
+                replace,
+            }));
             tab.set(Tab::Simulate);
         })
     };
+    let on_plot = request_plot.reform(|id: String| (vec![id], false));
+    let on_show_signals = request_plot.reform(|ids: Vec<String>| (ids, true));
     let on_running_change = {
         let simulation_running = simulation_running.clone();
         Callback::from(move |running: bool| simulation_running.set(running))
@@ -714,11 +727,11 @@ pub fn file_page(props: &FileProps) -> Html {
     // only after a save or an explicit version switch.
     let content_reload = use_reload();
     {
-        let (diagram_dirty, simulation_running, shown_run, requested_signal) = (
+        let (diagram_dirty, simulation_running, shown_run, requested_signals) = (
             diagram_dirty.clone(),
             simulation_running.clone(),
             shown_run.clone(),
-            requested_signal.clone(),
+            requested_signals.clone(),
         );
         use_effect_with(
             (project_id, file_id, version_id, content_reload.0),
@@ -726,7 +739,7 @@ pub fn file_page(props: &FileProps) -> Html {
                 diagram_dirty.set(false);
                 simulation_running.set(false);
                 shown_run.set(None);
-                requested_signal.set(None);
+                requested_signals.set(None);
             },
         );
     }
@@ -924,7 +937,7 @@ pub fn file_page(props: &FileProps) -> Html {
         // fresh navigation state instead of keeping a stale subsystem path.
         Content::Model(m, base) => html! {
             <ContextProvider<crate::results::ResultsContext> context={crate::results::ResultsContext {
-                run: (*shown_run).clone(), shown_version: base.version, dirty: *diagram_dirty, on_plot: on_plot.clone(),
+                run: (*shown_run).clone(), shown_version: base.version, dirty: *diagram_dirty, on_plot: on_plot.clone(), on_show_signals: on_show_signals.clone(),
                 on_run: if *diagram_dirty { None } else { simulation_controls.on_run.clone() },
                 on_stop: simulation_controls.on_stop.clone(), running: simulation_controls.running,
                 run_error: simulation_controls.error.clone(),
@@ -950,7 +963,7 @@ pub fn file_page(props: &FileProps) -> Html {
                     }
                     <SimulationPanel key={format!("{file_id}:{}", base.version)} {project_id} {file_id}
                         on_running_change={on_running_change.clone()} on_controls={on_controls.clone()}
-                        on_result={on_result.clone()} on_cursor={on_cursor.clone()} requested_signal={(*requested_signal).clone()}
+                        on_result={on_result.clone()} on_cursor={on_cursor.clone()} requested_signals={(*requested_signals).clone()}
                         version={base.version} active={*tab == Tab::Simulate} config={m.config.clone()}
                         has_random_sources={m.walk().iter().any(|(_, sys)| sys.blocks.iter().any(|b| matches!(b.block_type.as_str(), "RandomNumber" | "UniformRandomNumber")))}
                         inputs={m.root.blocks.iter().filter(|b| b.block_type == "Inport").map(|b| (b.id.0.clone(), b.name.clone())).collect::<Vec<_>>()}

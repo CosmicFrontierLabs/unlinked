@@ -56,7 +56,7 @@ pub struct SimProps {
     #[prop_or_default]
     pub on_cursor: Callback<usize>,
     #[prop_or_default]
-    pub requested_signal: Option<(u64, String)>,
+    pub requested_signals: Option<crate::results::PlotRequest>,
     /// Project holding the model; its `.m` files are offered as init scripts.
     pub project_id: Uuid,
     pub file_id: Uuid,
@@ -182,6 +182,24 @@ impl RunState {
             RunState::Connecting | RunState::Running(_) | RunState::Stopping
         )
     }
+}
+
+fn requested_indices(
+    signals: &[SimulationSignal],
+    request: &crate::results::PlotRequest,
+) -> Vec<usize> {
+    let index: std::collections::HashMap<&str, usize> = signals
+        .iter()
+        .enumerate()
+        .map(|(i, signal)| (signal.id.as_str(), i))
+        .collect();
+    let mut seen = HashSet::new();
+    request
+        .ids
+        .iter()
+        .filter_map(|id| index.get(id.as_str()).copied())
+        .filter(|i| seen.insert(*i))
+        .collect()
 }
 
 /// Mutable state shared between the component and its async tasks.
@@ -1097,14 +1115,25 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     {
         let (ctl, rebind) = (ctl.clone(), rebind.clone());
         use_effect_with(
-            (props.requested_signal.clone(), signal_revision),
+            (props.requested_signals.clone(), signal_revision),
             move |(requested, _)| {
-                if let Some((_, id)) = requested {
+                if let Some(request) = requested {
                     let mut c = ctl.borrow_mut();
-                    if let Some(i) = c.signals.iter().position(|s| s.id == *id) {
-                        if !c.plotted.contains(&i) {
-                            c.plotted.push(i);
-                            c.plotted.sort_unstable();
+                    let chosen = requested_indices(&c.signals, request);
+                    if !chosen.is_empty() {
+                        let next = if request.replace {
+                            chosen
+                        } else {
+                            let mut next = c.plotted.clone();
+                            for i in chosen {
+                                if !next.contains(&i) {
+                                    next.push(i);
+                                }
+                            }
+                            next
+                        };
+                        if next != c.plotted {
+                            c.plotted = next;
                             drop(c);
                             rebind.dispatch(());
                         }
@@ -1434,6 +1463,19 @@ pub fn simulation_panel(props: &SimProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_requests_preserve_port_order_and_ignore_missing_duplicates() {
+        let request = crate::results::PlotRequest {
+            serial: 1,
+            ids: vec!["2".into(), "missing".into(), "1".into(), "2".into()],
+            replace: true,
+        };
+        assert_eq!(
+            requested_indices(&[sig("1", "a"), sig("2", "b")], &request),
+            vec![1, 0]
+        );
+    }
 
     #[test]
     fn csv_uses_compact_round_trip_numbers_and_quotes_names() {
