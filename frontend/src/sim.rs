@@ -10,6 +10,7 @@ mod comparison;
 mod export;
 mod form;
 mod inspector;
+mod setup;
 use comparison::ReferenceTrace;
 use form::RunForm;
 use inspector::Measurements;
@@ -224,6 +225,7 @@ struct Controller {
     task: Option<AbortHandle>,
     last_refresh: f64,
     requested_options: Option<SimulationOptions>,
+    recorded_request: Option<SimulationRequest>,
     /// Independent of the current run; retained when starting/loading another.
     reference: Option<ReferenceTrace>,
     reference_generation: u64,
@@ -249,6 +251,7 @@ impl Controller {
         self.stopping = false;
         self.in_flight = false;
         self.requested_options = None;
+        self.recorded_request = None;
         self.last_refresh = 0.0;
         self.generation
     }
@@ -710,6 +713,65 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     );
     // Selected init script as (file, pinned version number).
     let init_script = use_state(|| None::<(Uuid, i32)>);
+    let setup_notice = use_state(|| None::<String>);
+    {
+        let notice = setup_notice.clone();
+        use_effect_with(ctl.borrow().generation, move |_| notice.set(None));
+    }
+    let reuse_setup = {
+        let (ctl, state, options, workspace, inputs, init_script, notice) = (
+            ctl.clone(),
+            state.clone(),
+            options.clone(),
+            workspace.clone(),
+            inputs.clone(),
+            init_script.clone(),
+            setup_notice.clone(),
+        );
+        let ports = props.inputs.clone();
+        let scripts = scripts.clone();
+        let version = props.version;
+        Callback::from(move |_: MouseEvent| {
+            if state.active() || matches!(&*state, RunState::Loading) {
+                return;
+            }
+            let Some(request) = ctl.borrow().recorded_request.clone() else {
+                return;
+            };
+            match setup::workspace_text(&request.workspace) {
+                Ok(text) => {
+                    if request
+                        .init_script
+                        .as_ref()
+                        .is_some_and(|s| s.version.is_none())
+                    {
+                        notice.set(Some("This recorded script has no pinned version. Choose a script version before reusing its setup.".into()));
+                        return;
+                    }
+                    if let Some(script) = &request.init_script {
+                        match &*scripts {
+                            Fetch::Ready(files) if files.iter().any(|f| f.id == script.file_id) => {
+                            }
+                            Fetch::Ready(_) => {
+                                notice.set(Some("The recorded initialization script is no longer available in this project. The form was not changed.".into()));
+                                return;
+                            }
+                            _ => {
+                                notice.set(Some("Wait for initialization scripts to load before reusing this setup.".into()));
+                                return;
+                            }
+                        }
+                    }
+                    options.set(RunForm::from(request.options));
+                    workspace.set(text);
+                    inputs.set(setup::reuse_inputs(&inputs, &request.inputs, &ports));
+                    init_script.set(request.init_script.map(|s| (s.file_id, s.version.unwrap())));
+                    notice.set(Some(format!("Recorded setup copied into the run form. Review it, then Run to simulate saved v{version}. Output and internal-step limits use this app’s defaults.")));
+                }
+                Err(error) => notice.set(Some(error)),
+            }
+        })
+    };
     let canvas_id = format!("sim-plot-{}", props.file_id);
 
     let last_plot = use_mut_ref(|| None::<(u32, u32)>);
@@ -830,6 +892,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             ctl.borrow_mut().in_flight = true;
             ctl.borrow_mut().run_version = Some(version);
             ctl.borrow_mut().requested_options = Some(request.options.clone());
+            ctl.borrow_mut().recorded_request = Some(request.clone());
             rebind.dispatch(());
             state.set(RunState::Connecting);
             let (mut tx, rx) = conn.split();
@@ -944,6 +1007,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         Ok(result) => {
                             ctl.borrow_mut().requested_options =
                                 Some(result.run.request.options.clone());
+                            ctl.borrow_mut().recorded_request = Some(result.run.request.clone());
                             ctl.borrow_mut().run_id = Some(result.run.id);
                             ctl.borrow_mut().run_version = Some(result.run.file_version);
                             if let Some(trace) = result.trace {
@@ -994,26 +1058,42 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         })
     };
     let set_init = {
-        let (init_script, scripts) = (init_script.clone(), scripts.clone());
+        let init_script = init_script.clone();
         Callback::from(move |e: Event| {
-            let id = e.target_unchecked_into::<HtmlSelectElement>().value();
-            let chosen = match &*scripts {
-                Fetch::Ready(files) => files
-                    .iter()
-                    .find(|f| f.id.to_string() == id)
-                    .map(|f| (f.id, f.latest.version)),
-                _ => None,
-            };
+            let value = e.target_unchecked_into::<HtmlSelectElement>().value();
+            let chosen = value.split_once('@').and_then(|(id, version)| {
+                Some((Uuid::parse_str(id).ok()?, version.parse::<i32>().ok()?))
+            });
             init_script.set(chosen);
         })
     };
     let init_picker = view(&scripts, |files: &Vec<FileInfo>| {
-        let selected = init_script.map(|(id, _)| id);
+        let pinned = *init_script;
+        let recorded = ctl
+            .borrow()
+            .recorded_request
+            .as_ref()
+            .and_then(|r| r.init_script.as_ref())
+            .and_then(|s| Some((s.file_id, s.version?)));
+        let old_versions: Vec<_> = [pinned, recorded]
+            .into_iter()
+            .flatten()
+            .filter(|(id, version)| {
+                files
+                    .iter()
+                    .any(|f| f.id == *id && f.latest.version != *version)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         html! {
             <select onchange={set_init.clone()} disabled={state.active()}>
-                <option value="" selected={selected.is_none()}>{ "none" }</option>
+                <option value="" selected={pinned.is_none()}>{ "none" }</option>
+                {for old_versions.into_iter().map(|(id, version)| html! {
+                    <option value={format!("{id}@{version}")} selected={pinned == Some((id, version))}>{format!("{} (recorded v{version})", files.iter().find(|f| f.id == id).map(|f| f.path.clone()).unwrap_or_default())}</option>
+                })}
                 { for files.iter().map(|f| html! {
-                    <option value={f.id.to_string()} selected={selected == Some(f.id)}>
+                    <option value={format!("{}@{}",f.id,f.latest.version)} selected={pinned == Some((f.id, f.latest.version))}>
                         { format!("{} (v{})", f.path, f.latest.version) }
                     </option>
                 }) }
@@ -1380,6 +1460,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     </fieldset>
                 }
             </div>
+            if let Some(notice) = &*setup_notice { <p class="setup-notice" role="status">{notice}</p> }
             if !differences.is_empty() || props.has_random_sources {
                 <details class="sim-assumptions">
                     <summary>{ "Model compatibility & run defaults" }</summary>
@@ -1406,6 +1487,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                             if version != props.version { <span>{ format!("Viewing an earlier model version; Run uses v{}.", props.version) }</span> }
                             if let Some(id) = c.run_id { <span title={id.to_string()}>{ format!("Run {}", &id.to_string()[..8]) }</span> }
                         </div>
+                    }
+                    if let Some(request) = &c.recorded_request {
+                        {setup::view(request, c.run_version, &props.inputs, match &*scripts { Fetch::Ready(files) => request.init_script.as_ref().and_then(|script| files.iter().find(|file| file.id == script.file_id)).map(|file| file.path.as_str()), _ => None }, running || matches!(&*state, RunState::Loading), reuse_setup)}
                     }
                 if let Some(reference) = &c.reference {
                     <section class="comparison-banner" aria-label="Run comparison">

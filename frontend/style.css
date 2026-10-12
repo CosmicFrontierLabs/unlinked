@@ -1644,3 +1644,13 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .settings-grid input, .settings-grid select { min-width: 0; max-width: 100%; }
 
 .settings-panel .setting > label { font-size: .8rem; }
+/* Recorded run setup stays distinct from the editable simulation form. */
+.recorded-setup { margin: .7rem .75rem; padding: .65rem .75rem; border: 1px solid var(--border); border-radius: 6px; font-size: .85rem; }
+.recorded-setup summary { cursor: pointer; color: var(--blue); }
+.recorded-setup p { color: #a9b1d6; line-height: 1.5; }
+.recorded-setup pre { max-height: 220px; overflow: auto; padding: .6rem; background: var(--bg); }
+.recorded-setup h5 { margin-bottom: .5rem; }
+.setup-options { display: grid; grid-template-columns: minmax(100px, max-content) minmax(0, 1fr); gap: .45rem 1rem; }
+.setup-options dt { color: #a9b1d6; }
+.setup-options dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.setup-notice { margin: 0; padding: .6rem 1rem; background: var(--bg-alt); color: var(--teal); font-size: .85rem; }

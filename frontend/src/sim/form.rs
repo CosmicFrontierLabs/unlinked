@@ -15,14 +15,19 @@ pub struct RunForm {
 
 pub type Errors = BTreeMap<&'static str, String>;
 
+fn draft_number(value: f64) -> String {
+    let text = format!("{value:?}");
+    text.strip_suffix(".0").unwrap_or(&text).to_owned()
+}
+
 impl From<SimulationOptions> for RunForm {
     fn from(o: SimulationOptions) -> Self {
         Self {
-            start: o.start.to_string(),
-            stop: o.stop.to_string(),
-            step: o.step.to_string(),
-            relative_tolerance: o.relative_tolerance.to_string(),
-            absolute_tolerance: o.absolute_tolerance.to_string(),
+            start: draft_number(o.start),
+            stop: draft_number(o.stop),
+            step: draft_number(o.step),
+            relative_tolerance: draft_number(o.relative_tolerance),
+            absolute_tolerance: draft_number(o.absolute_tolerance),
             solver: o.solver,
         }
     }
@@ -88,6 +93,13 @@ impl RunForm {
 mod tests {
     use super::*;
 
+    #[test]
+    fn restored_small_numbers_stay_compact_and_exact() {
+        assert_eq!(draft_number(8.0), "8");
+        let text = draft_number(1e-300);
+        assert!(text.len() < 20);
+        assert_eq!(text.parse::<f64>().unwrap(), 1e-300);
+    }
     #[test]
     fn invalid_drafts_never_reuse_previous_numbers() {
         let mut form = RunForm::from(SimulationOptions::default());
