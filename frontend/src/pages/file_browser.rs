@@ -117,6 +117,8 @@ fn entries<'a>(
                 .then(a.path.cmp(&b.path))
         }),
     }
+    let mut folders: Vec<_> = folders.into_iter().collect();
+    folders.sort_by_cached_key(|(name, _)| name.to_lowercase());
     folders
         .into_iter()
         .map(|(name, count)| Entry::Folder {
@@ -142,6 +144,13 @@ pub(super) fn file_browser(props: &BrowserProps) -> Html {
     let kind = use_state(|| Kind::All);
     let sort = use_state(|| Sort::Name);
     let page = use_state(|| 0usize);
+    {
+        let (query, page) = (query.clone(), page.clone());
+        use_effect_with(props.folder.clone(), move |_| {
+            query.set(String::new());
+            page.set(0);
+        });
+    }
     let navigate = |path: String| {
         let (on_folder, query, page) = (props.on_folder.clone(), query.clone(), page.clone());
         Callback::from(move |_: MouseEvent| {
@@ -229,7 +238,7 @@ pub(super) fn file_browser(props: &BrowserProps) -> Html {
                         }
                     }) }</tbody>
                 </table></div>
-                <div class="file-browser-footer"><span>{format!("{}–{} of {} entries",current*PAGE_SIZE+1,((current+1)*PAGE_SIZE).min(rows.len()),rows.len())}</span>
+                <div class="file-browser-footer"><span role="status" aria-live="polite">{format!("{}–{} of {} entries",current*PAGE_SIZE+1,((current+1)*PAGE_SIZE).min(rows.len()),rows.len())}</span>
                 if pages > 1 {
                     <button disabled={current==0} onclick={{let page=page.clone();Callback::from(move |_| page.set(current.saturating_sub(1)))}}>{"Previous"}</button>
                     <span>{format!("Page {} of {pages}",current+1)}</span>

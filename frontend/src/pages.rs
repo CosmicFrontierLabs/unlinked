@@ -383,6 +383,12 @@ pub struct ProjectProps {
     pub project_id: Uuid,
 }
 
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct FolderQuery {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    folder: String,
+}
+
 #[function_component(ProjectPage)]
 pub fn project_page(props: &ProjectProps) -> Html {
     let id = props.project_id;
@@ -398,7 +404,16 @@ pub fn project_page(props: &ProjectProps) -> Html {
     let editor = role.is_some_and(|r| r >= ProjectRole::Editor);
     let owner = role == Some(ProjectRole::Owner);
 
-    let folder = use_state(String::new);
+    let location = use_location().expect("router location");
+    let navigator = use_navigator().expect("router navigator");
+    let browsed_folder = location.query::<FolderQuery>().unwrap_or_default().folder;
+    // Browsing chooses the upload destination, but typing a new destination
+    // does not move the browser into a folder that does not exist yet.
+    let folder = use_state(|| browsed_folder.clone());
+    {
+        let folder = folder.clone();
+        use_effect_with(browsed_folder.clone(), move |path| folder.set(path.clone()));
+    }
     let message = use_state(String::new);
     let uploading = use_state(|| false);
     let on_upload = {
@@ -461,8 +476,17 @@ pub fn project_page(props: &ProjectProps) -> Html {
         })
     };
     let browse_folder = {
-        let folder = folder.clone();
-        Callback::from(move |path| folder.set(path))
+        let error = error.clone();
+        Callback::from(move |folder: String| {
+            if let Err(e) = navigator
+                .push_with_query(&Route::Project { project_id: id }, &FolderQuery { folder })
+            {
+                error.set(Some(ApiError {
+                    status: 0,
+                    message: format!("Cannot open folder: {e}"),
+                }));
+            }
+        })
     };
 
     let email = use_state(String::new);
@@ -561,7 +585,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
                     </label>
                 </div>
             }
-            { view(&files, |files: &Vec<FileInfo>| html! { <FileBrowser files={files.clone()} folder={(*folder).clone()} on_folder={browse_folder.clone()} can_delete={editor} on_delete={delete_file.clone()} /> }) }
+            { view(&files, |files: &Vec<FileInfo>| html! { <FileBrowser files={files.clone()} folder={browsed_folder.clone()} on_folder={browse_folder.clone()} can_delete={editor} on_delete={delete_file.clone()} /> }) }
             <h2>{ "Members" }</h2>
             <p class="muted">{ "Explicit project members. Organization members also get the project's default access." }</p>
             { view(&members, member_rows) }
