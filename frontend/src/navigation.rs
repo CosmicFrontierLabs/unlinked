@@ -8,6 +8,22 @@ thread_local! {
     static LEAVE_GUARD: RefCell<Option<(String, String, wasm_bindgen::JsValue)>> = const { RefCell::new(None) };
 }
 
+/// Confirm before an imperative action (such as signing out) ends the workspace.
+pub fn confirm_leave() -> bool {
+    LEAVE_GUARD.with(|guard| {
+        guard.borrow().as_ref().is_none_or(|(message, _, _)| {
+            gloo_utils::window()
+                .confirm_with_message(message)
+                .unwrap_or(false)
+        })
+    })
+}
+
+/// Called after a confirmed action succeeds, immediately before leaving.
+pub fn allow_confirmed_leave() {
+    LEAVE_GUARD.with(|guard| *guard.borrow_mut() = None);
+}
+
 /// Install before the router's history listener. Window-targeted popstate
 /// listeners run in registration order, so a component-mounted listener is
 /// too late to protect the old route from unmounting.
@@ -122,7 +138,11 @@ pub fn use_navigation_guard(message: Option<String>) {
                 &window,
                 "beforeunload",
                 EventListenerOptions::enable_prevent_default(),
-                |event| event.prevent_default(),
+                |event| {
+                    if LEAVE_GUARD.with(|guard| guard.borrow().is_some()) {
+                        event.prevent_default();
+                    }
+                },
             );
             (click, unload)
         });

@@ -96,19 +96,41 @@ pub fn app() -> Html {
     html! {
         <SessionProvider>
             <BrowserRouter>
-                <header class="topbar">
-                    <Link<Route> to={Route::Home} classes="brand">{ "Unlinked" }</Link<Route>>
-                    <nav>
-                        <Link<Route> to={Route::LocalView}>{ "Open local model" }</Link<Route>>
-                        <Link<Route> to={Route::Transpile}>{ "MATLAB to Rust" }</Link<Route>>
-                    </nav>
-                    <UserMenu />
-                </header>
-                <main>
+                <AppHeader />
+                <main id="main-content" tabindex="-1">
                     <Switch<Route> render={switch} />
                 </main>
             </BrowserRouter>
         </SessionProvider>
+    }
+}
+
+/// Navigation stays readable on narrow screens and identifies the active area.
+#[function_component(AppHeader)]
+fn app_header() -> Html {
+    let route = use_route::<Route>();
+    let projects = matches!(
+        route,
+        Some(
+            Route::Home
+                | Route::Org { .. }
+                | Route::Project { .. }
+                | Route::File { .. }
+                | Route::FileVersion { .. }
+                | Route::Compare { .. }
+        )
+    );
+    html! {
+        <header class="topbar">
+            <a class="skip-link" href="#main-content">{ "Skip to content" }</a>
+            <Link<Route> to={Route::Home} classes="brand">{ "Unlinked" }</Link<Route>>
+            <nav aria-label="Main navigation">
+                <span class={classes!(projects.then_some("current"))} aria-current={projects.then_some("page")}><Link<Route> to={Route::Home}>{ "Projects" }</Link<Route>></span>
+                <span class={classes!((route == Some(Route::LocalView)).then_some("current"))} aria-current={(route == Some(Route::LocalView)).then_some("page")}><Link<Route> to={Route::LocalView}>{ "Open local model" }</Link<Route>></span>
+                <span class={classes!((route == Some(Route::Transpile)).then_some("current"))} aria-current={(route == Some(Route::Transpile)).then_some("page")}><Link<Route> to={Route::Transpile}>{ "MATLAB to Rust" }</Link<Route>></span>
+            </nav>
+            <UserMenu />
+        </header>
     }
 }
 
