@@ -6,6 +6,9 @@
 //! run) gets a new generation number; tasks drop results for any other
 //! generation, so a stale stream or response can never overwrite newer data.
 
+mod form;
+use form::RunForm;
+
 use crate::api;
 use crate::diagram::fmt_num;
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
@@ -151,14 +154,19 @@ fn picker_order(
 enum RunState {
     Idle,
     Connecting,
+    Loading,
     Running(Option<Uuid>),
+    Stopping,
     Finished(SimulationStatus, Option<String>),
     Error(String),
 }
 
 impl RunState {
     fn active(&self) -> bool {
-        matches!(self, RunState::Connecting | RunState::Running(_))
+        matches!(
+            self,
+            RunState::Connecting | RunState::Running(_) | RunState::Stopping
+        )
     }
 }
 
@@ -178,6 +186,7 @@ struct Controller {
     /// Aborts the live run's socket task, dropping its receiver at once.
     task: Option<AbortHandle>,
     last_refresh: f64,
+    requested_options: Option<SimulationOptions>,
 }
 
 impl Controller {
@@ -194,6 +203,8 @@ impl Controller {
         self.session = None;
         self.sender = None;
         self.run_id = None;
+        self.requested_options = None;
+        self.last_refresh = 0.0;
         self.generation
     }
 
@@ -389,6 +400,7 @@ async fn stream(
     state: UseStateHandle<RunState>,
     rebind: UseReducerHandle<Reload>,
     outports: Vec<String>,
+    progress: UseForceUpdateHandle,
 ) {
     let current = |ctl: &Rc<RefCell<Controller>>| ctl.borrow().generation == generation;
     let mut terminal = false;
@@ -432,6 +444,7 @@ async fn stream(
                 if now - c.last_refresh > REFRESH_MS {
                     c.last_refresh = now;
                     c.refresh_plot();
+                    progress.force_update();
                 }
             }
             Ok(SimulationServerMsg::Error { message }) => {
@@ -459,12 +472,13 @@ async fn stream(
 
 #[function_component(SimulationPanel)]
 pub fn simulation_panel(props: &SimProps) -> Html {
-    let options = use_state(|| initial_options(&props.config).0);
+    let options = use_state(|| RunForm::from(initial_options(&props.config).0));
     let differences = initial_options(&props.config).1;
     let workspace = use_state(String::new);
     let inputs = use_state(BTreeMap::<String, String>::new);
     let state = use_state(|| RunState::Idle);
     let ctl = use_mut_ref(Controller::default);
+    let progress = use_force_update();
     // Bumped whenever the plot must be rebuilt (new data set or selection).
     let rebind = use_reload();
     // Presentation only: generated signals stay in the trace and plot.
@@ -548,7 +562,14 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         let input_ports = props.inputs.clone();
         let inputs = inputs.clone();
         let init_script = init_script.clone();
+        let progress = progress.clone();
         Callback::from(move |_: MouseEvent| {
+            if state.active() {
+                return;
+            }
+            let Ok((validated, _)) = options.validate() else {
+                return;
+            };
             let init_script = *init_script;
             let ws_vars = match parse_workspace(&workspace) {
                 Ok(v) => v,
@@ -567,7 +588,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 return;
             }
             let request = SimulationRequest {
-                options: (*options).clone(),
+                options: validated,
                 workspace: ws_vars,
                 inputs: (*inputs).clone(),
                 version: Some(version),
@@ -584,6 +605,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 }
             };
             let generation = ctl.borrow_mut().reset();
+            ctl.borrow_mut().requested_options = Some(request.options.clone());
             rebind.dispatch(());
             state.set(RunState::Connecting);
             let (mut tx, rx) = conn.split();
@@ -596,6 +618,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             );
             let (abort, registration) = AbortHandle::new_pair();
             ctl.borrow_mut().task = Some(abort);
+            let progress = progress.clone();
             let task = async move {
                 if let Err(e) = tx
                     .send(SimulationClientMsg::Simulate { file_id, request })
@@ -608,7 +631,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     return;
                 }
                 ctl.borrow_mut().sender = Some(tx);
-                stream(ctl, generation, rx, state, rebind, outports).await;
+                stream(ctl, generation, rx, state, rebind, outports, progress).await;
                 reload.dispatch(());
             };
             spawn_local(async move {
@@ -618,26 +641,46 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     };
 
     let cancel = {
-        let (ctl, state) = (ctl.clone(), state.clone());
+        let (ctl, state, rebind, reload) =
+            (ctl.clone(), state.clone(), rebind.clone(), reload.clone());
         Callback::from(move |_: MouseEvent| {
-            let RunState::Running(Some(run_id)) = &*state else {
+            if !state.active() || matches!(&*state, RunState::Stopping) {
+                return;
+            }
+            let run_id = ctl.borrow().run_id;
+            let Some(run_id) = run_id else {
+                // Dropping both socket halves cancels any server worker,
+                // including one whose run ID has not reached us yet.
+                ctl.borrow_mut().reset();
+                state.set(RunState::Finished(SimulationStatus::Cancelled, None));
+                rebind.dispatch(());
+                reload.dispatch(());
                 return;
             };
-            let run_id = *run_id;
-            let ctl = ctl.clone();
+            state.set(RunState::Stopping);
+            let (ctl, state) = (ctl.clone(), state.clone());
             spawn_local(async move {
                 let (tx, generation) = {
                     let mut c = ctl.borrow_mut();
                     (c.sender.take(), c.generation)
                 };
                 if let Some(mut tx) = tx {
-                    let _ = tx
+                    let result = tx
                         .send(SimulationClientMsg::CancelSimulation { run_id })
                         .await;
-                    // Only restore the sender if its run is still current.
                     let mut c = ctl.borrow_mut();
                     if c.generation == generation {
-                        c.sender = Some(tx);
+                        match result {
+                            Ok(()) => c.sender = Some(tx),
+                            Err(e) => {
+                                if let Some(task) = c.task.take() {
+                                    task.abort();
+                                }
+                                state.set(RunState::Error(format!(
+                                    "Could not send Stop: {e}. The connection was closed."
+                                )));
+                            }
+                        }
                     }
                 }
             });
@@ -655,6 +698,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     return;
                 }
                 let generation = ctl.borrow_mut().reset();
+                state.set(RunState::Loading);
                 rebind.dispatch(());
                 let (state, ctl, rebind, outports) =
                     (state.clone(), ctl.clone(), rebind.clone(), outports.clone());
@@ -666,6 +710,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     }
                     match result {
                         Ok(result) => {
+                            ctl.borrow_mut().requested_options =
+                                Some(result.run.request.options.clone());
+                            ctl.borrow_mut().run_id = Some(result.run.id);
                             if let Some(trace) = result.trace {
                                 let (signals, columns) =
                                     stored_columns(trace.signals, &result.signals);
@@ -685,18 +732,12 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         }
     };
 
-    let set_num = |field: fn(&mut SimulationOptions, f64)| {
+    let set_num = |field: fn(&mut RunForm) -> &mut String| {
         let options = options.clone();
         Callback::from(move |e: InputEvent| {
-            if let Ok(v) = e
-                .target_unchecked_into::<HtmlInputElement>()
-                .value()
-                .parse::<f64>()
-            {
-                let mut o = (*options).clone();
-                field(&mut o, v);
-                options.set(o);
-            }
+            let mut o = (*options).clone();
+            *field(&mut o) = e.target_unchecked_into::<HtmlInputElement>().value();
+            options.set(o);
         })
     };
     let set_solver = {
@@ -732,7 +773,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let init_picker = view(&scripts, |files: &Vec<FileInfo>| {
         let selected = init_script.map(|(id, _)| id);
         html! {
-            <select onchange={set_init.clone()}>
+            <select onchange={set_init.clone()} disabled={state.active()}>
                 <option value="" selected={selected.is_none()}>{ "none" }</option>
                 { for files.iter().map(|f| html! {
                     <option value={f.id.to_string()} selected={selected == Some(f.id)}>
@@ -773,7 +814,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let samples = c.time.len();
     let generated_count = c.signals.iter().filter(|s| is_generated(s)).count();
     let status = match &*state {
-        RunState::Idle => html! {},
+        RunState::Idle => html! { <span class="muted">{ "Ready" }</span> },
+        RunState::Loading => html! { <span class="muted">{ "Loading run…" }</span> },
+        RunState::Stopping => html! { <span class="running">{ "Stopping…" }</span> },
         RunState::Connecting => html! { <span class="muted">{ "Connecting…" }</span> },
         RunState::Running(_) => {
             html! { <span class="running">{ format!("Running… {samples} samples") }</span> }
@@ -781,6 +824,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         RunState::Finished(SimulationStatus::Completed, _) => {
             html! { <span class="ok">{ format!("Completed · {samples} samples") }</span> }
         }
+        RunState::Finished(SimulationStatus::Cancelled, _) => html! {
+            <span class="muted">{ format!("Stopped · {samples} samples") }</span>
+        },
         RunState::Finished(s, err) => html! {
             <span class="error">{ format!("{s:?}{}", err.as_ref().map(|e| format!(": {e}")).unwrap_or_default()) }</span>
         },
@@ -793,39 +839,81 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         )
     });
     let o = &*options;
+    let validation = o.validate();
+    let errors = validation.as_ref().err();
+    let number_field = |name: &'static str,
+                        title: &'static str,
+                        value: &str,
+                        field: fn(&mut RunForm) -> &mut String| {
+        let error = errors.and_then(|e| e.get(name));
+        let error_id = format!("sim-{}-{name}-error", props.file_id);
+        html! {
+            <label class={classes!("sim-number", error.is_some().then_some("invalid"))}>
+                <span>{ title }</span>
+                <input type="text" inputmode="decimal" value={value.to_string()} disabled={running}
+                    aria-invalid={error.is_some().to_string()} aria-describedby={error.map(|_| error_id.clone())}
+                    oninput={set_num(field)} />
+                if let Some(error) = error { <small id={error_id} class="field-error">{ error }</small> }
+            </label>
+        }
+    };
+    let progress_value = c.requested_options.as_ref().and_then(|o| {
+        c.time.last().map(|time| {
+            if o.stop == o.start {
+                100.0
+            } else {
+                ((time - o.start) / (o.stop - o.start) * 100.0).clamp(0.0, 100.0)
+            }
+        })
+    });
 
     html! {
         <div class="sim-panel">
-            if props.has_random_sources {
-                <p class="sim-notice">{ "Random sources are reproducible in Unlinked, but use a different random sequence from Simulink." }</p>
-            }
-            if !differences.is_empty() {
-                <div class="sim-notice">
-                    { "These run settings start from other values than the model's; check them, as they are what the run uses:" }
-                    <ul>{ for differences.iter().map(|d| html! { <li>{ d }</li> }) }</ul>
+            <div class="sim-toolbar">
+                <div class="sim-heading"><strong>{ "Simulation" }</strong><span class="version-badge">{ format!("Saved v{}", props.version) }</span></div>
+                <div class="sim-actions">
+                    if running {
+                        <button class="stop-button" onclick={cancel} disabled={matches!(&*state, RunState::Stopping)}>{ "■ Stop" }</button>
+                    } else {
+                        <button class="primary run-button" onclick={run} disabled={validation.is_err()}>{ "▶ Run" }</button>
+                    }
+                    <span class="sim-status" role="status" aria-live="polite">{ status }</span>
+                    if let Some(href) = csv_href {
+                        <a class="button" href={href} download="trace.csv">{ "Export CSV" }</a>
+                    }
                 </div>
-            }
+            </div>
             <div class="sim-form">
-                <label>{ "Start" }<input type="number" step="any" value={o.start.to_string()} oninput={set_num(|o, v| o.start = v)} /></label>
-                <label>{ "Stop" }<input type="number" step="any" value={o.stop.to_string()} oninput={set_num(|o, v| o.stop = v)} /></label>
-                <label title="For discrete blocks, this step must divide each sample period by an integer. Choose a shorter stop time if the server sample limit is exceeded.">{ "Output step" }<input type="number" step="any" value={o.step.to_string()} oninput={set_num(|o, v| o.step = v)} /></label>
-                <label>{ "Solver" }
-                    <select onchange={set_solver}>
-                        { for [Solver::Rk45, Solver::Rk4, Solver::Euler].into_iter().map(|s| html! {
-                            <option value={solver_name(s)} selected={s == o.solver}>{ solver_name(s) }</option>
-                        }) }
-                    </select>
-                </label>
-                if o.solver == Solver::Rk45 {
-                    <label>{ "Rel tol" }<input type="number" step="any" value={o.relative_tolerance.to_string()} oninput={set_num(|o, v| o.relative_tolerance = v)} /></label>
-                    <label>{ "Abs tol" }<input type="number" step="any" value={o.absolute_tolerance.to_string()} oninput={set_num(|o, v| o.absolute_tolerance = v)} /></label>
-                }
-                <label title="A project .m script run before simulating; its numeric variables fill the workspace. The chosen version is pinned.">
-                    { "Init script" }{ init_picker }
-                </label>
-                <label class="grow">{ "Workspace overrides (NAME = EXPR per line)" }
-                    <textarea rows="2" value={(*workspace).clone()} oninput={set_workspace} placeholder="K = 2\nw = 2*pi*5" />
-                </label>
+                <div class="sim-primary-options">
+                    { number_field("stop", "Stop time (s)", &o.stop, |o| &mut o.stop) }
+                    { number_field("step", "Output step (s)", &o.step, |o| &mut o.step) }
+                    <label>{ "Solver" }
+                        <select onchange={set_solver} disabled={running}>
+                            <option value="rk45" selected={o.solver == Solver::Rk45}>{ "RK45 · adaptive" }</option>
+                            <option value="rk4" selected={o.solver == Solver::Rk4}>{ "RK4 · fixed step" }</option>
+                            <option value="euler" selected={o.solver == Solver::Euler}>{ "Euler · fixed step" }</option>
+                        </select>
+                    </label>
+                    <span class="sample-estimate">
+                        { match &validation { Ok((_, n)) => format!("{n} output samples"), Err(_) => "Check run settings".into() } }
+                    </span>
+                </div>
+                <details class="sim-options-details">
+                    <summary>{ "Solver settings & workspace" }</summary>
+                    <div class="sim-advanced-options">
+                        { number_field("start", "Start time (s)", &o.start, |o| &mut o.start) }
+                        if o.solver == Solver::Rk45 {
+                            { number_field("rtol", "Relative tolerance", &o.relative_tolerance, |o| &mut o.relative_tolerance) }
+                            { number_field("atol", "Absolute tolerance", &o.absolute_tolerance, |o| &mut o.absolute_tolerance) }
+                        }
+                        <label title="Runs the pinned version of a project .m script to initialize numeric workspace variables.">{ "Initialization script" }{ init_picker }</label>
+                        <label class="grow">{ "Workspace overrides" }
+                            <textarea rows="3" value={(*workspace).clone()} oninput={set_workspace} disabled={running} placeholder="K = 2
+    w = 2*pi*5" />
+                            <small>{ "One NAME = expression per line. Overrides take precedence over the script." }</small>
+                        </label>
+                    </div>
+                </details>
                 if !props.inputs.is_empty() {
                     <fieldset class="sim-inputs">
                         <legend>{ "Root inputs (constant throughout the run)" }</legend>
@@ -842,21 +930,37 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         }) }
                     </fieldset>
                 }
-                <div class="sim-actions">
-                    if running {
-                        <button onclick={cancel}>{ "Cancel" }</button>
-                    } else {
-                        <button class="primary" onclick={run}>{ format!("Run v{}", props.version) }</button>
-                    }
-                    { status }
-                    if let Some(href) = csv_href {
-                        <a class="button" href={href} download="trace.csv">{ "CSV" }</a>
-                    }
-                </div>
             </div>
+            if !differences.is_empty() || props.has_random_sources {
+                <details class="sim-assumptions">
+                    <summary>{ "Model compatibility & run defaults" }</summary>
+                    if props.has_random_sources {
+                        <p>{ "Random sources are reproducible in Unlinked, but use a different random sequence from Simulink." }</p>
+                    }
+                    if !differences.is_empty() {
+                        <p>{ "Review these defaults: the simulator substituted settings that are missing, invalid, or unsupported in the saved model." }</p>
+                        <ul>{ for differences.iter().map(|d| html! { <li>{ d }</li> }) }</ul>
+                    }
+                </details>
+            }
+            if running || samples > 0 {
+                <div class="sim-progress">
+                    if running { <progress max="100" value={progress_value.map(|v| v.to_string())} aria-label="Simulation progress" /> }
+                    if let Some(time) = c.time.last() { <span>{ format!("t = {} s · {samples} samples", fmt_num(*time)) }</span> }
+                    if running { <span>{ progress_value.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "Preparing model…".into()) }</span> }
+                </div>
+            }
             <div class="sim-body">
                 <div class="plot-host" ref={plot_host}>
-                    <canvas id={canvas_id.clone()} />
+                    <canvas id={canvas_id.clone()} hidden={c.signals.is_empty()} />
+                    if c.signals.is_empty() {
+                        <div class="sim-empty">
+                            <span class="sim-empty-icon" aria-hidden="true">{ "∿" }</span>
+                            <h3>{ if running { "Preparing simulation" } else if matches!(&*state, RunState::Loading) { "Loading results" } else { "Inspect your model’s response" } }</h3>
+                            <p>{ "Run the saved model or open a previous run to plot its signals." }</p>
+                            <p class="muted">{ "Choose signals from the list. Scroll to zoom and drag to pan the plot." }</p>
+                        </div>
+                    }
                 </div>
                 <aside class="signal-list">
                     <h4>{ "Signals" }</h4>

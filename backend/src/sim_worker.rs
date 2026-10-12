@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use unlinked_sim::{Options, Trace};
 
 const MAX_CONCURRENT: usize = 4;
-const MAX_SAMPLES: usize = 25_001;
+use shared::MAX_SIMULATION_SAMPLES as MAX_SAMPLES;
 const MAX_VALUES: usize = 1_000_000;
 const CHUNK_SAMPLES: usize = 128;
 
