@@ -26,8 +26,8 @@ use unlinked_model::{
 use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
 use web_sys::{
-    DragEvent, Element, HtmlElement, HtmlInputElement, HtmlTextAreaElement, KeyboardEvent,
-    MouseEvent, TouchEvent, WheelEvent,
+    DragEvent, Element, FocusEvent, HtmlElement, HtmlInputElement, HtmlTextAreaElement,
+    KeyboardEvent, MouseEvent, TouchEvent, WheelEvent,
 };
 use yew::prelude::*;
 
@@ -618,6 +618,16 @@ fn menu_place(x: i32, y: i32, items: usize) -> String {
         "left: {left}px; top: {top}px; max-height: {}px;",
         (height - top - MARGIN).max(ROW)
     )
+}
+
+/// Where a block's name text shows inside the diagram container, in pixels:
+/// left, top and width, widened a little for typing.
+fn name_box(text: &Element, container: &NodeRef) -> Option<(f64, f64, f64)> {
+    let r = text.get_bounding_client_rect();
+    let c = container.cast::<Element>()?.get_bounding_client_rect();
+    let width = r.width().max(80.0) + 24.0;
+    let left = r.left() - c.left() + r.width() / 2.0 - width / 2.0;
+    Some((left.max(0.0), r.top() - c.top() - 3.0, width))
 }
 
 /// Offer `svg` as a download named `filename`. The object URL is released
@@ -1309,6 +1319,22 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // The open quick insert: where it shows in the container, in pixels,
     // and the diagram point it adds at.
     let quick = use_state(|| None::<(f64, f64, Point)>);
+    // A block being renamed in place: where its name shows in the
+    // container (left, top, width, in pixels) and its name before.
+    let renaming = use_state(|| None::<(BlockId, (f64, f64, f64), String)>);
+    let rename_field = use_node_ref();
+    // Set by Escape, so leaving the field then cancels rather than commits.
+    let rename_cancelled = use_mut_ref(|| false);
+    // Ready to type over once it opens.
+    {
+        let field = rename_field.clone();
+        use_effect_with(renaming.as_ref().map(|(id, ..)| id.clone()), move |open| {
+            if let (Some(_), Some(input)) = (open, field.cast::<HtmlInputElement>()) {
+                let _ = input.focus();
+                input.select();
+            }
+        });
+    }
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -2348,6 +2374,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_created.clone(),
         );
         let (container, refresh) = (container.clone(), refresh.clone());
+        let renaming = renaming.clone();
         Callback::from(move |action: Action| {
             let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
                 return;
@@ -2429,8 +2456,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         }
                     }
                 }
-                // The inspector shows the lone selected block's name.
+                // In place where its name shows, else in the inspector.
                 Action::Rename => {
+                    if let Some(id) = selection.blocks().first() {
+                        let shown = container.cast::<Element>().and_then(|c| {
+                            let selector =
+                                format!("g.block[data-sid=\"{}\"] text.name", css_string(id));
+                            c.query_selector(&selector).ok().flatten()
+                        });
+                        if let Some(at) = shown.and_then(|t| name_box(&t, &container)) {
+                            let name = blocks
+                                .iter()
+                                .find(|b| b.id.0 == *id)
+                                .map(|b| b.name.clone())
+                                .unwrap_or_default();
+                            renaming.set(Some((BlockId(id.clone()), at, name)));
+                            return;
+                        }
+                    }
                     let field = container
                         .cast::<Element>()
                         .and_then(|c| c.parent_element())
@@ -2815,6 +2858,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let model = props.model.clone();
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         let (quick, editable) = (quick.clone(), props.on_edit.is_some());
+        let renaming = renaming.clone();
         Callback::from(move |e: MouseEvent| {
             // While editing, double-clicking empty canvas opens the quick
             // insert there.
@@ -2838,6 +2882,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     quick.set(Some((x.max(0.0), y.max(0.0), at)));
                 }
                 return;
+            }
+            // Double-clicking a block's name edits it in place.
+            if let (true, Some(text)) = (editable, closest(e.target(), "text.name")) {
+                let id = closest(e.target(), "g.block").and_then(|g| g.get_attribute("data-sid"));
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                let name = id.as_ref().and_then(|id| {
+                    Some(
+                        model
+                            .system_at(&refs)?
+                            .block(&BlockId(id.clone()))?
+                            .name
+                            .clone(),
+                    )
+                });
+                if let (Some(id), Some(name), Some(at)) = (id, name, name_box(&text, &container)) {
+                    renaming.set(Some((BlockId(id), at, name)));
+                    return;
+                }
             }
             // Double-clicking a line names its signal, as in Simulink: the
             // first click selected it, so its inspector is showing.
@@ -3520,6 +3582,56 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         ondblclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
                         { for crumbs }
                     </nav>
+                    if let (Some((id, (left, top, width), before)), Some(on_edit)) = ((*renaming).clone(), on_edit.clone()) {
+                        <input class="rename-in-place" ref={rename_field.clone()} value={before.clone()}
+                            aria-label="Block name"
+                            style={format!("left: {left}px; top: {top}px; width: {width}px;")}
+                            onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                            ondblclick={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                            onkeydown={{
+                                let (renaming, container) = (renaming.clone(), container.clone());
+                                let rename_cancelled = rename_cancelled.clone();
+                                Callback::from(move |e: KeyboardEvent| {
+                                    // Keys typed here are not diagram shortcuts.
+                                    e.stop_propagation();
+                                    match e.key().as_str() {
+                                        // Leaving the field commits, as below.
+                                        "Enter" => {
+                                            if let Some(el) = container.cast::<HtmlElement>() {
+                                                let _ = el.focus();
+                                            }
+                                        }
+                                        "Escape" => {
+                                            *rename_cancelled.borrow_mut() = true;
+                                            renaming.set(None);
+                                            if let Some(el) = container.cast::<HtmlElement>() {
+                                                let _ = el.focus();
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                })
+                            }}
+                            onblur={{
+                                let (renaming, system) = (renaming.clone(), system_ref.clone());
+                                let rename_cancelled = rename_cancelled.clone();
+                                Callback::from(move |e: FocusEvent| {
+                                    renaming.set(None);
+                                    // Escape leaves the field to cancel.
+                                    if std::mem::take(&mut *rename_cancelled.borrow_mut()) {
+                                        return;
+                                    }
+                                    let name = e.target_unchecked_into::<HtmlInputElement>().value();
+                                    if name != before && !name.trim().is_empty() {
+                                        on_edit.emit(Edit::RenameBlock {
+                                            system: system.clone(),
+                                            id: id.clone(),
+                                            name,
+                                        });
+                                    }
+                                })
+                            }} />
+                    }
                     if let Some((x, y, at)) = *quick {
                         <QuickInsert {x} {y}
                             on_pick={{

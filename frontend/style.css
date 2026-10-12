@@ -363,6 +363,20 @@ svg.icon {
     color: #1a1b26;
 }
 
+/* A block's name being edited where it shows */
+.diagram input.rename-in-place {
+    position: absolute;
+    z-index: 6;
+    padding: 0.1rem 0.3rem;
+    font-size: 0.85rem;
+    text-align: center;
+    border: 1px solid var(--blue);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
 /* Hover card: what the block under a resting pointer is */
 .hover-card {
     position: absolute;
