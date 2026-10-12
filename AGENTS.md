@@ -133,7 +133,19 @@ Note: memory-serve 2.x requires axum 0.8+. For axum 0.7, use memory-serve 0.6.0 
   level with `use_memo`, shallowly (`subsystem: None`); never clone blocks
   with their subsystems on every render.
 - **Canvas preferences** (theme, side panel, value labels, recent blocks)
-  live in `localStorage` under `unlinked.canvas.*` via `diagram::pref`.
+  live in `localStorage` under `unlinked.canvas.*` via `diagram::pref`;
+  unsaved edits are kept as drafts under `unlinked.draft.<file id>` by
+  the editor, which alone reads and writes them.
+- **The clipboard** is one per session (`diagram::CLIPBOARD`), so blocks
+  paste across files. Views tell their document apart by
+  `DiagramProps::document` (the editor passes its file ID), never by model
+  name; paste counters are keyed by document and system.
+- **View jumps** (fit, zoom buttons, reveal) ease through the `glide`
+  reducer; pointer, wheel and touch gestures and level changes must clear
+  it so they stay immediate.
+- **Selects whose value follows state** use `select::Select`, which keeps
+  the shown choice in step with undo and refused changes; a plain
+  `<select>` with `selected` options goes stale in Firefox.
 - **web-sys features:** `cargo add -p frontend web-sys --features …` rejects
   the existing `ResizeObserver*` features; add new ones to the same list.
 - **Browser checks:** drive a `--dev-mode` server with Playwright against
