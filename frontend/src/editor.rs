@@ -65,6 +65,54 @@ enum Compile {
     Failed(String),
 }
 
+/// What a user action did, as undo and redo name it: by its most telling
+/// edit (a paste is adding blocks, though it also connects them).
+fn describe(group: &[Edit]) -> String {
+    let count = |f: fn(&Edit) -> bool| group.iter().filter(|e| f(e)).count();
+    let blocks = |n: usize| format!("{n} block{}", if n == 1 { "" } else { "s" });
+    let first = |f: fn(&Edit) -> bool| group.iter().find(|e| f(e));
+    if let Some(e) = first(|e| {
+        matches!(
+            e,
+            Edit::CreateSubsystem { .. } | Edit::ExpandSubsystem { .. }
+        )
+    }) {
+        return match e {
+            Edit::CreateSubsystem { .. } => "Group into a subsystem".into(),
+            _ => "Expand a subsystem".into(),
+        };
+    }
+    let added = count(|e| matches!(e, Edit::AddBlock { .. }));
+    if added > 0 {
+        return format!("Add {}", blocks(added));
+    }
+    let deleted = count(|e| matches!(e, Edit::DeleteBlock { .. }));
+    if deleted > 0 {
+        return format!("Delete {}", blocks(deleted));
+    }
+    match group.first() {
+        Some(Edit::MoveBlock { .. }) => {
+            format!(
+                "Move {}",
+                blocks(count(|e| matches!(e, Edit::MoveBlock { .. })))
+            )
+        }
+        Some(Edit::SetOrientation { .. }) => "Rotate or flip".into(),
+        Some(Edit::SetParameter { name, .. }) => format!("Set {name}"),
+        Some(Edit::RenameBlock { name, .. }) => format!("Rename to {}", name.replace('\n', " ")),
+        Some(Edit::Connect { .. }) => "Connect".into(),
+        Some(Edit::Disconnect { .. }) => "Disconnect".into(),
+        Some(Edit::SetRoute { .. } | Edit::SetTrunkRoute { .. }) => "Reroute a line".into(),
+        Some(Edit::SetSignalName { .. }) => "Name a signal".into(),
+        Some(Edit::AddAnnotation { .. }) => "Add an annotation".into(),
+        Some(Edit::MoveAnnotation { .. }) => "Move an annotation".into(),
+        Some(Edit::SetAnnotationText { .. }) => "Edit an annotation".into(),
+        Some(Edit::DeleteAnnotation { .. }) => "Delete an annotation".into(),
+        Some(Edit::SetConfig { key, .. }) => format!("Set {key}"),
+        _ => "Edit".into(),
+    }
+}
+
 /// Replay `edits` onto `base`.
 fn replay(base: &Model, edits: &[Edit]) -> Result<Model, String> {
     let mut model = base.clone();
@@ -261,12 +309,14 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     return;
                 }
             };
+            // Unless described, a version says what was done: its first
+            // few actions.
             let msg = if message.trim().is_empty() {
-                format!(
-                    "{} edit{}",
-                    pending.len(),
-                    if pending.len() == 1 { "" } else { "s" }
-                )
+                let mut said: Vec<String> = pending.iter().take(3).map(|g| describe(g)).collect();
+                if pending.len() > 3 {
+                    said.push(format!("and {} more", pending.len() - 3));
+                }
+                said.join("; ")
             } else {
                 message.trim().to_string()
             };
@@ -466,9 +516,15 @@ pub fn model_editor(props: &EditorProps) -> Html {
         html! {
             <span class="tool-group">
                 <button class="tool icon" onclick={undo.reform(|_: MouseEvent| ())}
-                    disabled={count == 0 || *busy} title="Undo (Ctrl+Z)">{ icons::undo() }</button>
+                    disabled={count == 0 || *busy}
+                    title={pending.last().map_or("Undo (Ctrl+Z)".into(), |g| format!("Undo: {} (Ctrl+Z)", describe(g)))}>
+                    { icons::undo() }
+                </button>
                 <button class="tool icon" onclick={redo.reform(|_: MouseEvent| ())}
-                    disabled={redo_stack.is_empty() || *busy} title="Redo (Ctrl+Shift+Z)">{ icons::redo() }</button>
+                    disabled={redo_stack.is_empty() || *busy}
+                    title={redo_stack.last().map_or("Redo (Ctrl+Shift+Z)".into(), |g| format!("Redo: {} (Ctrl+Shift+Z)", describe(g)))}>
+                    { icons::redo() }
+                </button>
             </span>
         }
     });
@@ -634,5 +690,42 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     move |message: String| error.set(Some(message))
                 })} />
         </>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unlinked_model::{BlockId, Rect};
+
+    fn moved(id: &str) -> Edit {
+        Edit::MoveBlock {
+            system: vec![],
+            id: BlockId::from(id),
+            position: Rect::new(0.0, 0.0, 10.0, 10.0),
+        }
+    }
+
+    #[test]
+    fn actions_are_named_by_their_most_telling_edit() {
+        assert_eq!(describe(&[moved("1")]), "Move 1 block");
+        assert_eq!(describe(&[moved("1"), moved("2")]), "Move 2 blocks");
+        let paste = [
+            Edit::AddBlock {
+                system: vec![],
+                id: BlockId::from("9"),
+                block_type: "Gain".into(),
+                name: "g1".into(),
+                position: Rect::new(0.0, 0.0, 10.0, 10.0),
+            },
+            moved("1"),
+        ];
+        assert_eq!(describe(&paste), "Add 1 block");
+        let set = Edit::SetConfig {
+            key: "StopTime".into(),
+            value: "5".into(),
+        };
+        assert_eq!(describe(&[set]), "Set StopTime");
+        assert_eq!(describe(&[]), "Edit");
     }
 }
