@@ -242,7 +242,8 @@ pub fn model_editor(props: &EditorProps) -> Html {
             stale.clone(),
             base.clone(),
         );
-        let (project_id, on_saved) = (props.project_id, props.on_saved.clone());
+        let (project_id, file_id, on_saved) =
+            (props.project_id, props.file_id, props.on_saved.clone());
         let redo_stack = redo_stack.clone();
         Callback::from(move |()| {
             if *busy || stale.is_some() {
@@ -282,14 +283,16 @@ pub fn model_editor(props: &EditorProps) -> Html {
             let base = (*base).clone();
             let redo_stack = redo_stack.clone();
             spawn_local(async move {
-                let result = api::upload(
-                    project_id,
-                    &base.path,
-                    &msg,
-                    &patched,
-                    Some(base.version_id),
-                )
-                .await;
+                let result = async {
+                    // Metadata refreshes preserve this editor, so the file
+                    // may have been renamed since the base was loaded.
+                    let current = api::file(project_id, file_id).await?;
+                    let extension = |path: &str| path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+                    if extension(&current.path) != extension(&base.path) {
+                        return Err(api::ApiError { status: 400, message: "The file format changed after this model was opened. Restore its original extension before saving these edits.".into() });
+                    }
+                    api::upload(project_id, &current.path, &msg, &patched, Some(base.version_id)).await
+                }.await;
                 if !*mounted.borrow() {
                     return;
                 }

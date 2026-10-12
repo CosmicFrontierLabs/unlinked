@@ -618,8 +618,17 @@ enum Content {
     /// The imported model and the exact version it was read from (the
     /// base edits are saved against).
     Model(Rc<unlinked_model::Model>, Base),
-    Text(String),
-    Binary,
+    Text(String, Uuid, i32),
+    Binary(Uuid, i32),
+}
+
+impl Content {
+    fn version(&self) -> (Uuid, i32) {
+        match self {
+            Self::Model(_, base) => (base.version_id, base.version),
+            Self::Text(_, id, number) | Self::Binary(id, number) => (*id, *number),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -639,6 +648,43 @@ pub fn file_page(props: &FileProps) -> Html {
     let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
     let tab = use_state(|| Tab::Diagram);
+    let history_open = use_state(|| false);
+    let simulation_seen = use_state(|| false);
+    let simulation_running = use_state(|| false);
+    let on_running_change = {
+        let simulation_running = simulation_running.clone();
+        Callback::from(move |running: bool| simulation_running.set(running))
+    };
+    let diagram_dirty = use_state(|| false);
+    let on_dirty_change = {
+        let diagram_dirty = diagram_dirty.clone();
+        Callback::from(move |dirty: bool| diagram_dirty.set(dirty))
+    };
+    let toggle_history = {
+        let history_open = history_open.clone();
+        Callback::from(move |_: MouseEvent| history_open.set(!*history_open))
+    };
+    let leave_message = match (*diagram_dirty, *simulation_running) {
+        (true, true) => Some("Leave this model? Unsaved diagram changes will be discarded and the running simulation will stop.".to_string()),
+        (true, false) => Some("Leave this model? Unsaved diagram changes will be discarded.".to_string()),
+        (false, true) => Some("Leave this model? The running simulation will stop.".to_string()),
+        _ => None,
+    };
+    crate::navigation::use_navigation_guard(leave_message.clone());
+    // Metadata mutations must not remount either workspace. Content changes
+    // only after a save or an explicit version switch.
+    let content_reload = use_reload();
+    {
+        let (diagram_dirty, simulation_running) =
+            (diagram_dirty.clone(), simulation_running.clone());
+        use_effect_with(
+            (project_id, file_id, version_id, content_reload.0),
+            move |_| {
+                diagram_dirty.set(false);
+                simulation_running.set(false);
+            },
+        );
+    }
     let project = use_fetch(project_id, api::project);
     let file = use_fetch((project_id, file_id, reload.0), move |(p, f, _)| {
         api::file(p, f)
@@ -647,7 +693,7 @@ pub fn file_page(props: &FileProps) -> Html {
         api::versions(p, f)
     });
     let content = use_fetch(
-        (project_id, file_id, version_id, reload.0),
+        (project_id, file_id, version_id, content_reload.0),
         move |(p, f, v, _)| async move {
             let info = api::file(p, f).await?;
             // Read an explicit version so the bytes and the recorded base
@@ -686,8 +732,8 @@ pub fn file_page(props: &FileProps) -> Html {
                 }
             } else {
                 match String::from_utf8(bytes) {
-                    Ok(s) => Content::Text(s),
-                    Err(_) => Content::Binary,
+                    Ok(s) => Content::Text(s, version_id, version),
+                    Err(_) => Content::Binary(version_id, version),
                 }
             })
         },
@@ -695,7 +741,8 @@ pub fn file_page(props: &FileProps) -> Html {
     let editor = matches!(&*project, Fetch::Ready(p) if p.my_role >= ProjectRole::Editor);
     // After saving edits, show the new latest version.
     let on_saved = {
-        let (navigator, reload) = (use_navigator(), reload.clone());
+        let (navigator, reload, content_reload) =
+            (use_navigator(), reload.clone(), content_reload.clone());
         Callback::from(move |_: ()| {
             if let Some(nav) = &navigator {
                 nav.push(&Route::File {
@@ -704,6 +751,7 @@ pub fn file_page(props: &FileProps) -> Html {
                 });
             }
             reload.dispatch(());
+            content_reload.dispatch(());
         })
     };
 
@@ -754,17 +802,17 @@ pub fn file_page(props: &FileProps) -> Html {
     let model_file = matches!(&*file, Fetch::Ready(f) if is_model(&f.path));
     let matlab_file =
         matches!(&*file, Fetch::Ready(f) if f.path.to_ascii_lowercase().ends_with(".m"));
+    let selected_version = match &*content {
+        Fetch::Ready(content) => Some(content.version().0),
+        _ => version_id,
+    };
     let version_list = move |vs: &Vec<FileVersionInfo>| -> Html {
-        let current = version_id.or_else(|| vs.first().map(|v| v.id));
+        let current = selected_version.or_else(|| vs.first().map(|v| v.id));
         html! {
             <ul class="versions">
                 { for vs.iter().map(|v| {
                     let active = Some(v.id) == current;
-                    let to = if Some(v.id) == vs.first().map(|l| l.id) {
-                        Route::File { project_id, file_id }
-                    } else {
-                        Route::FileVersion { project_id, file_id, version_id: v.id }
-                    };
+                    let to = Route::FileVersion { project_id, file_id, version_id: v.id };
                     let compare = current
                         .filter(|c| model_file && *c != v.id)
                         .map(|c| {
@@ -791,19 +839,39 @@ pub fn file_page(props: &FileProps) -> Html {
         }
     };
 
-    let shown_version = match &*versions {
-        Fetch::Ready(vs) => vs
-            .iter()
-            .find(|v| Some(v.id) == version_id)
-            .or_else(|| vs.first())
-            .map(|v| v.version),
+    let shown_version = match &*content {
+        Fetch::Ready(content) => Some(content.version().1),
         _ => None,
     };
+    let loaded_version_id = match &*content {
+        Fetch::Ready(content) => Some(content.version().0),
+        _ => version_id,
+    };
+    let newer_available = match (&*file, shown_version) {
+        (Fetch::Ready(info), Some(version)) => {
+            info.latest.version > version && version_id.is_none()
+        }
+        _ => false,
+    };
+    let show_latest = {
+        let (content_reload, leave_message) = (content_reload.clone(), leave_message.clone());
+        Callback::from(move |_: MouseEvent| {
+            if leave_message.as_ref().is_some_and(|message| {
+                !gloo_utils::window()
+                    .confirm_with_message(message)
+                    .unwrap_or(false)
+            }) {
+                return;
+            }
+            content_reload.dispatch(());
+        })
+    };
     let tab_button = |t: Tab, label: &str| {
-        let tab = tab.clone();
+        let (tab, simulation_seen) = (tab.clone(), simulation_seen.clone());
         html! {
             <button class={classes!("tab", (*tab == t).then_some("active"))}
-                onclick={Callback::from(move |_: MouseEvent| tab.set(t))}>{ label }</button>
+                aria-pressed={(*tab == t).to_string()}
+                onclick={Callback::from(move |_: MouseEvent| { if t == Tab::Simulate { simulation_seen.set(true); } tab.set(t); })}>{ label }</button>
         }
     };
     let body = view(&content, |c: &Content| match c {
@@ -811,26 +879,36 @@ pub fn file_page(props: &FileProps) -> Html {
         // fresh navigation state instead of keeping a stale subsystem path.
         Content::Model(m, base) => html! {
             <>
-                <div class="tabs">
+                <div class="tabs" role="group" aria-label="Model workspace">
                     { tab_button(Tab::Diagram, "Diagram") }
                     { tab_button(Tab::Simulate, "Simulate") }
+                    <span class="workspace-caption">{ "Diagram edits and run results stay open when you switch views." }</span>
                 </div>
-                if *tab == Tab::Diagram {
-                    // Keyed by the loaded model so a different version
-                    // remounts with fresh navigation and edit state.
+                // Keep both workspaces mounted. Switching views must not
+                // discard edits, reset navigation, or cancel a simulation.
+                <section class="workspace-pane" hidden={*tab != Tab::Diagram} aria-label="Diagram">
                     <ModelEditor key={format!("{:p}", Rc::as_ptr(m))} {project_id} {file_id}
-                        base={base.clone()} can_edit={editor}
+                        base={base.clone()} can_edit={editor} active={*tab == Tab::Diagram}
+                        on_dirty_change={on_dirty_change.clone()}
                         fit_key={AttrValue::from(format!("{:p}", Rc::as_ptr(m)))}
                         on_saved={on_saved.clone()} />
-                } else if let Some(version) = shown_version {
-                    <SimulationPanel key={version} {project_id} {file_id} {version} config={m.config.clone()}
+                </section>
+                <section class="workspace-pane" hidden={*tab != Tab::Simulate} aria-label="Simulation">
+                    if *diagram_dirty {
+                        <p class="workspace-notice" role="status">{ format!("The diagram has unsaved changes. Simulation uses saved v{}. Save your diagram to include those changes.", base.version) }</p>
+                    }
+                    if *simulation_seen {
+                    <SimulationPanel key={format!("{file_id}:{}", base.version)} {project_id} {file_id}
+                        on_running_change={on_running_change.clone()}
+                        version={base.version} active={*tab == Tab::Simulate} config={m.config.clone()}
                         has_random_sources={m.walk().iter().any(|(_, sys)| sys.blocks.iter().any(|b| matches!(b.block_type.as_str(), "RandomNumber" | "UniformRandomNumber")))}
                         inputs={m.root.blocks.iter().filter(|b| b.block_type == "Inport").map(|b| (b.id.0.clone(), b.name.clone())).collect::<Vec<_>>()}
                         outports={m.root.blocks.iter().filter(|b| b.block_type == "Outport").map(|b| b.name.clone()).collect::<Vec<_>>()} />
-                }
+                    }
+                </section>
             </>
         },
-        Content::Text(t) if matlab_file => html! {
+        Content::Text(t, _, _) if matlab_file => html! {
             <>
                 <div class="tabs">
                     { tab_button(Tab::Diagram, "Source") }
@@ -843,18 +921,32 @@ pub fn file_page(props: &FileProps) -> Html {
                 }
             </>
         },
-        Content::Text(t) => html! { <pre class="source">{ t }</pre> },
-        Content::Binary => html! { <p class="muted">{ "Binary file; use Download." }</p> },
+        Content::Text(t, _, _) => html! { <pre class="source">{ t }</pre> },
+        Content::Binary(_, _) => html! { <p class="muted">{ "Binary file; use Download." }</p> },
     });
 
     html! {
         <div class="page-fill">
             <div class="subbar file-bar">
-                <Link<Route> to={Route::Project { project_id }}>{ "← Project" }</Link<Route>>
-                { view(&file, |f: &FileInfo| html! { <strong>{ &f.path }</strong> }) }
+                <nav class="file-breadcrumbs" aria-label="File breadcrumb">
+                    <Link<Route> to={Route::Home}>{ "Projects" }</Link<Route>>
+                    <span aria-hidden="true">{ "/" }</span>
+                    <Link<Route> to={Route::Project { project_id }}>
+                        { match &*project { Fetch::Ready(p) => p.name.clone(), _ => "Project".into() } }
+                    </Link<Route>>
+                    <span aria-hidden="true">{ "/" }</span>
+                    { view(&file, |f: &FileInfo| html! { <strong title={f.path.clone()}>{ &f.path }</strong> }) }
+                </nav>
+                if let Some(version) = shown_version {
+                    <span class="version-badge">{ format!("v{version}") }</span>
+                }
+                if newer_available { <button onclick={show_latest}>{ "Open newer version" }</button> }
                 <span class="spacer" />
                 { error_line(&error) }
-                <a class="button" href={match version_id {
+                <button onclick={toggle_history} aria-expanded={history_open.to_string()} aria-controls="file-history">
+                    { if *history_open { "Hide history" } else { "History" } }
+                </button>
+                <a class="button" download="" href={match loaded_version_id {
                     Some(v) => format!("/api/projects/{project_id}/files/{file_id}/versions/{v}/content"),
                     None => format!("/api/projects/{project_id}/files/{file_id}/content"),
                 }}>{ "Download" }</a>
@@ -868,8 +960,8 @@ pub fn file_page(props: &FileProps) -> Html {
             </div>
             <div class="file-body">
                 <div class="file-main">{ body }</div>
-                <aside class="history">
-                    <h4>{ "History" }</h4>
+                <aside id="file-history" class="history" hidden={!*history_open} aria-label="Version history">
+                    <h4>{ "Version history" }</h4>
                     { view(&versions, version_list) }
                 </aside>
             </div>
