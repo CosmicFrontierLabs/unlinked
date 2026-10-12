@@ -4750,9 +4750,10 @@ fn line_inspector(props: &LineInspectorProps) -> Html {
     let end_link = |ep: &Endpoint| {
         let (on_select, id) = (props.on_select.clone(), ep.block.clone());
         html! {
-            <a class="line-end" title="Select this block" onclick={Callback::from(move |_: MouseEvent| on_select.emit(id.clone()))}>
+            <button type="button" class="line-end" title="Select this block"
+                onclick={Callback::from(move |_: MouseEvent| on_select.emit(id.clone()))}>
                 { describe(ep) }
-            </a>
+            </button>
         }
     };
     let mut ends = Vec::new();

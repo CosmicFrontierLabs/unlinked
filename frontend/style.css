@@ -721,8 +721,18 @@ kbd {
     gap: 0.3rem;
 }
 
-.inspector a.line-end {
+/* A line's ends: buttons that read as links */
+.inspector button.line-end {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--blue);
+    text-align: left;
     cursor: pointer;
+}
+
+.inspector button.line-end:hover {
+    text-decoration: underline;
 }
 
 .inspector h3 {
