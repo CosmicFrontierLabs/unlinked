@@ -620,6 +620,26 @@ fn menu_place(x: i32, y: i32, items: usize) -> String {
     )
 }
 
+/// Block `b` without its subsystem's contents, field by field so they are
+/// never copied.
+fn shallow(b: &Block) -> Block {
+    Block {
+        id: b.id.clone(),
+        block_type: b.block_type.clone(),
+        name: b.name.clone(),
+        position: b.position,
+        orientation: b.orientation,
+        mirrored: b.mirrored,
+        ports: b.ports,
+        parameters: b.parameters.clone(),
+        mask: b.mask.clone(),
+        library_source: b.library_source.clone(),
+        subsystem: None,
+        style: b.style.clone(),
+        interface: b.interface.clone(),
+    }
+}
+
 /// Width below which panels lie over the canvas instead of beside it; the
 /// stylesheet's narrow layout uses the same.
 const NARROW: f64 = 760.0;
@@ -1473,6 +1493,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let system = props.model.system_at(&refs);
     // Edits address the shown system by block IDs, which survive renames.
     let system_ref: SystemRef = system_ids(&props.model, &path).unwrap_or_default();
+    // The shown level's blocks (without their subsystems' contents) and
+    // lines, copied once per model and level for the handlers and panels
+    // that keep them, rather than on every render.
+    let level = {
+        let model = props.model.clone();
+        use_memo(
+            (Rc::as_ptr(&props.model) as usize, (*path).clone()),
+            move |(_, path)| {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                let sys = model.system_at(&refs);
+                (
+                    Rc::new(
+                        sys.map(|s| s.blocks.iter().map(shallow).collect::<Vec<Block>>())
+                            .unwrap_or_default(),
+                    ),
+                    Rc::new(sys.map(|s| s.lines.clone()).unwrap_or_default()),
+                )
+            },
+        )
+    };
+    let (level_blocks, level_lines): (Rc<Vec<Block>>, Rc<Vec<Line>>) =
+        (level.0.clone(), level.1.clone());
     // Recorded values at the shown run's chosen sample, by source port, and
     // whether the diagram changed since that run.
     let run = results.as_ref().and_then(|r| r.run.clone());
@@ -2252,8 +2294,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_edit.clone(),
             system_ref.clone(),
         );
-        let lines: Vec<Line> = system.map(|s| s.lines.clone()).unwrap_or_default();
-        let blocks: Vec<Block> = system.map(|s| s.blocks.clone()).unwrap_or_default();
+        let (lines, blocks) = (level_lines.clone(), level_blocks.clone());
         let annotations: Vec<Annotation> =
             system.map(|s| s.annotations.clone()).unwrap_or_default();
         let (clipboard, model, on_error, select_created) = (
@@ -2818,6 +2859,23 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         [sid] => s.blocks.iter().find(|b| &b.id.0 == sid),
         _ => None,
     });
+    // Its copy for the inspector, made once per model, level and block, as
+    // a subsystem holds all its contents.
+    let inspected = {
+        let model = props.model.clone();
+        use_memo(
+            (
+                Rc::as_ptr(&props.model) as usize,
+                (*path).clone(),
+                selected_block.map(|b| b.id.clone()),
+            ),
+            move |(_, path, id)| {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                let b = model.system_at(&refs)?.block(id.as_ref()?)?;
+                Some(Rc::new(b.clone()))
+            },
+        )
+    };
     // A line selected by the input it drives or the source of its trunk;
     // ends shared by several lines (in imported models) select none.
     let selected_line = system.and_then(|s| match &*selection {
@@ -3455,7 +3513,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
                 if let Some(line) = selected_line {
                     <LineInspector line={Rc::new(line.clone())} system={system_ref.clone()}
-                        blocks={Rc::new(system.map(|s| s.blocks.clone()).unwrap_or_default())}
+                        blocks={level_blocks.clone()}
                         on_edit={on_edit.clone()}
                         recorded={results.as_ref().zip(run.clone()).zip(line.src.as_ref()).and_then(|((r, run), src)| {
                             let indices = run.signal_indices(&props.model, &path, src);
@@ -3493,9 +3551,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             })
                         })} />
                 }
-                if let Some(b) = selected_block {
-                    <Inspector block={Rc::new(b.clone())} chart={selected_chart.map(|c| Rc::new(c.clone()))}
-                        system={system_ref.clone()} lines={Rc::new(system.map(|s| s.lines.clone()).unwrap_or_default())}
+                if let Some(b) = (*inspected).clone() {
+                    <Inspector block={b} chart={selected_chart.map(|c| Rc::new(c.clone()))}
+                        system={system_ref.clone()} lines={level_lines.clone()}
                         model={props.model.clone()} problems={Rc::new(block_problems)}
                         on_edit={on_edit.clone()} on_open={Callback::from({
                         let path = path.clone();
