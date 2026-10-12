@@ -82,10 +82,14 @@ with sync_playwright() as p:
     sim.get_by_role('button', name='■ Stop', exact=True).click()
     expect(sim.get_by_role('status')).to_contain_text('Stopped · 3 samples')
     assert cancelled == [run_id]
-    expect(sim.get_by_role('link', name='Export CSV')).to_be_visible()
+    expect(sim.get_by_role('button', name='Export CSV')).to_be_visible()
     assert page.evaluate("window.dispatchEvent(new Event('beforeunload', {cancelable:true}))")
     page.wait_for_function('window.closedSimulationSockets >= 1')
     closed_before = page.evaluate('window.closedSimulationSockets')
+    with page.expect_download() as exported:
+        sim.get_by_role('button', name='Export CSV').click()
+    csv = open(exported.value.path()).read()
+    assert csv == 'time,model/output:1,model/control:1\n0,0,0\n0.5,0.5,1\n1,1,2\n', csv
     # Signal filters preserve selection, and measurements use recorded samples.
     sim.get_by_role('button', name='▸ Measurements').click()
     table = sim.locator('.measurement-table')

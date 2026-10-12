@@ -6,6 +6,7 @@
 //! run) gets a new generation number; tasks drop results for any other
 //! generation, so a stale stream or response can never overwrite newer data.
 
+mod export;
 mod form;
 mod inspector;
 use form::RunForm;
@@ -182,6 +183,7 @@ struct Controller {
     time: Vec<f64>,
     columns: Vec<Vec<f64>>,
     session: Option<PlotSession>,
+    user_view: bool,
     sender: Option<Sender<SimulationSocket>>,
     /// Server id of the live run, once known.
     run_id: Option<Uuid>,
@@ -205,6 +207,7 @@ impl Controller {
         self.time.clear();
         self.columns.clear();
         self.session = None;
+        self.user_view = false;
         self.sender = None;
         self.run_id = None;
         self.run_version = None;
@@ -226,15 +229,26 @@ impl Controller {
     }
 
     /// Build a figure with one line per plotted signal and bind it to the canvas.
-    fn bind_plot(&mut self, canvas_id: &str, width_px: f64) -> Result<(), String> {
+    fn bind_plot(
+        &mut self,
+        canvas_id: &str,
+        width_px: f64,
+        preserve_view: bool,
+    ) -> Result<(), String> {
+        let limits = preserve_view
+            .then(|| self.session.as_ref()?.limits(0).ok())
+            .flatten();
         self.session = None;
+        if !preserve_view {
+            self.user_view = false;
+        }
         if self.signals.is_empty() {
             return Ok(());
         }
         let err = |e: wasm_bindgen::JsValue| e.as_string().unwrap_or_else(|| "plot error".into());
         // Standard axes with data ticks: simulation results need readable
         // time and value scales, not scope-style corner readouts.
-        let mut fig = WasmFigure::new((width_px / 100.0).max(4.0), 3.6);
+        let mut fig = WasmFigure::new((width_px / 100.0).max(2.5), 3.6);
         let ax = fig.add_subplot(1, 1, 1).map_err(err)?;
         fig.set_xlabel(ax, "time (s)").map_err(err)?;
         for &i in &self.plotted {
@@ -253,6 +267,10 @@ impl Controller {
                 .map(|&i| label(&self.signals[i].name).to_string())
                 .collect();
             fig.legend(ax, labels).map_err(err)?;
+        }
+        if let Some(limits) = limits.filter(|l| l.len() == 4) {
+            fig.set_xlim(ax, limits[0], limits[1]).map_err(err)?;
+            fig.set_ylim(ax, limits[2], limits[3]).map_err(err)?;
         }
         self.session = Some(plot::bind(fig, canvas_id).map_err(err)?);
         Ok(())
@@ -494,6 +512,25 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let state = use_state(|| RunState::Idle);
     let ctl = use_mut_ref(Controller::default);
     let progress = use_force_update();
+    let csv_download = use_mut_ref(|| None::<export::CsvDownload>);
+    let export_error = use_state(|| None::<String>);
+    let export_csv = {
+        let (ctl, download, error) = (ctl.clone(), csv_download.clone(), export_error.clone());
+        Callback::from(move |_: MouseEvent| {
+            let c = ctl.borrow();
+            let filename = c
+                .run_id
+                .map(|id| format!("trace-{id}.csv"))
+                .unwrap_or_else(|| "trace.csv".into());
+            match export::CsvDownload::save(&c.csv(), &filename) {
+                Ok(url) => {
+                    *download.borrow_mut() = Some(url);
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        })
+    };
     // Bumped whenever the plot must be rebuilt (new data set or selection).
     let rebind = use_reload();
     // Presentation only: generated signals stay in the trace and plot.
@@ -505,6 +542,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         Callback::from(move |_: Event| show_generated.set(!*show_generated))
     };
     let plot_host = use_node_ref();
+    let plot_width = plot::use_plot_width(plot_host.clone());
     let reload = use_reload();
     let runs = use_fetch((props.file_id, reload.0), |(f, _)| api::simulation_runs(f));
     let scripts = use_fetch(props.project_id, |p| async move {
@@ -518,28 +556,38 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let init_script = use_state(|| None::<(Uuid, i32)>);
     let canvas_id = format!("sim-plot-{}", props.file_id);
 
-    let needs_rebind = use_mut_ref(|| true);
+    let last_plot = use_mut_ref(|| None::<(u32, u32)>);
     {
-        let needs_rebind = needs_rebind.clone();
-        use_effect_with(rebind.0, move |_| *needs_rebind.borrow_mut() = true);
+        let (ctl, canvas_id) = (ctl.clone(), canvas_id.clone());
+        use_effect_with(
+            (rebind.0, props.active, plot_width),
+            move |&(revision, active, width)| {
+                if !active || width == 0 || *last_plot.borrow() == Some((revision, width)) {
+                    return;
+                }
+                let mut c = ctl.borrow_mut();
+                let preserve =
+                    c.user_view && last_plot.borrow().is_some_and(|(old, _)| old == revision);
+                if let Err(e) = c.bind_plot(&canvas_id, width as f64, preserve) {
+                    web_sys::console::error_1(&e.into());
+                } else {
+                    *last_plot.borrow_mut() = Some((revision, width));
+                }
+            },
+        );
     }
-    {
-        let (ctl, plot_host, canvas_id) = (ctl.clone(), plot_host.clone(), canvas_id.clone());
-        use_effect_with((rebind.0, props.active), move |(_, active)| {
-            if !active || !*needs_rebind.borrow() {
-                return;
-            }
-            let width = plot_host
-                .cast::<web_sys::HtmlElement>()
-                .map(|e| e.client_width() as f64)
-                .unwrap_or(800.0);
-            if let Err(e) = ctl.borrow_mut().bind_plot(&canvas_id, width) {
-                web_sys::console::error_1(&e.into());
-            } else {
-                *needs_rebind.borrow_mut() = false;
-            }
-        });
-    }
+    let pan_plot = {
+        let ctl = ctl.clone();
+        Callback::from(move |_: MouseEvent| ctl.borrow_mut().user_view = true)
+    };
+    let zoom_plot = {
+        let ctl = ctl.clone();
+        Callback::from(move |_: web_sys::WheelEvent| ctl.borrow_mut().user_view = true)
+    };
+    let fit_plot = {
+        let rebind = rebind.clone();
+        Callback::from(move |_: MouseEvent| rebind.dispatch(()))
+    };
 
     // On unmount: supersede any running stream and ask the server to cancel.
     {
@@ -930,12 +978,6 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         },
         RunState::Error(e) => html! { <span class="error">{ e }</span> },
     };
-    let csv_href = (!c.signals.is_empty() && !running).then(|| {
-        format!(
-            "data:text/csv;charset=utf-8,{}",
-            String::from(js_sys::encode_uri_component(&c.csv()))
-        )
-    });
     let o = &*options;
     let validation = o.validate();
     let errors = validation.as_ref().err();
@@ -976,11 +1018,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         <button class="primary run-button" onclick={run} disabled={validation.is_err()}>{ "▶ Run" }</button>
                     }
                     <span class="sim-status" role="status" aria-live="polite">{ status }</span>
-                    if let Some(href) = csv_href {
-                        <a class="button" href={href} download="trace.csv">{ "Export CSV" }</a>
-                    }
+                    <button onclick={export_csv} disabled={samples == 0 || running} title="Download all recorded signals">{ "Export CSV" }</button>
                 </div>
             </div>
+            if let Some(error) = &*export_error { <p class="error" role="alert">{error}</p> }
             <div class="sim-form">
                 <div class="sim-primary-options">
                     { number_field("stop", "Stop time (s)", &o.stop, |o| &mut o.stop) }
@@ -1062,8 +1103,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                             if let Some(id) = c.run_id { <span title={id.to_string()}>{ format!("Run {}", &id.to_string()[..8]) }</span> }
                         </div>
                     }
+                <div class="plot-actions"><button onclick={fit_plot} disabled={c.signals.is_empty()}>{ "Fit plot" }</button><span>{ "Scroll to zoom · drag to pan" }</span></div>
                 <div class="plot-host" ref={plot_host}>
-                    <canvas id={canvas_id.clone()} hidden={c.signals.is_empty()} />
+                    <canvas id={canvas_id.clone()} hidden={c.signals.is_empty()} onmousedown={pan_plot} onwheel={zoom_plot} />
                     if c.signals.is_empty() {
                         <div class="sim-empty">
                             <span class="sim-empty-icon" aria-hidden="true">{ "∿" }</span>

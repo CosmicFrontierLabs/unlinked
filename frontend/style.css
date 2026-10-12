@@ -1349,3 +1349,8 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
     .sim-body .signal-list { box-sizing: border-box; width: 100%; border-left: 0; border-top: 1px solid var(--border); flex-shrink: 0; }
     .signal-options { max-height: 220px; }
 }
+
+/* Plot controls stay legible while the figure follows its available width. */
+.plot-actions { display: flex; align-items: center; gap: .75rem; padding: .5rem .75rem 0; font-size: .8rem; }
+.plot-actions span { color: #a9b1d6; }
+.plot-actions button { font-size: .8rem; }
