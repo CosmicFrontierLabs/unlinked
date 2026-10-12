@@ -451,19 +451,6 @@ pub fn model_editor(props: &EditorProps) -> Html {
             move || drop(listener)
         });
     }
-    // Leaving the page with unsaved edits asks first.
-    use_effect_with(count > 0, move |dirty| {
-        let listener = dirty.then(|| {
-            EventListener::new_with_options(
-                &gloo_utils::window(),
-                "beforeunload",
-                EventListenerOptions::enable_prevent_default(),
-                |e| e.prevent_default(),
-            )
-        });
-        move || drop(listener)
-    });
-
     let settings_button = {
         let settings = settings.clone();
         html! {
