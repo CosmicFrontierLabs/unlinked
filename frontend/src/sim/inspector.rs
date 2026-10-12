@@ -138,6 +138,35 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
             }
         });
     }
+    let choose_sample = {
+        let (controller, b) = (props.controller.clone(), b.clone());
+        Callback::from(move |index: usize| {
+            let value = controller
+                .borrow()
+                .time
+                .get(index)
+                .map(|time| format!("{time:?}"));
+            if let Some(value) = value {
+                b.set(value);
+            }
+        })
+    };
+    let move_sample = |index: usize| {
+        let choose_sample = choose_sample.clone();
+        Callback::from(move |_: MouseEvent| choose_sample.emit(index))
+    };
+    let scrub = choose_sample.reform(|e: InputEvent| {
+        e.target_unchecked_into::<HtmlInputElement>()
+            .value()
+            .parse::<usize>()
+            .unwrap_or(0)
+    });
+    let follow_latest = {
+        let b = b.clone();
+        Callback::from(move |_: MouseEvent| b.set(String::new()))
+    };
+    let last_sample = c.time.len().saturating_sub(1);
+    let sample = ib.unwrap_or(last_sample);
     let input = |name: &'static str,
                  draft: &UseStateHandle<String>,
                  default: Option<&f64>,
@@ -169,6 +198,15 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
                     { input("Cursor A (s)", &a, c.time.first(), ia.is_some()) }
                     { input("Cursor B (s)", &b, c.time.last(), ib.is_some()) }
                     <div class="measurement-modes">{ mode(false, "Cursor values") }{ mode(true, "Interval statistics") }</div>
+                </div>
+                <div class="sample-scrubber">
+                    <span>{"Cursor B"}</span>
+                    <button onclick={move_sample(sample.saturating_sub(1))} disabled={sample == 0} aria-label="Previous recorded sample" title="Previous recorded sample">{"‹"}</button>
+                    <input type="range" min="0" max={last_sample.to_string()} step="1" value={sample.to_string()} oninput={scrub}
+                        aria-label="Recorded sample" aria-valuetext={c.time.get(sample).map(|time| format!("Sample {} of {} at {time:?} seconds", sample + 1, c.time.len()))} />
+                    <button onclick={move_sample((sample + 1).min(last_sample))} disabled={sample == last_sample} aria-label="Next recorded sample" title="Next recorded sample">{"›"}</button>
+                    <button onclick={follow_latest} aria-pressed={b.trim().is_empty().to_string()} title="Keep cursor B at the latest recorded sample">{"Latest"}</button>
+                    <span class="sample-index">{format!("{} / {}", sample + 1, c.time.len())}</span>
                 </div>
                 if let (Some(ia), Some(ib)) = (ia, ib) {
                     <p class="measurement-note">{ format!("Nearest recorded samples: A = {} s · B = {} s · Δt = {} s", number(c.time[ia]), number(c.time[ib]), number(c.time[ib] - c.time[ia])) }</p>

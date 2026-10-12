@@ -1654,3 +1654,10 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .setup-options dt { color: #a9b1d6; }
 .setup-options dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .setup-notice { margin: 0; padding: .6rem 1rem; background: var(--bg-alt); color: var(--teal); font-size: .85rem; }
+
+/* Scrub actual recorded samples; the cursor never interpolates values. */
+.sample-scrubber { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; padding: .25rem .75rem; font-size: .8rem; color: #a9b1d6; }
+.sample-scrubber input[type=range] { flex: 1 1 120px; min-width: 90px; accent-color: var(--blue); }
+.sample-scrubber button { padding: .25rem .5rem; }
+.sample-scrubber button[aria-pressed=true] { border-color: var(--blue); color: var(--blue); }
+.sample-index { font-variant-numeric: tabular-nums; white-space: nowrap; }
