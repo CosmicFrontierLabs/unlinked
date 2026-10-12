@@ -1824,3 +1824,13 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 
 /* User-chosen project and organization names can be long identifiers. */
 .page h1, .page .card { overflow-wrap: anywhere; }
+
+/* History drawers preserve the canvas width on phones, like canvas panels. */
+.file-body { position: relative; }
+.history-heading { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .5rem; }
+.history-heading h4 { margin: 0; }
+.history-heading button { padding: .1rem .45rem; }
+.history { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+    .file-body > .history { position: absolute; top: 0; right: 0; bottom: 0; width: min(300px, 85%); z-index: 20; box-shadow: -6px 0 18px #0006; }
+}
