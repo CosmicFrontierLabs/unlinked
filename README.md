@@ -9,6 +9,7 @@ The application follows [single-binary-rust-website](https://github.com/meawoppl
 - Import ZIP/XML `.slx` and legacy textual `.mdl` models, retaining unknown blocks and parameters. Render root diagrams and nested subsystems as SVG; inspect blocks in the browser.
 - Organization and project permissions, Google/GitHub OAuth, immutable file versions, and audit events. Viewers can read models and run simulations; editors can change files.
 - Simulation jobs pinned to an immutable file version, with authenticated HTTP results and a typed WebSocket stream. Euler, RK4, and adaptive Dormand–Prince RK45 solvers are available.
+- A retained Diagram/Simulate workspace with guarded navigation, searchable signals, sample cursors and interval measurements, reference-run overlays, CSV export, and recorded run settings that can be explicitly reused. Project folders have shareable URLs, filtering, and pagination.
 - Simulation of the supported block subset, including basic sources, arithmetic, integrators, unit delays, switching, logic, and bounded transfer functions. Unsupported blocks and settings produce explicit errors.
 - MATLAB/Octave compilation to standalone Rust or LLVM IR. See [compiler documentation](crates/unlinked-matlab/README.md) for the implemented language subset.
 
