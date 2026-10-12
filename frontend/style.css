@@ -572,6 +572,8 @@ kbd {
     cursor: grab;
     background: var(--bg);
     user-select: none;
+    /* Panning and pinching are the diagram's, not the page's. */
+    touch-action: none;
 }
 
 .diagram.light {

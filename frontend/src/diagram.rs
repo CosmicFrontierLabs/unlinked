@@ -27,7 +27,7 @@ use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
 use web_sys::{
     DragEvent, Element, HtmlElement, HtmlInputElement, HtmlTextAreaElement, KeyboardEvent,
-    MouseEvent, WheelEvent,
+    MouseEvent, TouchEvent, WheelEvent,
 };
 use yew::prelude::*;
 
@@ -1210,6 +1210,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         x: 0.0,
         y: 0.0,
     });
+    // The view as last rendered, for long-lived listeners that start from
+    // it rather than change it (a handle they capture keeps its old value).
+    let view_now = use_mut_ref(|| *view);
+    *view_now.borrow_mut() = *view;
     let drag = use_mut_ref(|| None::<Drag>);
     // Blocks copied with Ctrl+C.
     let clipboard = use_mut_ref(|| None::<Clipboard>);
@@ -1352,6 +1356,101 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 )
             });
             move || drop(listener)
+        });
+    }
+    // Touch: one finger pans, two pinch to zoom about their midpoint; a tap
+    // still clicks. Registered by hand to keep the page from scrolling.
+    {
+        let view = view.clone();
+        let container = container.clone();
+        use_effect_with((), move |_| {
+            // The view and the touches (container pixels) a gesture began
+            // with: one point to pan from, or two to pinch.
+            let gesture = Rc::new(std::cell::RefCell::new(None::<(View, Vec<(f64, f64)>)>));
+            let listeners = container.cast::<HtmlElement>().map(|el| {
+                let points = {
+                    let el = el.clone();
+                    move |e: &TouchEvent| -> Vec<(f64, f64)> {
+                        let rect = el.get_bounding_client_rect();
+                        let list = e.touches();
+                        (0..list.length().min(2))
+                            .filter_map(|i| list.get(i))
+                            .map(|t| {
+                                (
+                                    t.client_x() as f64 - rect.left(),
+                                    t.client_y() as f64 - rect.top(),
+                                )
+                            })
+                            .collect()
+                    }
+                };
+                let restart = {
+                    let (gesture, view, points) =
+                        (gesture.clone(), view_now.clone(), points.clone());
+                    move |e: &web_sys::Event| {
+                        let Some(e) = e.dyn_ref::<TouchEvent>() else {
+                            return;
+                        };
+                        // Touches on controls and panels over the canvas
+                        // (a result list being scrolled, say) are theirs.
+                        let over_control = closest(
+                            e.target(),
+                            "button, input, select, textarea, a, .quick-insert, .shortcut-help, nav.crumbs",
+                        )
+                        .is_some();
+                        let now = points(e);
+                        *gesture.borrow_mut() = (!now.is_empty() && !over_control)
+                            .then(|| (*view.borrow(), now));
+                    }
+                };
+                let moved = {
+                    let (gesture, view) = (gesture.clone(), view.clone());
+                    move |e: &web_sys::Event| {
+                        let Some(e) = e.dyn_ref::<TouchEvent>() else {
+                            return;
+                        };
+                        let now = points(e);
+                        let Some((start, from)) = gesture.borrow().clone() else {
+                            return;
+                        };
+                        e.prevent_default();
+                        let mid = |p: &[(f64, f64)]| {
+                            let n = p.len() as f64;
+                            (
+                                p.iter().map(|q| q.0).sum::<f64>() / n,
+                                p.iter().map(|q| q.1).sum::<f64>() / n,
+                            )
+                        };
+                        let spread = |p: &[(f64, f64)]| match p {
+                            [a, b] => ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt(),
+                            _ => 0.0,
+                        };
+                        if now.len() != from.len() {
+                            return;
+                        }
+                        let k = if from.len() == 2 && spread(&from) > 0.0 {
+                            ((start.scale * spread(&now) / spread(&from)).clamp(0.02, 20.0))
+                                / start.scale
+                        } else {
+                            1.0
+                        };
+                        let (m0, m1) = (mid(&from), mid(&now));
+                        view.dispatch(ViewAction::Set(View {
+                            scale: start.scale * k,
+                            x: m1.0 - (m0.0 - start.x) * k,
+                            y: m1.1 - (m0.1 - start.y) * k,
+                        }));
+                    }
+                };
+                let active = EventListenerOptions::enable_prevent_default();
+                [
+                    EventListener::new(&el, "touchstart", restart.clone()),
+                    EventListener::new(&el, "touchend", restart.clone()),
+                    EventListener::new(&el, "touchcancel", restart),
+                    EventListener::new_with_options(&el, "touchmove", active, moved),
+                ]
+            });
+            move || drop(listeners)
         });
     }
 
