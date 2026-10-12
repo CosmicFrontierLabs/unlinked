@@ -891,10 +891,10 @@ fn splice_edits(sys: &System, system: &SystemRef, add: &Edit, dst: &Endpoint) ->
             dst: dst.clone(),
         },
     ];
-    // A line going only to `dst` goes away with it; its signal name stays
-    // with the source, on the line now into the new block. (A branched
-    // line keeps its name, and gains the new block as a branch.)
-    if let (Some(name), true) = (&line.name, line.branches.is_empty()) {
+    // A line going only to `dst` goes away with it, however its one leaf is
+    // stored; its signal name stays with the source, on the line now into
+    // the new block. A line that survives keeps the name it has.
+    if let Some(name) = &line.name {
         edits.push(Edit::SetSignalName {
             system: system.clone(),
             src,
@@ -5120,18 +5120,32 @@ mod tests {
             .collect();
         pairs.sort();
         assert_eq!(pairs, [("1".into(), "3".into()), ("3".into(), "2".into())]);
-        // A named line keeps its name on the source's side.
-        let mut named = unlinked_import::import_mdl("m.mdl", mdl).unwrap();
-        named.root.lines[0].name = Some("speed".into());
-        let group = splice_edits(&named.root, &vec![], &add("Saturate"), &dst).unwrap();
-        unlinked_model::edit::apply_batch(&mut named, &group).unwrap();
-        let from_a = named
-            .root
-            .lines
-            .iter()
-            .find(|l| l.src.as_ref().is_some_and(|s| s.block.0 == "1"))
-            .unwrap();
-        assert_eq!(from_a.name.as_deref(), Some("speed"));
+        // A named line keeps its name on the source's side, whether its one
+        // destination is the line's own or a lone branch's.
+        for lone_branch in [false, true] {
+            let mut named = unlinked_import::import_mdl("m.mdl", mdl).unwrap();
+            let line = &mut named.root.lines[0];
+            line.name = Some("speed".into());
+            if lone_branch {
+                line.branches = vec![unlinked_model::Branch {
+                    dst: line.dst.take(),
+                    ..Default::default()
+                }];
+            }
+            let group = splice_edits(&named.root, &vec![], &add("Saturate"), &dst).unwrap();
+            unlinked_model::edit::apply_batch(&mut named, &group).unwrap();
+            let from_a = named
+                .root
+                .lines
+                .iter()
+                .find(|l| l.src.as_ref().is_some_and(|s| s.block.0 == "1"))
+                .unwrap();
+            assert_eq!(
+                from_a.name.as_deref(),
+                Some("speed"),
+                "lone branch: {lone_branch}"
+            );
+        }
     }
 
     #[test]
