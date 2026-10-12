@@ -620,6 +620,50 @@ fn menu_place(x: i32, y: i32, items: usize) -> String {
     )
 }
 
+/// Offer `svg` as a download named `filename`. The object URL is released
+/// once the browser has had time to start the download.
+fn download_svg(svg: &str, filename: &str) -> Result<(), String> {
+    let error = |e: wasm_bindgen::JsValue| format!("Could not export the diagram: {e:?}");
+    let parts = js_sys::Array::new();
+    parts.push(&wasm_bindgen::JsValue::from_str(svg));
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type("image/svg+xml;charset=utf-8");
+    let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &options).map_err(error)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(error)?;
+    let anchor = gloo_utils::document().create_element("a").map_err(error)?;
+    anchor.set_attribute("href", &url).map_err(error)?;
+    anchor.set_attribute("download", filename).map_err(error)?;
+    anchor
+        .dyn_into::<HtmlElement>()
+        .map_err(|e| error(e.into()))?
+        .click();
+    gloo_timers::callback::Timeout::new(10_000, move || {
+        let _ = web_sys::Url::revoke_object_url(&url);
+    })
+    .forget();
+    Ok(())
+}
+
+/// The file name a level of `model` exports under: the model's name and
+/// the subsystems leading to the level, made safe for file systems.
+fn export_name(model: &str, path: &[String]) -> String {
+    let joined = std::iter::once(model)
+        .chain(path.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" - ");
+    let safe: String = joined
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || " -_.()".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{}.svg", safe.trim())
+}
+
 /// Block `b` without its subsystem's contents, field by field so they are
 /// never copied.
 fn shallow(b: &Block) -> Block {
@@ -2971,6 +3015,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }));
         })
     };
+    // Download the shown level as drawn, without the editor's pointer
+    // targets.
+    let export = {
+        let (model, path, theme, on_error) = (
+            props.model.clone(),
+            (*path).clone(),
+            *theme,
+            props.on_error.clone(),
+        );
+        Callback::from(move |_: MouseEvent| {
+            let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+            let opts = RenderOptions {
+                theme,
+                ..Default::default()
+            };
+            let saved = render(&model, &refs, &opts)
+                .and_then(|svg| download_svg(&svg, &export_name(&model.name, &path)));
+            if let (Err(e), Some(on_error)) = (saved, &on_error) {
+                on_error.emit(e);
+            }
+        })
+    };
     // Zoom by `factor` about the middle of the canvas.
     let zoom_by = {
         let (view, container) = (view.clone(), container.clone());
@@ -3260,6 +3326,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let onkeydown = {
         let (fit_view, zoom_by, help) = (fit_view.clone(), zoom_by.clone(), help.clone());
         let (finding, reveal) = (finding.clone(), reveal.clone());
+        let scale = view.scale;
         let (selection, path, menu) = (selection.clone(), path.clone(), menu.clone());
         let order: Vec<String> = system
             .map(|s| s.blocks.iter().map(|b| b.id.0.clone()).collect())
@@ -3278,6 +3345,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             match e.key().as_str() {
                 " " if !command => fit_view.emit(()),
                 "=" | "+" if command => zoom_by.emit(1.25),
+                "0" if command => zoom_by.emit(1.0 / scale),
                 "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
                 "?" => help.set(!*help),
                 "f" if command => finding.set(true),
@@ -3374,6 +3442,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         { icons::probe() }<span>{ "Values" }</span>
                     </button>
                 }
+                <button class="tool icon" title="Export this level as SVG" onclick={export}>
+                    { icons::download() }
+                </button>
                 <button class={classes!("tool", "icon", (*finding).then_some("active"))}
                     title="Find blocks (Ctrl+F)" onclick={{
                         let finding = finding.clone();
@@ -3716,7 +3787,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Scroll", "Zoom about the pointer"),
         ("Drag, or middle-drag", "Pan (middle-drag while editing)"),
         ("Space", "Fit to view"),
-        ("Ctrl+= / Ctrl+-", "Zoom in / out"),
+        ("Ctrl+= / Ctrl+- / Ctrl+0", "Zoom in / out / to 100%"),
         ("Double-click a subsystem", "Open it"),
         ("Ctrl+F", "Find blocks anywhere in the model"),
         (
