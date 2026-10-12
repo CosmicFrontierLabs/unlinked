@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Check reference-run overlays with mocked historical traces, no model mutations."""
 import argparse
+import base64
+from pathlib import Path
 import copy
 import csv
 import io
@@ -47,6 +49,7 @@ with sync_playwright() as p:
     sim=page.get_by_role('region',name='Simulation',exact=True)
     def load(i): return sim.get_by_role('button',name=re.compile('^Load .*'+runs[i]['id'][:8]))
     def compare(i): return sim.get_by_role('button',name=f"Compare with v{runs[i]['file_version']} run {runs[i]['id'][:8]}",exact=True)
+    expect(sim.get_by_role('button',name='Export PNG',exact=True)).to_be_disabled()
     load(0).click()
     expect(sim.get_by_role('status')).to_contain_text('3 samples')
     expect(sim.get_by_text('Signals · 2 selected',exact=True)).to_be_visible()
@@ -63,7 +66,21 @@ with sync_playwright() as p:
     rows=list(csv.reader(open(download.value.path())))
     assert rows[0]==['time','model/output:1','model/control:1']
     assert [float(x) for x in rows[-1]]==[1,2,4],rows
+    # Image export captures exactly this zoomed view, including the reference.
+    canvas.hover();page.mouse.wheel(0,-240);page.wait_for_timeout(200)
     comparison_pixels=canvas.evaluate('e=>e.toDataURL()')
+    with page.expect_download() as image:
+        sim.get_by_role('button',name='Export PNG',exact=True).click()
+    assert image.value.suggested_filename==f"plot-{runs[0]['id']}.png"
+    assert Path(image.value.path()).read_bytes()==base64.b64decode(comparison_pixels.split(',',1)[1])
+    assert canvas.evaluate('e=>e.toDataURL()')==comparison_pixels,'Export changed the view'
+    canvas.evaluate("e=>{e.originalToDataURL=e.toDataURL;e.toDataURL=()=>{throw new Error('Test encoder failure')}}")
+    sim.get_by_role('button',name='Export PNG',exact=True).click()
+    expect(sim.get_by_role('alert')).to_have_text('Could not export plot: Test encoder failure')
+    canvas.evaluate('e=>{e.toDataURL=e.originalToDataURL;delete e.originalToDataURL}')
+    with page.expect_download():
+        sim.get_by_role('button',name='Export PNG',exact=True).click()
+    expect(sim.get_by_role('alert')).to_have_count(0)
     page.get_by_role('button',name='Diagram',exact=True).click()
     page.get_by_role('button',name='Simulate',exact=True).click()
     expect(banner).to_be_visible()

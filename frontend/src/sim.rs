@@ -781,6 +781,21 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     };
     let canvas_id = format!("sim-plot-{}", props.file_id);
 
+    let export_png = {
+        let (ctl, canvas_id, error) = (ctl.clone(), canvas_id.clone(), export_error.clone());
+        Callback::from(move |_: MouseEvent| {
+            let filename = ctl
+                .borrow()
+                .run_id
+                .map(|id| format!("plot-{id}.png"))
+                .unwrap_or_else(|| "plot.png".into());
+            match export::save_png(&canvas_id, &filename) {
+                Ok(()) => error.set(None),
+                Err(message) => error.set(Some(message)),
+            }
+        })
+    };
+
     let last_plot = use_mut_ref(|| None::<(u32, u32)>);
     {
         let (ctl, canvas_id) = (ctl.clone(), canvas_id.clone());
@@ -1569,7 +1584,12 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 }
                 if *reference_loading { <div class="comparison-loading"><span role="status">{"Loading comparison…"}</span><button onclick={clear_reference.clone()}>{"Cancel comparison"}</button></div> }
                 if let Some(error) = &*reference_error { <p class="comparison-error error" role="alert">{error}</p> }
-                <div class="plot-actions"><button onclick={fit_plot} disabled={c.signals.is_empty()}>{ "Fit plot" }</button><span>{ "Scroll to zoom · drag to pan" }</span></div>
+                <div class="plot-actions">
+                    <button onclick={fit_plot} disabled={c.signals.is_empty()}>{ "Fit plot" }</button>
+                    <button onclick={export_png} disabled={samples == 0 || c.plotted.is_empty() || running}
+                        title="Download the displayed plot, including its zoom and comparison, as a PNG image">{ "Export PNG" }</button>
+                    <span>{ "Scroll to zoom · drag to pan" }</span>
+                </div>
                 <div class="plot-host" ref={plot_host}>
                     <canvas id={canvas_id.clone()} hidden={c.signals.is_empty()} onmousedown={pan_plot} onwheel={zoom_plot} />
                     if c.signals.is_empty() {
