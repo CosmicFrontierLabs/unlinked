@@ -52,6 +52,10 @@ pub struct DiagramProps {
     /// changes. Editors pass a stable key so edits keep the current view.
     #[prop_or_default]
     pub fit_key: Option<AttrValue>,
+    /// What the model is a version of, such as its file, so blocks copied
+    /// from it are known as its own when pasted back; by default this view.
+    #[prop_or_default]
+    pub document: Option<AttrValue>,
     /// Problems found in the model: outlined on the diagram, listed by the
     /// toolbar's problems button and shown in the block inspector.
     #[prop_or_default]
@@ -1009,12 +1013,22 @@ fn nearest_segment(points: &[Point], first: usize, at: Point) -> Option<usize> {
 /// Blocks copied with Ctrl+C, with the model as it was then; see
 /// [`unlinked_model::clipboard::paste`].
 struct Clipboard {
+    /// The document copied from (see [`DiagramProps::document`]).
+    document: AttrValue,
     model: Rc<Model>,
     system: SystemRef,
     ids: Vec<BlockId>,
-    /// Pastes so far into each system; each into the same one lands
-    /// further down and right.
-    pastes: std::collections::HashMap<SystemRef, u32>,
+    /// Pastes so far into each system of each document; each into the
+    /// same one lands further down and right.
+    pastes: std::collections::HashMap<(AttrValue, SystemRef), u32>,
+}
+
+thread_local! {
+    /// The clipboard, shared by every diagram for the session, so blocks
+    /// copied from one model (even a read-only one) paste into another.
+    static CLIPBOARD: Rc<std::cell::RefCell<Option<Clipboard>>> = Default::default();
+    /// Views made so far, numbering those without a document of their own.
+    static VIEWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Smallest block side a resize leaves.
@@ -1481,8 +1495,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         });
     }
     let drag = use_mut_ref(|| None::<Drag>);
-    // Blocks copied with Ctrl+C.
-    let clipboard = use_mut_ref(|| None::<Clipboard>);
+    // Blocks copied with Ctrl+C, here or in another diagram.
+    let clipboard = CLIPBOARD.with(Rc::clone);
+    let own_document = use_state(|| {
+        let n = VIEWS.with(|v| v.replace(v.get() + 1));
+        AttrValue::from(format!("view-{n}"))
+    });
+    let document = props.document.clone().unwrap_or((*own_document).clone());
     let refresh = use_force_update();
     // A block an action asked to create, selected once the model has it; a
     // refused action leaves the selection as it was.
@@ -2662,8 +2681,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_created.clone(),
         );
         let (container, refresh) = (container.clone(), refresh.clone());
-        let renaming = renaming.clone();
+        let (renaming, document) = (renaming.clone(), document.clone());
         Callback::from(move |action: Action| {
+            // Copy the selected blocks, editable or not; paste duplicates
+            // them with their internal lines, offset from the originals.
+            if action == Action::Copy {
+                if !selection.blocks().is_empty() {
+                    *clipboard.borrow_mut() = Some(Clipboard {
+                        document: document.clone(),
+                        model: model.clone(),
+                        system: system_ref.clone(),
+                        ids: selection.blocks().iter().cloned().map(BlockId).collect(),
+                        pastes: Default::default(),
+                    });
+                    // Paste becomes available.
+                    refresh.force_update();
+                }
+                return;
+            }
             let (Some(on_edit), Some(on_edits)) = (&on_edit, &on_edits) else {
                 return;
             };
@@ -2696,6 +2731,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         0,
                         &model,
                         &system_ref,
+                        true,
                     ) {
                         if let Some(on_error) = &on_error {
                             on_error.emit(format!("Cannot cut: {e}"));
@@ -2704,6 +2740,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     }
                     if let Some(group) = confirm_delete(&model, &system_ref, &ids, &lines) {
                         *clipboard.borrow_mut() = Some(Clipboard {
+                            document: document.clone(),
                             model: model.clone(),
                             system: system_ref.clone(),
                             ids,
@@ -2725,6 +2762,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         0,
                         &model,
                         &system_ref,
+                        true,
                     ) {
                         Ok(group) => {
                             let added = group
@@ -2776,28 +2814,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         field.select();
                     }
                 }
-                // Copy the selected blocks; paste duplicates them with their
-                // internal lines, offset from the originals.
-                Action::Copy => {
-                    if selection.blocks().is_empty() {
-                        return;
-                    }
-                    *clipboard.borrow_mut() = Some(Clipboard {
-                        model: model.clone(),
-                        system: system_ref.clone(),
-                        ids: selection.blocks().iter().cloned().map(BlockId).collect(),
-                        pastes: Default::default(),
-                    });
-                    // Paste becomes available.
-                    refresh.force_update();
-                }
+                Action::Copy => {}
                 Action::Paste => {
                     let mut clip = clipboard.borrow_mut();
                     let Some(clip) = clip.as_mut() else {
                         return;
                     };
-                    // Into the shown system, whichever it was copied from.
-                    let nth = clip.pastes.get(&system_ref).copied().unwrap_or(0);
+                    // Into the shown system, whichever system and document
+                    // it was copied from.
+                    let here = (document.clone(), system_ref.clone());
+                    let nth = clip.pastes.get(&here).copied().unwrap_or(0);
+                    let beside = clip.document == here.0 && clip.system == here.1;
                     let pasted = unlinked_model::clipboard::paste(
                         &clip.model,
                         &clip.system,
@@ -2805,12 +2832,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         nth,
                         &model,
                         &system_ref,
+                        beside,
                     )
                     .map_err(|e| e.to_string());
                     match pasted {
                         Ok(group) => {
-                            clip.pastes
-                                .insert(system_ref.clone(), nth.saturating_add(1));
+                            clip.pastes.insert(here, nth.saturating_add(1));
                             let added = group
                                 .iter()
                                 .filter_map(|edit| match edit {
@@ -2992,7 +3019,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let (editable, subsystem) = (props.on_edit.is_some(), lone_subsystem);
         Callback::from(move |e: KeyboardEvent| {
             let command = e.ctrl_key() || e.meta_key();
-            if !editable || e.alt_key() {
+            if e.alt_key() {
                 return;
             }
             let key = e.key().to_ascii_lowercase();
@@ -3020,6 +3047,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
                 _ => return,
             };
+            // A read-only diagram can still be copied from.
+            if !editable && action != Action::Copy {
+                return;
+            }
             // Keys are only taken from the browser when they act on something.
             if available(action, &selection, clipboard.borrow().is_some(), subsystem) {
                 e.prevent_default();

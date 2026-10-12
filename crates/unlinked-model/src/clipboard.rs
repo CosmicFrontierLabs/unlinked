@@ -6,16 +6,22 @@
 
 use crate::duplicate::copy_name;
 use crate::edit::{duplicate, next_sid, system_names, Edit, EditError, SystemRef};
-use crate::{BlockId, Model, Point};
+use crate::{BlockId, Model, Point, Rect};
 use std::collections::HashSet;
 
 /// Distance each successive paste lands further down and right.
 pub const PASTE_STEP: f64 = 20.0;
 
+/// Steps a paste elsewhere tries, to clear the blocks already there,
+/// before it lands where it was copied from regardless.
+const MAX_STEPS: u32 = 50;
+
 /// The edits pasting blocks `ids` of system `system`, as they are in
 /// `source`, into system `into` of `target` for the `nth` time (from 0).
-/// Pasted into another system, the copies keep their positions; into the
-/// same one, they land a step further down and right each time.
+/// Pasted `beside` the originals (into the system of the model they were
+/// copied from), the copies land a step further down and right each time;
+/// anywhere else (another system, or another model) they keep their
+/// positions and, where free, their names.
 pub fn paste(
     source: &Model,
     system: &SystemRef,
@@ -23,20 +29,45 @@ pub fn paste(
     nth: u32,
     target: &Model,
     into: &SystemRef,
+    beside: bool,
 ) -> Result<Vec<Edit>, EditError> {
     let next = |m: &Model| next_sid(m).ok_or_else(|| EditError::Invalid("no SIDs left".into()));
     let first_sid = next(target)?.max(next(source)?);
-    let step = if into == system {
-        PASTE_STEP * (f64::from(nth) + 1.0)
-    } else {
-        PASTE_STEP * f64::from(nth)
-    };
-    let mut edits = duplicate(source, system, ids, Point::new(step, step), first_sid)?;
     let names = system_names(target, into).ok_or_else(|| EditError::NoSystem(into.clone()))?;
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let sys = target
         .system_at(&refs)
         .ok_or_else(|| EditError::NoSystem(into.clone()))?;
+    let step = if beside {
+        PASTE_STEP * (f64::from(nth) + 1.0)
+    } else {
+        // Where they were, or else as few steps on as clears the blocks
+        // already there.
+        let names =
+            system_names(source, system).ok_or_else(|| EditError::NoSystem(system.clone()))?;
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let from = source
+            .system_at(&refs)
+            .ok_or_else(|| EditError::NoSystem(system.clone()))?;
+        let copied: Vec<Rect> = ids
+            .iter()
+            .filter_map(|id| Some(from.block(id)?.position))
+            .collect();
+        let overlap = |a: &Rect, b: &Rect| {
+            a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+        };
+        let clear = |d: f64| {
+            copied.iter().all(|r| {
+                let moved = Rect::new(r.left + d, r.top + d, r.right + d, r.bottom + d);
+                sys.blocks.iter().all(|b| !overlap(&moved, &b.position))
+            })
+        };
+        (nth..nth + MAX_STEPS)
+            .map(|k| PASTE_STEP * f64::from(k))
+            .find(|&d| clear(d))
+            .unwrap_or(PASTE_STEP * f64::from(nth))
+    };
+    let mut edits = duplicate(source, system, ids, Point::new(step, step), first_sid)?;
     let mut taken: HashSet<String> = sys.blocks.iter().map(|b| b.name.clone()).collect();
     // The name a copy was given for its own system, or, elsewhere, its
     // original's: duplicate gives the copy of `ids[i]` SID `first_sid + i`.
@@ -62,7 +93,7 @@ pub fn paste(
             }
         }
         if let Edit::AddBlock { id, name, .. } = edit {
-            if into != system {
+            if !beside {
                 if let Some(original) = original(id) {
                     *name = original;
                 }
@@ -169,7 +200,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let edits = paste(&copied, &vec![], &ids, 0, &now, &vec![]).unwrap();
+        let edits = paste(&copied, &vec![], &ids, 0, &now, &vec![], true).unwrap();
         apply_batch(&mut now, &edits).unwrap();
         let gain = now.root.blocks.iter().find(|b| b.name == "g1").unwrap();
         assert_eq!(gain.param("Gain"), Some("2"));
@@ -189,7 +220,7 @@ mod tests {
         let mut now = copied.clone();
         let mut seen = Vec::new();
         for nth in 0..3 {
-            let edits = paste(&copied, &vec![], &ids, nth, &now, &vec![]).unwrap();
+            let edits = paste(&copied, &vec![], &ids, nth, &now, &vec![], true).unwrap();
             seen.extend(added(&edits));
             apply_batch(&mut now, &edits).unwrap();
         }
@@ -239,7 +270,16 @@ mod tests {
         )
         .unwrap();
         let into: SystemRef = vec!["4".into()];
-        let edits = paste(&copied, &vec![], &["1".into(), "2".into()], 0, &now, &into).unwrap();
+        let edits = paste(
+            &copied,
+            &vec![],
+            &["1".into(), "2".into()],
+            0,
+            &now,
+            &into,
+            false,
+        )
+        .unwrap();
         assert!(edits.iter().all(|e| e.system() == into.as_slice()));
         apply_batch(&mut now, &edits).unwrap();
         let sub = now.system_at(&["Sub"]).unwrap();
@@ -260,8 +300,52 @@ mod tests {
             &["2".into()],
             0,
             &copied,
-            &vec![]
+            &vec![],
+            false
         )
         .is_err());
+    }
+
+    #[test]
+    fn pastes_into_another_model_where_the_blocks_were() {
+        let copied = model();
+        // Another model, holding a block named as one copied, and with
+        // SIDs used beyond the copied model's.
+        let mut other = model();
+        apply_batch(
+            &mut other,
+            &[
+                Edit::DeleteBlock {
+                    system: vec![],
+                    id: "2".into(),
+                    disconnect: DisconnectPolicy::Disconnect,
+                },
+                Edit::AddBlock {
+                    system: vec![],
+                    id: "7".into(),
+                    block_type: "Gain".into(),
+                    name: "k".into(),
+                    position: Rect::new(0.0, 100.0, 30.0, 130.0),
+                },
+            ],
+        )
+        .unwrap();
+        let ids = ["1".into(), "2".into()];
+        let edits = paste(&copied, &vec![], &ids, 0, &other, &vec![], false).unwrap();
+        // Free of both models' SIDs; "g" is free there, "c" is not.
+        assert_eq!(
+            added(&edits),
+            [
+                ("8".to_string(), "c1".to_string()),
+                ("9".to_string(), "g".to_string())
+            ]
+        );
+        apply_batch(&mut other, &edits).unwrap();
+        // Clear of the "c" already there: two steps on, as one still
+        // overlaps it.
+        let gain = other.root.blocks.iter().find(|b| b.name == "g").unwrap();
+        assert_eq!(gain.position.left, 60.0 + 2.0 * PASTE_STEP);
+        assert_eq!(gain.param("Gain"), Some("2"));
+        assert_eq!(other.root.connections().len(), 1);
     }
 }
