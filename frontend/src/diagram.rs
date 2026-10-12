@@ -3450,6 +3450,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_settings.clone(),
             show_problems.clone(),
         );
+        // The subsystem Enter would open: the lone selected block's.
+        let opens = system.and_then(|s| match selection.blocks() {
+            [id] => s
+                .block(&BlockId(id.clone()))
+                .filter(|b| b.subsystem.is_some())
+                .map(|b| b.name.clone()),
+            _ => None,
+        });
         let scale = view.scale;
         let (selection, path, menu) = (selection.clone(), path.clone(), menu.clone());
         let order: Vec<String> = system
@@ -3473,6 +3481,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
                 "?" => help.set(!*help),
                 "f" if command => finding.set(true),
+                // Enter opens a selected subsystem, as double-clicking does.
+                "Enter" if opens.is_some() => {
+                    if let Some(name) = &opens {
+                        let mut p = (*path).clone();
+                        p.push(name.clone());
+                        path.set(p);
+                    }
+                }
                 // As Simulink's Update Diagram: check it compiles, and show
                 // what the check finds.
                 "d" if command => {
@@ -4028,7 +4044,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Drag, or middle-drag", "Pan (middle-drag while editing)"),
         ("Space", "Fit to view"),
         ("Ctrl+= / Ctrl+- / Ctrl+0", "Zoom in / out / to 100%"),
-        ("Double-click a subsystem", "Open it"),
+        ("Double-click a subsystem, or Enter", "Open it"),
         ("Ctrl+F", "Find blocks anywhere in the model"),
         (
             "Tab / Shift+Tab",
