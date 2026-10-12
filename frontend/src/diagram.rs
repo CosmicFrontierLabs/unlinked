@@ -3450,7 +3450,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_settings.clone(),
             show_problems.clone(),
         );
-        // What Ctrl+T starts, as in Simulink: a run, unless one is going.
+        // What Ctrl+Enter starts: a run, unless one is going.
         let run_now = results
             .as_ref()
             .filter(|r| !r.running)
@@ -3486,7 +3486,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
                 "?" => help.set(!*help),
                 "f" if command => finding.set(true),
-                "t" if command => {
+                // Simulink's Ctrl+T opens a tab in browsers, which no page
+                // can stop, so a run starts with Ctrl+Enter.
+                "Enter" if command => {
                     if let Some(run) = &run_now {
                         run.emit(());
                     }
@@ -3604,7 +3606,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         </button>
                     } else {
                         <button class="tool run-button" disabled={r.on_run.is_none()}
-                            title={r.run_unavailable.clone().unwrap_or_else(|| "Run the simulation with the Simulate tab's settings (Ctrl+T)".into())}
+                            title={r.run_unavailable.clone().unwrap_or_else(|| "Run the simulation with the Simulate tab's settings (Ctrl+Enter)".into())}
                             onclick={r.on_run.clone().map(|run| run.reform(|_: MouseEvent| ()))}>
                             { icons::run() }<span>{ "Run" }</span>
                         </button>
@@ -4076,7 +4078,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Ctrl+= / Ctrl+- / Ctrl+0", "Zoom in / out / to 100%"),
         ("Double-click a subsystem, or Enter", "Open it"),
         ("Ctrl+F", "Find blocks anywhere in the model"),
-        ("Ctrl+T", "Run the simulation"),
+        ("Ctrl+Enter", "Run the simulation"),
         (
             "Tab / Shift+Tab",
             "With a block selected, select the next / previous",
