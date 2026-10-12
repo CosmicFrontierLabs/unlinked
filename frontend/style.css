@@ -1726,3 +1726,9 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
     }
     .sim-body > .results-main { order: 1; }
 }
+/* Native file inputs remain keyboard-accessible within their styled labels. */
+.file-picker { position: relative; }
+.file-picker:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; }
+.local-viewer.over { outline: 2px dashed var(--blue); outline-offset: -3px; }
+.local-viewer.over .dropzone { border-color: var(--blue); background: var(--panel); }
+.local-file-error:not(:empty) { padding: .5rem 1rem; }

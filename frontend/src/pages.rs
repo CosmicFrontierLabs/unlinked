@@ -579,9 +579,9 @@ pub fn project_page(props: &ProjectProps) -> Html {
                 <div class="inline-form">
                     { text_input(&folder, "Upload folder (optional)") }
                     { text_input(&message, "Change message") }
-                    <label class="button primary">
+                    <label class="button primary file-picker">
                         { if *uploading { "Uploading…" } else { "Upload files…" } }
-                        <input type="file" multiple=true hidden=true onchange={on_upload} disabled={*uploading} />
+                        <input type="file" multiple=true class="sr-only" onchange={on_upload} disabled={*uploading} />
                     </label>
                 </div>
             }
@@ -1028,9 +1028,9 @@ pub fn file_page(props: &FileProps) -> Html {
                 }}>{ "Download" }</a>
                 if editor {
                     <button onclick={on_rename}>{ "Rename" }</button>
-                    <label class="button primary">
+                    <label class="button primary file-picker">
                         { "Upload new version…" }
-                        <input type="file" hidden=true onchange={on_new_version} />
+                        <input type="file" class="sr-only" onchange={on_new_version} />
                     </label>
                 }
             </div>
