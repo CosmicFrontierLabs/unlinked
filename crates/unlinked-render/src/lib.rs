@@ -599,6 +599,20 @@ fn label_layout(r: &route::RoutedLine) -> Option<TextBox> {
 }
 
 /// Signal port kinds that can be wired in the editor.
+/// A port kind as its tooltip names it.
+fn port_word(kind: PortKind) -> &'static str {
+    match kind {
+        PortKind::In => "Input",
+        PortKind::Out => "Output",
+        PortKind::Enable => "Enable",
+        PortKind::Trigger => "Trigger",
+        PortKind::State => "State",
+        PortKind::IfAction => "Action",
+        PortKind::Reset => "Reset",
+        PortKind::LConn | PortKind::RConn => "Connection",
+    }
+}
+
 const WIRABLE: [PortKind; 7] = [
     PortKind::In,
     PortKind::Out,
@@ -642,22 +656,35 @@ fn draw_hit_targets(
             ("stroke-width", "9".into()),
         ],
     );
-    for w in routed.iter().flat_map(|r| &r.wires) {
-        // A leaf names the port it drives; a branched line's trunk, its source.
-        let (class, data) = match (&w.dst, &w.src) {
-            (Some(dst), _) => ("wire-hit", endpoint_attrs("dst-", dst)),
-            (None, Some(src)) => ("trunk-hit", endpoint_attrs("src-", src)),
-            (None, None) => continue,
-        };
-        let pts: Vec<(f64, f64)> = w.points.iter().map(|p| (p.x, p.y)).collect();
-        let mut attrs = vec![
-            ("class", class.to_string()),
-            ("points", points_attr(&pts)),
-            ("data-fixed", w.fixed.to_string()),
-        ];
-        attrs.extend(data.iter().map(|(k, v)| (k.as_str(), v.clone())));
-        s.leaf("polyline", &attrs);
-        budget(s)?;
+    for r in routed {
+        for w in &r.wires {
+            // A leaf names the port it drives; a branched line's trunk, its
+            // source.
+            let (class, data) = match (&w.dst, &w.src) {
+                (Some(dst), _) => ("wire-hit", endpoint_attrs("dst-", dst)),
+                (None, Some(src)) => ("trunk-hit", endpoint_attrs("src-", src)),
+                (None, None) => continue,
+            };
+            let pts: Vec<(f64, f64)> = w.points.iter().map(|p| (p.x, p.y)).collect();
+            let mut attrs = vec![
+                ("class", class.to_string()),
+                ("points", points_attr(&pts)),
+                ("data-fixed", w.fixed.to_string()),
+            ];
+            attrs.extend(data.iter().map(|(k, v)| (k.as_str(), v.clone())));
+            // A named signal tells its name where the pointer rests.
+            match &r.label {
+                Some((_, name)) => {
+                    s.open("polyline", &attrs);
+                    s.open("title", &[]);
+                    s.raw(&svg::escape(name));
+                    s.close("title");
+                    s.close("polyline");
+                }
+                None => s.leaf("polyline", &attrs),
+            }
+            budget(s)?;
+        }
     }
     s.close("g");
 
@@ -685,7 +712,16 @@ fn draw_hit_targets(
                     ("r", "5".to_string()),
                 ];
                 attrs.extend(data.iter().map(|(k, v)| (k.as_str(), v.clone())));
-                s.leaf("circle", &attrs);
+                // Which port it is, where the pointer rests.
+                s.open("circle", &attrs);
+                s.open("title", &[]);
+                s.raw(&svg::escape(&format!(
+                    "{} {index} of {}",
+                    port_word(kind),
+                    b.name.replace('\n', " ")
+                )));
+                s.close("title");
+                s.close("circle");
             }
         }
         budget(s)?;
