@@ -23,8 +23,8 @@ use unlinked_model::scope::ScopeConfig;
 use unlinked_model::validation::{Diagnostic, DiagnosticTarget, Severity};
 use unlinked_model::{catalog, geometry};
 use unlinked_model::{
-    Annotation, Block, BlockId, Chart, Endpoint, Line, Model, Point, PortKind, PortRef, Rect,
-    System,
+    Annotation, Block, BlockId, Chart, Endpoint, Line, Model, Point, PortCounts, PortKind, PortRef,
+    Rect, System,
 };
 use unlinked_render::{render_chart_view_svg, render_svg, RenderOptions, Theme};
 use wasm_bindgen::JsCast;
@@ -172,6 +172,9 @@ enum Action {
     Group,
     Expand,
     Delete,
+    /// Delete the lone selected block, connecting what fed it to what it
+    /// fed.
+    Reconnect,
     /// Edit the name of the lone selected block.
     Rename,
     SelectAll,
@@ -348,12 +351,13 @@ const TOOLBAR: [&[Action]; 3] = [
     &[Action::Rotate, Action::Flip],
     &[Action::Group, Action::Expand],
 ];
-const MENU: [Action; 21] = [
+const MENU: [Action; 22] = [
     Action::Cut,
     Action::Copy,
     Action::Paste,
     Action::Duplicate,
     Action::Delete,
+    Action::Reconnect,
     Action::Rename,
     Action::AutoRoute,
     Action::Rotate,
@@ -407,7 +411,7 @@ fn available(action: Action, selection: &Selection, clipboard: bool, subsystem: 
         | Action::Flip
         | Action::Group
         | Action::Nudge(..) => blocks,
-        Action::Rename => selection.blocks().len() == 1,
+        Action::Rename | Action::Reconnect => selection.blocks().len() == 1,
         Action::Arrange(how) => selection.blocks().len() >= how.needs(),
         Action::AutoRoute => matches!(selection, Selection::Wire(_) | Selection::Trunk(_)),
         Action::Expand => subsystem,
@@ -454,6 +458,7 @@ impl Action {
             Action::Delete => icons::delete(),
             Action::Duplicate
             | Action::Rename
+            | Action::Reconnect
             | Action::SelectAll
             | Action::Nudge(..)
             | Action::Arrange(_)
@@ -474,6 +479,7 @@ impl Action {
             Action::Group => ("Group into subsystem", "Ctrl+G"),
             Action::Expand => ("Expand subsystem", "Ctrl+Shift+G"),
             Action::Delete => ("Delete", "Del"),
+            Action::Reconnect => ("Delete and reconnect", "Ctrl+Del"),
             Action::SelectAll => ("Select all", "Ctrl+A"),
             Action::Nudge(..) => ("Nudge", "Arrows"),
             Action::AutoRoute => ("Auto-route line", ""),
@@ -939,6 +945,62 @@ fn splice_edits(sys: &System, system: &SystemRef, add: &Edit, dst: &Endpoint) ->
             system: system.clone(),
             src,
             name: name.clone(),
+        });
+    }
+    Some(edits)
+}
+
+/// The edits deleting block `id` of `sys` and connecting the source of its
+/// one input to everything its one output fed, undoing a splice; none
+/// unless it has just those two ports, both connected, and is not in a loop
+/// with itself.
+fn reconnect_edits(sys: &System, system: &SystemRef, id: &BlockId) -> Option<Vec<Edit>> {
+    let block = sys.block(id)?;
+    let only_signal = PortCounts {
+        inputs: 1,
+        outputs: 1,
+        ..Default::default()
+    };
+    if block.ports != only_signal {
+        return None;
+    }
+    let port = |kind| Endpoint {
+        block: id.clone(),
+        port: PortRef { kind, index: 1 },
+    };
+    let into = unlinked_model::edit::line_into(sys, &port(PortKind::In))?;
+    let src = into.src.clone().filter(|s| s.block != *id)?;
+    let fed: Vec<Endpoint> = sys
+        .connections()
+        .into_iter()
+        .filter(|c| c.src == port(PortKind::Out))
+        .map(|c| c.dst)
+        .collect();
+    if fed.is_empty() || fed.iter().any(|d| d.block == *id) {
+        return None;
+    }
+    let mut edits = vec![Edit::DeleteBlock {
+        system: system.clone(),
+        id: id.clone(),
+        disconnect: DisconnectPolicy::Disconnect,
+    }];
+    edits.extend(fed.into_iter().map(|dst| Edit::Connect {
+        system: system.clone(),
+        src: src.clone(),
+        dst,
+    }));
+    // The signal keeps the name it had on the way in, or else on the way
+    // out.
+    let out = unlinked_model::edit::line_from(sys, &port(PortKind::Out));
+    if let Some(name) = into
+        .name
+        .clone()
+        .or_else(|| out.and_then(|l| l.name.clone()))
+    {
+        edits.push(Edit::SetSignalName {
+            system: system.clone(),
+            src,
+            name,
         });
     }
     Some(edits)
@@ -2982,6 +3044,25 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         name,
                     });
                 }
+                Action::Reconnect => {
+                    let id = BlockId(selection.blocks()[0].clone());
+                    let edits = system_names(&model, &system_ref).and_then(|names| {
+                        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                        reconnect_edits(model.system_at(&refs)?, &system_ref, &id)
+                    });
+                    match (edits, &on_error) {
+                        (Some(edits), _) => {
+                            on_edits.emit(edits);
+                            selection.set(Selection::Nothing);
+                        }
+                        (None, Some(on_error)) => on_error.emit(
+                            "Only a block with one input and one output, both connected, \
+                             can be deleted and reconnected"
+                                .into(),
+                        ),
+                        (None, None) => {}
+                    }
+                }
                 Action::Delete => match &*selection {
                     Selection::Wire(dst) => {
                         on_edit.emit(Edit::Disconnect {
@@ -3035,6 +3116,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "a" if command => Action::SelectAll,
                 "g" if command && e.shift_key() => Action::Expand,
                 "g" if command => Action::Group,
+                "delete" | "backspace" if command => Action::Reconnect,
                 "delete" | "backspace" => Action::Delete,
                 // Arrows nudge the selection by a grid step, or one unit
                 // with Shift.
@@ -3579,8 +3661,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
 
-    let enabled =
-        |a: Action| available(a, &selection, clipboard.borrow().is_some(), lone_subsystem);
+    // The open menu offers Delete and reconnect only where it can be done;
+    // worked out only while it is open, not on every render.
+    let reconnectable = match (selection.blocks(), system, menu.is_some()) {
+        ([id], Some(sys), true) => {
+            reconnect_edits(sys, &system_ref, &BlockId(id.clone())).is_some()
+        }
+        _ => false,
+    };
+    let enabled = |a: Action| {
+        available(a, &selection, clipboard.borrow().is_some(), lone_subsystem)
+            && (a != Action::Reconnect || reconnectable)
+    };
     // The context menu's Arrange commands that apply, and the items it
     // shows (the quick insert or Arrange count as one each).
     let arrange: Vec<Action> = MENU
@@ -4731,6 +4823,10 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Ctrl+E", "Model settings"),
         ("F2", "Rename the selected block"),
         ("Delete", "Delete the selection"),
+        (
+            "Ctrl+Delete",
+            "Delete a block in a line, reconnecting the line",
+        ),
         ("Arrows", "Nudge by a grid step (Shift: one unit)"),
         ("Ctrl+R / Ctrl+I", "Rotate / flip"),
         ("Ctrl+G / Ctrl+Shift+G", "Group into a subsystem / expand"),
@@ -5694,6 +5790,45 @@ mod tests {
                 Some("speed"),
                 "lone branch: {lone_branch}"
             );
+        }
+    }
+
+    #[test]
+    fn blocks_are_deleted_and_reconnected() {
+        // a -> b, named u; b -> c and d, branched.
+        let gain = |name: &str, sid: u32, x: u32| {
+            format!(" Block {{\n BlockType Gain\n Name {name}\n SID {sid}\n Ports [1, 1]\n Position [{x}, 0, {}, 30]\n }}\n", x + 30)
+        };
+        let mdl = format!(
+            "Model {{\n Name m\n System {{\n Name m\n{}{}{}{} Line {{\n Name u\n SrcBlock a\n SrcPort 1\n DstBlock b\n DstPort 1\n }}\n Line {{\n SrcBlock b\n SrcPort 1\n Branch {{\n DstBlock c\n DstPort 1\n }}\n Branch {{\n DstBlock d\n DstPort 1\n }}\n }}\n }}\n}}\n",
+            gain("a", 1, 0),
+            gain("b", 2, 100),
+            gain("c", 3, 200),
+            gain("d", 4, 300),
+        );
+        let mut model = unlinked_import::import_mdl("m.mdl", &mdl).unwrap();
+        // a's input and the branches' ends have nothing on one side.
+        for id in ["1", "3", "4"] {
+            assert!(reconnect_edits(&model.root, &vec![], &id.into()).is_none());
+        }
+        let group = reconnect_edits(&model.root, &vec![], &"2".into()).unwrap();
+        unlinked_model::edit::apply_batch(&mut model, &group).unwrap();
+        // As edited, and as saved to the file and read back.
+        let bytes = unlinked_import::patch::apply_edits("m.mdl", mdl.as_bytes(), &group).unwrap();
+        let saved =
+            unlinked_import::import_mdl("m.mdl", std::str::from_utf8(&bytes).unwrap()).unwrap();
+        for model in [&model, &saved] {
+            assert!(model.root.block(&"2".into()).is_none());
+            let mut pairs: Vec<(String, String)> = model
+                .root
+                .connections()
+                .iter()
+                .map(|c| (c.src.block.0.clone(), c.dst.block.0.clone()))
+                .collect();
+            pairs.sort();
+            assert_eq!(pairs, [("1".into(), "3".into()), ("1".into(), "4".into())]);
+            let from_a = model.root.lines.iter().find(|l| l.src.is_some()).unwrap();
+            assert_eq!(from_a.name.as_deref(), Some("u"));
         }
     }
 
