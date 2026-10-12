@@ -1414,11 +1414,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             }
                             None => ((snap(dx), snap(dy)), Vec::new()),
                         };
+                        // Even where the offset stays: Alt can drop guides.
+                        if *guides != lined_up {
+                            guides.set(lined_up);
+                        }
                         if to == *offset {
                             return;
                         }
                         *offset = to;
-                        guides.set(lined_up);
                         for (group, ..) in blocks.iter() {
                             let _ = group.set_attribute(
                                 "transform",
