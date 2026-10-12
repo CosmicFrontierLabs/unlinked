@@ -68,6 +68,21 @@ with sync_playwright() as p:
     page.screenshot(path='/tmp/unlinked-parameter-help.png')
     diagram.get_by_role('listitem',name=re.compile(r'^Ground \(Ground\):')).dblclick()
     expect(page.get_by_text('No matching parameters.',exact=True)).to_have_count(0)
+    # Removing a wired reset port is rejected; the select must stay committed.
+    guarded=browser.new_page(viewport={'width':1440,'height':1000})
+    guarded.request.get(args.url+'/api/auth/dev-login')
+    guarded.on('pageerror',lambda e:errors.append(str(e)))
+    fixture='Model {\n Name "connected_reset"\n System {\n  Name "connected_reset"\n  Block {\n   BlockType Constant\n   Name "Reset"\n   SID "1"\n   Position [20, 40, 50, 70]\n   Value "1"\n  }\n  Block {\n   BlockType Integrator\n   Name "State"\n   SID "2"\n   Position [180, 40, 220, 80]\n   Ports [2, 1]\n   ExternalReset "rising"\n  }\n  Line {\n   SrcBlock "Reset"\n   SrcPort 1\n   DstBlock "State"\n   DstPort 2\n  }\n }\n}\n'
+    guarded.route('**/api/projects/**/files/**/content',lambda route:route.fulfill(content_type='application/octet-stream',body=fixture))
+    guarded.goto(args.url+args.model)
+    guarded.locator('g.block[data-name="State"]').click()
+    reset=guarded.get_by_label('External reset',exact=True)
+    expect(reset).to_have_value('rising')
+    reset.select_option('none')
+    expect(guarded.locator('.edit-bar.error')).to_be_visible()
+    expect(reset).to_have_value('rising')
+    expect(guarded.locator('circle.port-hit[data-sid="2"][data-kind="in"][data-index="2"]')).to_have_count(1)
+    guarded.close()
     assert not errors,errors
     print('PASS: keyboard/touch help controls, description IDs, solver validation and recovery, parameter filtering')
     browser.close()

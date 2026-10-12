@@ -35,9 +35,21 @@ pub fn select(props: &SelectProps) -> Html {
             }
         });
     }
+    let onchange = {
+        let (node, value, changed) = (node.clone(), props.value.clone(), props.onchange.clone());
+        Callback::from(move |event: Event| {
+            changed.emit(event);
+            // A rejected edit may leave props equal, skipping another render.
+            // Restore the committed value now; an accepted edit's render will
+            // apply its new value through the effect above.
+            if let Some(select) = node.cast::<HtmlSelectElement>() {
+                select.set_value(&value);
+            }
+        })
+    };
     html! {
         <select ref={node} id={props.id.clone()} disabled={props.disabled}
-            onchange={props.onchange.clone()} aria-invalid={props.aria_invalid.clone()}
+            {onchange} aria-invalid={props.aria_invalid.clone()}
             aria-describedby={props.aria_describedby.clone()}>
             {props.children.clone()}
         </select>
