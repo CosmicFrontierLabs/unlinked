@@ -1748,3 +1748,6 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .local-viewer.over { outline: 2px dashed var(--blue); outline-offset: -3px; }
 .local-viewer.over .dropzone { border-color: var(--blue); background: var(--panel); }
 .local-file-error:not(:empty) { padding: .5rem 1rem; }
+
+/* Plot image export keeps actions usable on narrow screens. */
+.plot-actions { flex-wrap: wrap; }
