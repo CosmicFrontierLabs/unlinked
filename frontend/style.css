@@ -1312,3 +1312,40 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .sim-empty p { color: #a9b1d6; }
 button:disabled { cursor: not-allowed; opacity: 0.5; }
 @media (max-width: 700px) { .sim-status { max-width: 100%; } .sim-number { width: 8rem; } .sim-toolbar, .sim-form { padding: 0.6rem; } .sample-estimate { padding-top: 0.3rem; } }
+
+/* Simulation signal inspector: searchable traces and sampled measurements. */
+.sim-body .results-main { flex: 1; min-width: 0; overflow: auto; }
+.results-main .plot-host { overflow: auto; }
+.results-identity { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: center; padding: .7rem 1rem 0; font-size: .85rem; }
+.results-identity span { color: #a9b1d6; }
+.sim-body .signal-list { width: 285px; flex-shrink: 0; }
+.signal-search { box-sizing: border-box; width: 100%; margin-bottom: .5rem; }
+.signal-selection-actions { display: flex; gap: .4rem; margin-bottom: .6rem; }
+.signal-selection-actions button { font-size: .8rem; padding: .3rem .5rem; }
+.signal-options { max-height: 320px; overflow: auto; }
+.signal-options .signal { padding: .35rem .2rem; border-radius: 4px; }
+.signal-options .signal:hover { background: rgba(122,162,247,.1); }
+.signal-name { min-width: 0; overflow-wrap: anywhere; word-break: normal; }
+.signal-swatch { display: inline-block; flex: 0 0 16px; width: 16px; height: 4px; border-radius: 2px; margin-right: .3rem; vertical-align: middle; }
+.run-history-item { width: 100%; text-align: left; padding: .4rem .5rem; }
+.signal-measurements { margin: .2rem .75rem .75rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-alt); }
+.measurements-toggle { width: 100%; text-align: left; border: 0; padding: .65rem .75rem; background: transparent; }
+.measurement-controls { padding: .4rem .75rem; display: flex; flex-wrap: wrap; align-items: end; gap: .7rem; }
+.measurement-controls label { display: flex; flex-direction: column; gap: .3rem; font-size: .8rem; }
+.measurement-controls input { width: 120px; }
+.measurement-controls input[aria-invalid=true] { border-color: var(--red); }
+.measurement-modes { display: flex; gap: .3rem; }
+.measurement-modes button { font-size: .8rem; }
+.measurement-note, .signal-measurements > p { margin: .5rem .75rem; font-size: .8rem; color: #a9b1d6; }
+.measurement-table-scroll { overflow-x: auto; }
+.measurement-table { width: 100%; border-collapse: collapse; font-size: .8rem; font-variant-numeric: tabular-nums; }
+.measurement-table td, .measurement-table th { text-align: right; padding: .45rem .7rem; border-top: 1px solid var(--border); white-space: nowrap; }
+.measurement-table th:first-child { text-align: left; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.measurement-table tbody th { font-weight: normal; }
+.sim-panel .muted { color: #a9b1d6; }
+@media (max-width: 850px) {
+    .sim-body { flex-direction: column; overflow: auto; }
+    .sim-body .results-main { flex: none; overflow: visible; }
+    .sim-body .signal-list { box-sizing: border-box; width: 100%; border-left: 0; border-top: 1px solid var(--border); flex-shrink: 0; }
+    .signal-options { max-height: 220px; }
+}

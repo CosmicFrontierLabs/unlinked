@@ -7,7 +7,9 @@
 //! generation, so a stale stream or response can never overwrite newer data.
 
 mod form;
+mod inspector;
 use form::RunForm;
+use inspector::Measurements;
 
 use crate::api;
 use crate::diagram::fmt_num;
@@ -183,6 +185,7 @@ struct Controller {
     sender: Option<Sender<SimulationSocket>>,
     /// Server id of the live run, once known.
     run_id: Option<Uuid>,
+    run_version: Option<i32>,
     stopping: bool,
     /// Aborts the live run's socket task, dropping its receiver at once.
     task: Option<AbortHandle>,
@@ -204,6 +207,7 @@ impl Controller {
         self.session = None;
         self.sender = None;
         self.run_id = None;
+        self.run_version = None;
         self.stopping = false;
         self.requested_options = None;
         self.last_refresh = 0.0;
@@ -236,7 +240,11 @@ impl Controller {
         for &i in &self.plotted {
             let y = self.columns.get(i).map(Vec::as_slice).unwrap_or(&[]);
             let n = y.len().min(self.time.len());
-            fig.plot(ax, &self.time[..n], &y[..n]).map_err(err)?;
+            let style = js_sys::Object::new();
+            js_sys::Reflect::set(&style, &"color".into(), &inspector::color(i).into())
+                .map_err(err)?;
+            fig.plot_styled(ax, &self.time[..n], &y[..n], &style)
+                .map_err(err)?;
         }
         if !self.plotted.is_empty() {
             let labels = self
@@ -490,6 +498,8 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let rebind = use_reload();
     // Presentation only: generated signals stay in the trace and plot.
     let show_generated = use_state(|| false);
+    let signal_query = use_state(String::new);
+    let current_version_only = use_state(|| false);
     let toggle_generated = {
         let show_generated = show_generated.clone();
         Callback::from(move |_: Event| show_generated.set(!*show_generated))
@@ -612,6 +622,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 }
             };
             let generation = ctl.borrow_mut().reset();
+            ctl.borrow_mut().run_version = Some(version);
             ctl.borrow_mut().requested_options = Some(request.options.clone());
             rebind.dispatch(());
             state.set(RunState::Connecting);
@@ -721,6 +732,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                             ctl.borrow_mut().requested_options =
                                 Some(result.run.request.options.clone());
                             ctl.borrow_mut().run_id = Some(result.run.id);
+                            ctl.borrow_mut().run_version = Some(result.run.file_version);
                             if let Some(trace) = result.trace {
                                 let (signals, columns) =
                                     stored_columns(trace.signals, &result.signals);
@@ -813,6 +825,43 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     c.plotted.sort_unstable();
                 }
             }
+            rebind.dispatch(());
+        })
+    };
+
+    let set_signal_query = {
+        let query = signal_query.clone();
+        Callback::from(move |e: InputEvent| {
+            query.set(e.target_unchecked_into::<HtmlInputElement>().value())
+        })
+    };
+    let toggle_version_filter = {
+        let filter = current_version_only.clone();
+        Callback::from(move |_: Event| filter.set(!*filter))
+    };
+    let visible_signals: Vec<usize> = {
+        let c = ctl.borrow();
+        let query = signal_query.trim().to_lowercase();
+        picker_order(&c.signals, &props.outports, *show_generated)
+            .into_iter()
+            .filter(|&i| {
+                c.signals[i].name.to_lowercase().contains(&query)
+                    || c.signals[i].id.to_lowercase().contains(&query)
+            })
+            .collect()
+    };
+    let select_visible = |selected: bool| {
+        let (ctl, rebind, visible) = (ctl.clone(), rebind.clone(), visible_signals.clone());
+        Callback::from(move |_: MouseEvent| {
+            let mut c = ctl.borrow_mut();
+            if selected {
+                c.plotted.extend(&visible);
+                c.plotted.sort_unstable();
+                c.plotted.dedup();
+            } else {
+                c.plotted.retain(|i| !visible.contains(i));
+            }
+            drop(c);
             rebind.dispatch(());
         })
     };
@@ -969,6 +1018,13 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 </div>
             }
             <div class="sim-body">
+                <div class="results-main">
+                    if let Some(version) = c.run_version {
+                        <div class="results-identity"><strong>{ format!("Results · v{version}") }</strong>
+                            if version != props.version { <span>{ format!("Viewing an earlier model version; Run uses v{}.", props.version) }</span> }
+                            if let Some(id) = c.run_id { <span title={id.to_string()}>{ format!("Run {}", &id.to_string()[..8]) }</span> }
+                        </div>
+                    }
                 <div class="plot-host" ref={plot_host}>
                     <canvas id={canvas_id.clone()} hidden={c.signals.is_empty()} />
                     if c.signals.is_empty() {
@@ -980,17 +1036,28 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         </div>
                     }
                 </div>
+                    if samples > 0 { <Measurements key={c.generation.to_string()} controller={ctl.clone()} samples={samples} selected={c.plotted.clone()} /> }
+                </div>
                 <aside class="signal-list">
-                    <h4>{ "Signals" }</h4>
-                    { for picker_order(&c.signals, &props.outports, *show_generated).into_iter().map(|i| {
+                    <h4>{ format!("Signals · {} selected", c.plotted.len()) }</h4>
+                    <input class="signal-search" type="search" aria-label="Search signals" placeholder="Search signals…" value={(*signal_query).clone()} oninput={set_signal_query} />
+                    <div class="signal-selection-actions">
+                        <button onclick={select_visible(true)} disabled={visible_signals.is_empty()}>{ "Select visible" }</button>
+                        <button onclick={select_visible(false)} disabled={visible_signals.is_empty()}>{ "Clear visible" }</button>
+                    </div>
+                    <div class="signal-options">
+                    if visible_signals.is_empty() { <p class="muted">{ if c.signals.is_empty() { "Signals appear after a run starts." } else { "No matching signals." } }</p> }
+                    { for visible_signals.iter().copied().map(|i| {
                         let s = &c.signals[i];
                         html! {
-                            <label class={classes!("signal", is_generated(s).then_some("generated"))}>
+                            <label class={classes!("signal", is_generated(s).then_some("generated"))} title={format!("{} ({})", s.name, s.id)}>
                                 <input type="checkbox" checked={c.plotted.contains(&i)} onchange={toggle_signal(i)} />
-                                { label(&s.name) }
+                                <span class="signal-swatch" style={format!("background:{}", inspector::color(i))} />
+                                <span class="signal-name">{ label(&s.name) }</span>
                             </label>
                         }
                     }) }
+                    </div>
                     if generated_count > 0 {
                         <label class="signal toggle">
                             <input type="checkbox" checked={*show_generated} onchange={toggle_generated} />
@@ -998,13 +1065,15 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         </label>
                     }
                     <h4>{ "Previous runs" }</h4>
+                    <label class="signal toggle"><input type="checkbox" checked={*current_version_only} onchange={toggle_version_filter} />{ format!("Only v{}", props.version) }</label>
                     { view(&runs, |rs: &Vec<SimulationRun>| html! {
                         <ul class="plain runs">
-                            { for rs.iter().map(|r| html! {
+                            if rs.is_empty() { <li class="muted">{ "No previous runs." }</li> }
+                            { for rs.iter().filter(|r| !*current_version_only || r.file_version == props.version).map(|r| html! {
                                 <li>
-                                    <a class={classes!(running.then_some("disabled"))} onclick={load_run(r.clone())}>
+                                    <button class={classes!("run-history-item", (c.run_id == Some(r.id)).then_some("active"))} disabled={running} onclick={load_run(r.clone())} aria-pressed={(c.run_id == Some(r.id)).to_string()}>
                                         { format!("v{} · {:?}", r.file_version, r.status) }
-                                    </a>
+                                    </button>
                                     <div class="muted">{ r.created_at.format("%Y-%m-%d %H:%M:%S").to_string() }</div>
                                 </li>
                             }) }

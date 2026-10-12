@@ -111,7 +111,7 @@ with sync_playwright() as p:
     expect(stop).to_have_value(before)
     page.get_by_role('button', name='Simulate', exact=True).click()
     expect(simulation.locator('.workspace-notice')).to_have_count(0)
-    simulation.locator('.runs a').first.click()
+    simulation.locator('.runs button').first.click()
     expect(simulation.locator('.sim-actions')).to_contain_text('Completed')
     expect(simulation.locator('.signal-list input[type=checkbox]').first).to_be_visible()
     selected = simulation.locator('.signal-list input[type=checkbox]:checked').count()
