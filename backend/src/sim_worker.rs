@@ -46,13 +46,6 @@ impl Drop for Worker {
     }
 }
 
-fn capacity() -> Arc<Semaphore> {
-    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    SEMAPHORE
-        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT)))
-        .clone()
-}
-
 #[derive(Debug, Clone)]
 pub struct Failure {
     pub message: String,
@@ -75,33 +68,52 @@ pub struct Reservation {
     _global: OwnedSemaphorePermit,
     _user: OwnedSemaphorePermit,
 }
+/// One accounting domain. Production uses one process-wide instance; worker
+/// unit tests use their own so unrelated tests cannot exhaust their permits.
+struct Capacity {
+    global: Arc<Semaphore>,
+    users: std::sync::Mutex<std::collections::HashMap<uuid::Uuid, std::sync::Weak<Semaphore>>>,
+}
+impl Default for Capacity {
+    fn default() -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(MAX_CONCURRENT)),
+            users: Default::default(),
+        }
+    }
+}
+impl Capacity {
+    fn reserve(&self, user_id: uuid::Uuid) -> Result<Reservation, String> {
+        let permit = self
+            .global
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "simulation capacity is full; retry later".to_string())?;
+        let user_capacity = {
+            let mut users = self
+                .users
+                .lock()
+                .map_err(|_| "worker accounting unavailable".to_string())?;
+            users.retain(|_, v| v.strong_count() > 0);
+            let capacity = users
+                .get(&user_id)
+                .and_then(std::sync::Weak::upgrade)
+                .unwrap_or_else(|| Arc::new(Semaphore::new(2)));
+            users.insert(user_id, Arc::downgrade(&capacity));
+            capacity
+        };
+        let user_permit = user_capacity
+            .try_acquire_owned()
+            .map_err(|_| "you already have two active simulations".to_string())?;
+        Ok(Reservation {
+            _global: permit,
+            _user: user_permit,
+        })
+    }
+}
 pub fn reserve(user_id: uuid::Uuid) -> Result<Reservation, String> {
-    let permit = capacity()
-        .try_acquire_owned()
-        .map_err(|_| "simulation capacity is full; retry later".to_string())?;
-    static USERS: OnceLock<
-        std::sync::Mutex<std::collections::HashMap<uuid::Uuid, std::sync::Weak<Semaphore>>>,
-    > = OnceLock::new();
-    let user_capacity = {
-        let mut users = USERS
-            .get_or_init(Default::default)
-            .lock()
-            .map_err(|_| "worker accounting unavailable".to_string())?;
-        users.retain(|_, v| v.strong_count() > 0);
-        let capacity = users
-            .get(&user_id)
-            .and_then(std::sync::Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(Semaphore::new(2)));
-        users.insert(user_id, Arc::downgrade(&capacity));
-        capacity
-    };
-    let user_permit = user_capacity
-        .try_acquire_owned()
-        .map_err(|_| "you already have two active simulations".to_string())?;
-    Ok(Reservation {
-        _global: permit,
-        _user: user_permit,
-    })
+    static CAPACITY: OnceLock<Capacity> = OnceLock::new();
+    CAPACITY.get_or_init(Capacity::default).reserve(user_id)
 }
 pub fn start(
     reservation: Reservation,
@@ -326,6 +338,34 @@ fn parameter_literal(value: &unlinked_matlab::array_runtime::Value) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_limits_users_and_global_slots_and_releases_failed_reservations() {
+        let capacity = Capacity::default();
+        let user = uuid::Uuid::new_v4();
+        let first = capacity.reserve(user).unwrap();
+        let second = capacity.reserve(user).unwrap();
+        assert!(capacity.reserve(user).err().unwrap().contains("two active"));
+        // A denied per-user request must release its temporary global permit.
+        let third = capacity.reserve(uuid::Uuid::new_v4()).unwrap();
+        let fourth = capacity.reserve(uuid::Uuid::new_v4()).unwrap();
+        assert!(capacity
+            .reserve(uuid::Uuid::new_v4())
+            .err()
+            .unwrap()
+            .contains("capacity is full"));
+        // Independent accounting remains available while this pool is full.
+        let independent = Capacity::default().reserve(user).unwrap();
+        drop(first);
+        let replacement = capacity.reserve(user).unwrap();
+        drop((second, third, fourth, replacement, independent));
+        assert_eq!(capacity.global.available_permits(), MAX_CONCURRENT);
+        // The weak user entry must also allow a fresh pair after both drop.
+        let first = capacity.reserve(user).unwrap();
+        let second = capacity.reserve(user).unwrap();
+        assert!(capacity.reserve(user).is_err());
+        drop((first, second));
+    }
     #[tokio::test]
     async fn root_inputs_are_explicit_and_evaluated_after_workspace_overrides() {
         use std::collections::BTreeMap;
@@ -340,7 +380,7 @@ mod tests {
             (BTreeMap::from([("1".into(), "K/2".into())]), Some(9.0)),
         ] {
             let mut worker = start(
-                reserve(uuid::Uuid::new_v4()).unwrap(),
+                Capacity::default().reserve(uuid::Uuid::new_v4()).unwrap(),
                 "input.mdl".into(),
                 source.as_bytes().to_vec(),
                 shared::SimulationRequest {
@@ -392,7 +432,7 @@ mod tests {
         let captured = Arc::new(std::sync::Mutex::new(None));
         let captured_result = captured.clone();
         let mut worker = start(
-            reserve(uuid::Uuid::new_v4()).unwrap(),
+            Capacity::default().reserve(uuid::Uuid::new_v4()).unwrap(),
             "scalar.mdl".into(),
             include_bytes!("../../crates/unlinked-cli/tests/fixtures/scalar.mdl").to_vec(),
             shared::SimulationRequest {
@@ -453,7 +493,7 @@ mod cancellation_tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
         let mut worker = start(
-            reserve(uuid::Uuid::new_v4()).unwrap(),
+            Capacity::default().reserve(uuid::Uuid::new_v4()).unwrap(),
             "scalar.mdl".into(),
             include_bytes!("../../crates/unlinked-cli/tests/fixtures/scalar.mdl").to_vec(),
             shared::SimulationRequest {
