@@ -2282,6 +2282,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }) => {
                     let (dx, dy) = (cx - *sx, cy - *sy);
                     *moved |= dx.abs() + dy.abs() > 3.0;
+                    // Shift keeps the move straight across or straight up and
+                    // down, whichever it is more of, as in Simulink.
+                    let lock = e.shift_key().then_some(dx.abs() >= dy.abs());
+                    let (dx, dy) = match lock {
+                        Some(true) => (dx, 0.0),
+                        Some(false) => (0.0, dy),
+                        None => (dx, dy),
+                    };
                     if *moved {
                         // Snap in diagram units; preview by translating the
                         // blocks' groups until the edits are applied.
@@ -2298,6 +2306,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                 align(sys, &ids, (snap(dx), snap(dy)), GUIDE_REACH / view.scale)
                             }
                             None => ((snap(dx), snap(dy)), Vec::new()),
+                        };
+                        // Guides line up only along the axis left free.
+                        let (to, lined_up) = match lock {
+                            Some(true) => (
+                                (to.0, 0.0),
+                                lined_up
+                                    .into_iter()
+                                    .filter(|g| matches!(g, Guide::Vertical { .. }))
+                                    .collect(),
+                            ),
+                            Some(false) => (
+                                (0.0, to.1),
+                                lined_up
+                                    .into_iter()
+                                    .filter(|g| matches!(g, Guide::Horizontal { .. }))
+                                    .collect(),
+                            ),
+                            None => (to, lined_up),
                         };
                         // Even where the offset stays: Alt can drop guides.
                         if *guides != lined_up {
@@ -4818,6 +4844,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Ctrl+click a block", "Connect the selected block to it"),
         ("Drag a line segment", "Reroute it"),
         ("Ctrl+drag a block", "Copy it there"),
+        ("Shift+drag blocks", "Keep the move straight"),
         ("Ctrl+X / Ctrl+C / Ctrl+V", "Cut / copy / paste"),
         ("Ctrl+D", "Update the diagram: check that it compiles"),
         ("Ctrl+E", "Model settings"),
