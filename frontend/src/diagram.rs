@@ -1150,11 +1150,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         .is_some_and(|(r, run)| r.dirty || run.version != r.shown_version);
     let values = {
         let (model, run) = (props.model.clone(), run.clone());
+        // By the run's identity: shown runs are immutable snapshots, and
+        // comparing their samples would cost more than labelling.
         use_memo(
             (
                 Rc::as_ptr(&props.model) as usize,
                 (*path).clone(),
-                run.clone(),
+                run.as_ref().map(|r| Rc::as_ptr(r) as usize),
             ),
             move |(_, path, _)| {
                 let refs: Vec<&str> = path.iter().map(String::as_str).collect();
@@ -3469,7 +3471,6 @@ struct LineInspectorProps {
 }
 
 /// A line's signal as the shown run recorded it.
-#[derive(PartialEq)]
 struct Recorded {
     run: Rc<ShownRun>,
     /// The run's signals carrying the line's value, one per component.
@@ -3478,6 +3479,17 @@ struct Recorded {
     stale: bool,
     /// Plots a recorded signal by ID in the simulation pane.
     on_plot: Callback<String>,
+}
+
+/// By the run's identity rather than its samples, which are immutable and
+/// may be many (and NaN, never equal to itself).
+impl PartialEq for Recorded {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.run, &other.run)
+            && self.indices == other.indices
+            && self.stale == other.stale
+            && self.on_plot == other.on_plot
+    }
 }
 
 /// A sparkline of components `indices` of `run`, with the chosen sample
