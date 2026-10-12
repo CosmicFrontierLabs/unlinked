@@ -2376,6 +2376,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 p.push(name);
                 path.set(p);
                 selection.set(Selection::Nothing);
+                return;
+            }
+            // Double-clicking another block edits its parameters, and an
+            // annotation its text, as in Simulink: the first click selected
+            // it, so its inspector is showing.
+            let field = if closest(e.target(), "[data-annotation]").is_some() {
+                ".inspector textarea.annotation-text"
+            } else if block_group(e.target()).is_some() {
+                ".inspector :is(input.param, select, textarea)"
+            } else {
+                return;
+            };
+            let field = container
+                .cast::<Element>()
+                .and_then(|c| c.parent_element())
+                .and_then(|v| v.query_selector(field).ok().flatten())
+                .and_then(|f| f.dyn_into::<HtmlElement>().ok());
+            if let (true, Some(field)) = (editable, field) {
+                let _ = field.focus();
+                if let Some(input) = field.dyn_ref::<HtmlInputElement>() {
+                    input.select();
+                }
             }
         })
     };
@@ -2742,8 +2764,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // are editing actions.
     let onkeydown = {
         let (fit_view, zoom_by, help) = (fit_view.clone(), zoom_by.clone(), help.clone());
-        let finding = finding.clone();
+        let (finding, reveal) = (finding.clone(), reveal.clone());
         let (selection, path, menu) = (selection.clone(), path.clone(), menu.clone());
+        let order: Vec<String> = system
+            .map(|s| s.blocks.iter().map(|b| b.id.0.clone()).collect())
+            .unwrap_or_default();
         Callback::from(move |e: KeyboardEvent| {
             // Keys for controls shown over the canvas are theirs.
             let control = closest(
@@ -2761,6 +2786,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
                 "?" => help.set(!*help),
                 "f" if command => finding.set(true),
+                // With a block selected, Tab steps through the blocks and
+                // Shift+Tab back; otherwise Tab moves focus as usual, so the
+                // canvas never traps it.
+                "Tab" if !command && !selection.blocks().is_empty() => {
+                    let n = order.len();
+                    let at = selection
+                        .blocks()
+                        .last()
+                        .and_then(|id| order.iter().position(|o| o == id))
+                        .unwrap_or(0);
+                    let next = if e.shift_key() {
+                        (at + n - 1) % n
+                    } else {
+                        (at + 1) % n
+                    };
+                    selection.set(Selection::Blocks(vec![order[next].clone()]));
+                    reveal.emit(order[next].clone());
+                }
                 "Escape" => {
                     if menu.is_some() {
                         menu.set(None);
@@ -3084,6 +3127,10 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Ctrl+= / Ctrl+-", "Zoom in / out"),
         ("Double-click a subsystem", "Open it"),
         ("Ctrl+F", "Find blocks anywhere in the model"),
+        (
+            "Tab / Shift+Tab",
+            "With a block selected, select the next / previous",
+        ),
         ("Esc", "Clear the selection, or go up a level"),
         ("?", "Show these shortcuts"),
     ];
@@ -3091,6 +3138,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Drag on empty canvas", "Select by box; Shift adds"),
         ("Shift+click", "Add to or remove from the selection"),
         ("Double-click empty canvas", "Find and add a block"),
+        ("Double-click a block", "Edit its parameters"),
         ("Drag from a port", "Connect to another port"),
         ("Ctrl+drag a line", "Branch it"),
         ("Ctrl+click a block", "Connect the selected block to it"),
