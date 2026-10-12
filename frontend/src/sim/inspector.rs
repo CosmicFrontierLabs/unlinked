@@ -108,6 +108,10 @@ impl PartialEq for InspectorProps {
 
 #[function_component(Measurements)]
 pub(super) fn measurements(props: &InspectorProps) -> Html {
+    static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let instance = use_state(|| NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let content_id = format!("measurement-content-{}", *instance);
+    let error_id = format!("measurement-cursor-error-{}", *instance);
     let expanded = use_state(|| false);
     let intervals = use_state(|| false);
     let a = use_state(String::new);
@@ -144,7 +148,7 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
         });
         html! { <label>{ name }<input type="text" inputmode="decimal" aria-label={name}
         value={(**draft).clone()} placeholder={default.map(|v| number(*v))}
-        aria-invalid={(!valid).to_string()} aria-describedby={(!valid).then_some("measurement-cursor-error")} {oninput} /></label> }
+        aria-invalid={(!valid).to_string()} aria-describedby={(!valid).then_some(error_id.clone())} {oninput} /></label> }
     };
     let mode = |stats: bool, name: &'static str| {
         let intervals = intervals.clone();
@@ -156,11 +160,11 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
     };
     html! {
         <section class="signal-measurements" aria-label="Signal measurements">
-            <button class="measurements-toggle" onclick={toggle} aria-expanded={expanded.to_string()} aria-controls="measurement-content">
+            <button class="measurements-toggle" onclick={toggle} aria-expanded={expanded.to_string()} aria-controls={content_id.clone()}>
                 { if *expanded { "▾ Measurements" } else { "▸ Measurements" } }
             </button>
             if *expanded {
-                <div id="measurement-content">
+                <div id={content_id}>
                 <div class="measurement-controls">
                     { input("Cursor A (s)", &a, c.time.first(), ia.is_some()) }
                     { input("Cursor B (s)", &b, c.time.last(), ib.is_some()) }
@@ -195,7 +199,7 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
                         </table></div>
                     }
                     if *intervals { <p class="muted measurement-note">{ "Statistics include both endpoint samples, weight each sample equally, and omit nonfinite values." }</p> }
-                } else { <p id="measurement-cursor-error" class="field-error" role="alert">{ "Enter finite cursor times to inspect recorded samples." }</p> }
+                } else { <p id={error_id} class="field-error" role="alert">{ "Enter finite cursor times to inspect recorded samples." }</p> }
                 </div>
             }
         </section>
