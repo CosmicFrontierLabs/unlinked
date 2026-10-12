@@ -73,6 +73,7 @@ with sync_playwright() as p:
         sim.get_by_role('button',name='Export PNG',exact=True).click()
     assert image.value.suggested_filename==f"plot-{runs[0]['id']}.png"
     assert Path(image.value.path()).read_bytes()==base64.b64decode(comparison_pixels.split(',',1)[1])
+    assert canvas.evaluate("e=>e.getContext('2d').getImageData(0,0,e.width,e.height).data.every((v,i)=>i%4!==3||v===255)"),'Exported plot must have an opaque background'
     assert canvas.evaluate('e=>e.toDataURL()')==comparison_pixels,'Export changed the view'
     canvas.evaluate("e=>{e.originalToDataURL=e.toDataURL;e.toDataURL=()=>{throw new Error('Test encoder failure')}}")
     sim.get_by_role('button',name='Export PNG',exact=True).click()
