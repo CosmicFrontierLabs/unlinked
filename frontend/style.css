@@ -5,7 +5,7 @@
     --panel: #24283b;
     --border: #3b4261;
     --fg: #c0caf5;
-    --muted: #565f89;
+    --muted: #9aa5ce;
     --blue: #7aa2f7;
     --green: #9ece6a;
     --red: #f7768e;
@@ -1224,6 +1224,11 @@ button.tool.run-button.running {
 .overlay .port-values.stale text {
     fill: var(--muted);
     font-style: italic;
+}
+
+/* The readable dark-page muted token is too pale against the light canvas. */
+.diagram.light .overlay :is(.port-values, .display-values).stale text {
+    fill: #565f89;
 }
 
 button.tool.stale {

@@ -54,6 +54,7 @@ fn text_input(state: &UseStateHandle<String>, placeholder: &str) -> Html {
     let s = state.clone();
     html! {
         <input value={(**state).clone()} placeholder={placeholder.to_string()}
+            aria-label={if placeholder == "email@example.com" { "Member email" } else { placeholder }.to_string()}
             oninput={Callback::from(move |e: InputEvent| s.set(input_value(e)))} />
     }
 }
@@ -267,7 +268,7 @@ pub fn org_page(props: &OrgProps) -> Html {
                                 <td>{ who(&Some(m.user.clone())) }<div class="muted">{ &m.user.email }</div></td>
                                 <td>
                                     if admin {
-                                        <select onchange={on_role}>
+                                        <select onchange={on_role} aria-label={format!("Organization role for {}", m.user.email)}>
                                             { for ORG_ROLES.iter().map(|r| html! {
                                                 <option value={r.as_str()} selected={*r == m.role}>{ r.as_str() }</option>
                                             }) }
@@ -334,7 +335,7 @@ pub fn org_page(props: &OrgProps) -> Html {
                 { text_input(&project_name, "Project name") }
                 { text_input(&project_desc, "Description") }
                 <label class="muted">{ "Org members get " }</label>
-                <select onchange={set_default}>
+                <select onchange={set_default} aria-label="Default project access for organization members">
                     { for DEFAULT_ROLES.iter().map(|r| html! {
                         <option value={r.as_str()} selected={*r == *project_default}>{ r.as_str() }</option>
                     }) }
@@ -347,7 +348,7 @@ pub fn org_page(props: &OrgProps) -> Html {
             if admin {
                 <form class="inline-form" onsubmit={add_member}>
                     { text_input(&email, "email@example.com") }
-                    <select onchange={set_role}>
+                    <select onchange={set_role} aria-label="New organization member role">
                         { for ORG_ROLES.iter().map(|r| html! {
                             <option value={r.as_str()} selected={*r == *role}>{ r.as_str() }</option>
                         }) }
@@ -544,7 +545,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
                                 <td>{ who(&Some(m.user.clone())) }<div class="muted">{ &m.user.email }</div></td>
                                 <td>
                                     if owner {
-                                        <select onchange={on_role}>
+                                        <select onchange={on_role} aria-label={format!("Project role for {}", m.user.email)}>
                                             { for PROJECT_ROLES.iter().map(|r| html! {
                                                 <option value={r.as_str()} selected={*r == m.role}>{ r.as_str() }</option>
                                             }) }
@@ -592,7 +593,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
             if owner {
                 <form class="inline-form" onsubmit={add_member}>
                     { text_input(&email, "email@example.com") }
-                    <select onchange={set_new_role}>
+                    <select onchange={set_new_role} aria-label="New project member role">
                         { for PROJECT_ROLES.iter().map(|r| html! {
                             <option value={r.as_str()} selected={*r == *new_role}>{ r.as_str() }</option>
                         }) }
