@@ -620,6 +620,19 @@ fn menu_place(x: i32, y: i32, items: usize) -> String {
     )
 }
 
+/// Width below which panels lie over the canvas instead of beside it; the
+/// stylesheet's narrow layout uses the same.
+const NARROW: f64 = 760.0;
+
+/// Whether the window is narrow enough for panels to cover the diagram.
+fn narrow() -> bool {
+    gloo_utils::window()
+        .inner_width()
+        .ok()
+        .and_then(|w| w.as_f64())
+        .is_some_and(|w| w < NARROW)
+}
+
 /// A canvas preference kept in the browser between visits.
 fn pref(key: &str) -> Option<String> {
     gloo_utils::window()
@@ -1176,9 +1189,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // The line under a resting pointer, by index, highlighted as a whole.
     let hover_line = use_state(|| None::<usize>);
     // Whether the model browser and library are shown beside the canvas.
-    let side = use_state(|| pref("side").as_deref() != Some("hidden"));
-    use_effect_with(*side, |side| {
-        set_pref("side", if *side { "shown" } else { "hidden" })
+    // Shown unless hidden before, or, never chosen, on a narrow screen where
+    // it would cover the diagram.
+    let side = use_state(|| match pref("side").as_deref() {
+        Some(chosen) => chosen != "hidden",
+        None => !narrow(),
     });
     // The run shown in the simulation pane, if any, and whether its values
     // label the diagram's lines.
@@ -3251,7 +3266,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     title="Model browser and library" aria-expanded={side.to_string()}
                     onclick={{
                         let side = side.clone();
-                        Callback::from(move |_: MouseEvent| side.set(!*side))
+                        // Remembered as chosen, not as defaulted.
+                        Callback::from(move |_: MouseEvent| {
+                            set_pref("side", if *side { "hidden" } else { "shown" });
+                            side.set(!*side)
+                        })
                     }}>{ icons::sidebar() }</button>
                 { props.leading.clone() }
                 if props.on_edit.is_some() {
@@ -3486,6 +3505,20 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             path.set(p);
                         }
                     })} />
+                }
+                // Closing an inspector clears what it shows, as Esc does.
+                if selected_line.is_some() || selected_annotation.is_some() || selected_block.is_some() {
+                    <button class="tool icon inspector-close" title="Close (Esc)" aria-label="Close the inspector"
+                        onclick={{
+                            let (selection, container) = (selection.clone(), container.clone());
+                            // Back to the canvas, where the keys act.
+                            Callback::from(move |_: MouseEvent| {
+                                selection.set(Selection::Nothing);
+                                if let Some(el) = container.cast::<HtmlElement>() {
+                                    let _ = el.focus();
+                                }
+                            })
+                        }}>{ icons::close() }</button>
                 }
             </div>
             { for problem_list }
