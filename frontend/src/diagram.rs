@@ -1413,17 +1413,41 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     );
 
     // Fit whenever a new diagram level is shown, or once a hidden view that
-    // needed fitting is shown.
+    // needed fitting is shown. A level shown before in this model comes
+    // back as it was left, as Simulink keeps each level's zoom.
     let needs_fit = use_mut_ref(|| false);
+    let level_views = use_mut_ref(std::collections::HashMap::<Vec<String>, View>::new);
+    let left_level = use_mut_ref(|| None::<(AttrValue, Vec<String>)>);
     {
         let view = view.clone();
         let container = container.clone();
         let rendered = rendered.clone();
         let needs_fit = needs_fit.clone();
         {
-            let needs_fit = needs_fit.clone();
-            use_effect_with((fit_key.clone(), (*path).clone()), move |_| {
-                *needs_fit.borrow_mut() = true;
+            let (needs_fit, level_views, left_level, view_now, view) = (
+                needs_fit.clone(),
+                level_views.clone(),
+                left_level.clone(),
+                view_now.clone(),
+                view.clone(),
+            );
+            use_effect_with((fit_key.clone(), (*path).clone()), move |(key, path)| {
+                let mut views = level_views.borrow_mut();
+                // Still the view of the level being left: the view changes
+                // only after this.
+                match left_level.borrow_mut().replace((key.clone(), path.clone())) {
+                    Some((was, left)) if was == *key => {
+                        views.insert(left, *view_now.borrow());
+                    }
+                    _ => views.clear(),
+                }
+                match views.get(path) {
+                    Some(saved) => {
+                        view.dispatch(ViewAction::Set(*saved));
+                        *needs_fit.borrow_mut() = false;
+                    }
+                    None => *needs_fit.borrow_mut() = true,
+                }
             });
         }
         use_effect_with(
