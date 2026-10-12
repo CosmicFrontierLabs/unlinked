@@ -166,6 +166,141 @@ enum Action {
     SelectAll,
     /// Move the selected blocks by (dx, dy).
     Nudge(f64, f64),
+    /// Line the selected blocks up, or space them evenly.
+    Arrange(Arrange),
+    /// Drop the selected line's stored route, so it is routed afresh.
+    AutoRoute,
+}
+
+/// How selected blocks are lined up or spaced, as Simulink's Format menu
+/// offers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Arrange {
+    Left,
+    Center,
+    Right,
+    Top,
+    Middle,
+    Bottom,
+    /// Equal gaps between neighbours, left to right.
+    Across,
+    /// Equal gaps between neighbours, top to bottom.
+    Down,
+}
+
+impl Arrange {
+    /// Blocks needed for it to do anything.
+    fn needs(self) -> usize {
+        match self {
+            Arrange::Across | Arrange::Down => 3,
+            _ => 2,
+        }
+    }
+}
+
+/// Where `blocks` go when arranged `how`: lined up on the first of them in
+/// the relevant direction (the leftmost for Left, ...), or spread between
+/// the outermost two keeping their sizes. Blocks that stay put are left out.
+fn arranged(blocks: &[(BlockId, Rect)], how: Arrange) -> Vec<(BlockId, Rect)> {
+    let shift =
+        |r: Rect, dx: f64, dy: f64| Rect::new(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy);
+    let cx = |r: &Rect| (r.left + r.right) / 2.0;
+    let cy = |r: &Rect| (r.top + r.bottom) / 2.0;
+    let fold = |f: &dyn Fn(&Rect) -> f64, min: bool| {
+        blocks.iter().map(|(_, r)| f(r)).fold(
+            if min {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            },
+            |a, b| if min { a.min(b) } else { a.max(b) },
+        )
+    };
+    let moved: Vec<(BlockId, Rect)> = match how {
+        Arrange::Left | Arrange::Right | Arrange::Center => {
+            let at = match how {
+                Arrange::Left => fold(&|r| r.left, true),
+                Arrange::Right => fold(&|r| r.right, false),
+                _ => blocks.first().map_or(0.0, |(_, r)| cx(r)),
+            };
+            blocks
+                .iter()
+                .map(|(id, r)| {
+                    let dx = match how {
+                        Arrange::Left => at - r.left,
+                        Arrange::Right => at - r.right,
+                        _ => at - cx(r),
+                    };
+                    (id.clone(), shift(*r, dx, 0.0))
+                })
+                .collect()
+        }
+        Arrange::Top | Arrange::Bottom | Arrange::Middle => {
+            let at = match how {
+                Arrange::Top => fold(&|r| r.top, true),
+                Arrange::Bottom => fold(&|r| r.bottom, false),
+                _ => blocks.first().map_or(0.0, |(_, r)| cy(r)),
+            };
+            blocks
+                .iter()
+                .map(|(id, r)| {
+                    let dy = match how {
+                        Arrange::Top => at - r.top,
+                        Arrange::Bottom => at - r.bottom,
+                        _ => at - cy(r),
+                    };
+                    (id.clone(), shift(*r, 0.0, dy))
+                })
+                .collect()
+        }
+        Arrange::Across | Arrange::Down => {
+            let across = how == Arrange::Across;
+            let mut sorted: Vec<&(BlockId, Rect)> = blocks.iter().collect();
+            sorted.sort_by(|(_, a), (_, b)| {
+                let (a, b) = if across {
+                    (a.left, b.left)
+                } else {
+                    (a.top, b.top)
+                };
+                a.total_cmp(&b)
+            });
+            let (Some((_, first)), Some((_, last))) = (sorted.first(), sorted.last()) else {
+                return Vec::new();
+            };
+            let (start, end) = if across {
+                (first.left, last.right)
+            } else {
+                (first.top, last.bottom)
+            };
+            let sizes: f64 = sorted
+                .iter()
+                .map(|(_, r)| if across { r.width() } else { r.height() })
+                .sum();
+            let gap = (end - start - sizes) / (sorted.len() - 1) as f64;
+            let mut at = start;
+            sorted
+                .into_iter()
+                .map(|(id, r)| {
+                    let moved = if across {
+                        shift(*r, at - r.left, 0.0)
+                    } else {
+                        shift(*r, 0.0, at - r.top)
+                    };
+                    at += if across { r.width() } else { r.height() } + gap;
+                    (id.clone(), moved)
+                })
+                .collect()
+        }
+    };
+    // On whole diagram units, as everything else places blocks.
+    moved
+        .into_iter()
+        .map(|(id, r)| {
+            let (dx, dy) = (r.left.round() - r.left, r.top.round() - r.top);
+            (id, shift(r, dx, dy))
+        })
+        .filter(|(id, r)| blocks.iter().any(|(b, was)| b == id && was != r))
+        .collect()
 }
 
 /// Actions on the editing toolbar, in groups, and in the context menu, in
@@ -175,17 +310,26 @@ const TOOLBAR: [&[Action]; 3] = [
     &[Action::Rotate, Action::Flip],
     &[Action::Group, Action::Expand],
 ];
-const MENU: [Action; 11] = [
+const MENU: [Action; 20] = [
     Action::Cut,
     Action::Copy,
     Action::Paste,
     Action::Duplicate,
     Action::Delete,
     Action::Rename,
+    Action::AutoRoute,
     Action::Rotate,
     Action::Flip,
     Action::Group,
     Action::Expand,
+    Action::Arrange(Arrange::Left),
+    Action::Arrange(Arrange::Center),
+    Action::Arrange(Arrange::Right),
+    Action::Arrange(Arrange::Top),
+    Action::Arrange(Arrange::Middle),
+    Action::Arrange(Arrange::Bottom),
+    Action::Arrange(Arrange::Across),
+    Action::Arrange(Arrange::Down),
     Action::SelectAll,
 ];
 
@@ -225,6 +369,8 @@ fn available(action: Action, selection: &Selection, clipboard: bool, subsystem: 
         | Action::Group
         | Action::Nudge(..) => blocks,
         Action::Rename => selection.blocks().len() == 1,
+        Action::Arrange(how) => selection.blocks().len() >= how.needs(),
+        Action::AutoRoute => matches!(selection, Selection::Wire(_) | Selection::Trunk(_)),
         Action::Expand => subsystem,
         Action::Paste => clipboard,
         Action::SelectAll => true,
@@ -267,9 +413,12 @@ impl Action {
             Action::Group => icons::group(),
             Action::Expand => icons::expand(),
             Action::Delete => icons::delete(),
-            Action::Duplicate | Action::Rename | Action::SelectAll | Action::Nudge(..) => {
-                html! {}
-            }
+            Action::Duplicate
+            | Action::Rename
+            | Action::SelectAll
+            | Action::Nudge(..)
+            | Action::Arrange(_)
+            | Action::AutoRoute => html! {},
         }
     }
 
@@ -288,6 +437,20 @@ impl Action {
             Action::Delete => ("Delete", "Del"),
             Action::SelectAll => ("Select all", "Ctrl+A"),
             Action::Nudge(..) => ("Nudge", "Arrows"),
+            Action::AutoRoute => ("Auto-route line", ""),
+            Action::Arrange(how) => (
+                match how {
+                    Arrange::Left => "Align left edges",
+                    Arrange::Center => "Align centres",
+                    Arrange::Right => "Align right edges",
+                    Arrange::Top => "Align top edges",
+                    Arrange::Middle => "Align middles",
+                    Arrange::Bottom => "Align bottom edges",
+                    Arrange::Across => "Space evenly across",
+                    Arrange::Down => "Space evenly down",
+                },
+                "",
+            ),
         }
     }
 }
@@ -435,6 +598,26 @@ fn auto_connect(sys: &System, from: &BlockId, to: &BlockId) -> Option<(Endpoint,
                 .any(|l| unlinked_model::edit::drives(l, ep))
         })?;
     Some((src, dst))
+}
+
+/// Where a context menu of `items` rows opened at client point (x, y) is
+/// drawn: below and right of the point, moved up and left to stay in the
+/// window, and scrolling only if the window is shorter than the menu.
+fn menu_place(x: i32, y: i32, items: usize) -> String {
+    const ROW: f64 = 29.0;
+    const WIDTH: f64 = 240.0;
+    const MARGIN: f64 = 8.0;
+    let window = web_sys::window();
+    let size = |v: Option<wasm_bindgen::JsValue>| v.and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
+    let width = size(window.as_ref().and_then(|w| w.inner_width().ok()));
+    let height = size(window.as_ref().and_then(|w| w.inner_height().ok()));
+    let tall = items as f64 * ROW + 2.0 * MARGIN;
+    let left = (x as f64).min(width - WIDTH - MARGIN).max(0.0);
+    let top = (y as f64).min(height - tall - MARGIN).max(MARGIN);
+    format!(
+        "left: {left}px; top: {top}px; max-height: {}px;",
+        (height - top - MARGIN).max(ROW)
+    )
 }
 
 /// A canvas preference kept in the browser between visits.
@@ -2168,6 +2351,44 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 Action::SelectAll => selection.set(Selection::Blocks(
                     blocks.iter().map(|b| b.id.0.clone()).collect(),
                 )),
+                // In selection order, so the first selected leads.
+                Action::Arrange(how) => {
+                    let placed: Vec<(BlockId, Rect)> = selection
+                        .blocks()
+                        .iter()
+                        .filter_map(|id| {
+                            let b = blocks.iter().find(|b| b.id.0 == *id)?;
+                            Some((b.id.clone(), b.position))
+                        })
+                        .collect();
+                    let group: Vec<Edit> = arranged(&placed, how)
+                        .into_iter()
+                        .map(|(id, position)| Edit::MoveBlock {
+                            system: system_ref.clone(),
+                            id,
+                            position,
+                        })
+                        .collect();
+                    if !group.is_empty() {
+                        on_edits.emit(group);
+                    }
+                }
+                Action::AutoRoute => {
+                    let system = system_ref.clone();
+                    on_edit.emit(match &*selection {
+                        Selection::Wire(dst) => Edit::SetRoute {
+                            system,
+                            dst: dst.clone(),
+                            points: Vec::new(),
+                        },
+                        Selection::Trunk(src) => Edit::SetTrunkRoute {
+                            system,
+                            src: src.clone(),
+                            points: Vec::new(),
+                        },
+                        _ => return,
+                    });
+                }
                 // Flatten a lone selected subsystem into its parent.
                 Action::Expand => {
                     if let [id] = selection.blocks() {
@@ -2338,17 +2559,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 Selection::Blocks(ids) if ids.iter().all(|id| selection.blocks().contains(id)) => {}
                 other => selection.set(other),
             }
-            // Kept inside the window, at roughly the menu's largest size.
-            let window = web_sys::window();
-            let size = |v: Option<wasm_bindgen::JsValue>| {
-                v.and_then(|v| v.as_f64()).unwrap_or(f64::MAX) as i32
-            };
-            let width = size(window.as_ref().and_then(|w| w.inner_width().ok()));
-            let height = size(window.as_ref().and_then(|w| w.inner_height().ok()));
-            menu.set(Some((
-                e.client_x().min(width - 240).max(0),
-                e.client_y().min(height - 260).max(0),
-            )));
+            // Placed where it is drawn, once its items are known.
+            menu.set(Some((e.client_x(), e.client_y())));
         })
     };
     // Add a block, or an annotation selected so its text can be typed in
@@ -3118,7 +3330,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         let menu = menu.clone();
                         Callback::from(move |e: MouseEvent| { e.prevent_default(); menu.set(None) })
                     }}>
-                        <div class="context-menu" style={format!("left: {x}px; top: {y}px;")}>
+                        <div class="context-menu" style={menu_place(x, y, MENU.iter().filter(|&&a| enabled(a)).count())}>
                             { for MENU.iter().filter(|&&a| enabled(a)).map(|&a| action_button(a, true, &act, true)) }
                         </div>
                     </div>
@@ -4113,6 +4325,41 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0], vec![(0.0, 1.0)]);
         assert!(sparkline_runs(&[], &[], 300).is_empty());
+    }
+
+    #[test]
+    fn blocks_line_up_and_spread() {
+        let b = |id: &str, l: f64, t: f64, w: f64| {
+            (BlockId::from(id), Rect::new(l, t, l + w, t + 20.0))
+        };
+        let three = [
+            b("1", 0.0, 0.0, 30.0),
+            b("2", 50.0, 13.0, 30.0),
+            b("3", 200.0, 40.0, 10.0),
+        ];
+        let moved = |how| -> Vec<(String, Rect)> {
+            arranged(&three, how)
+                .into_iter()
+                .map(|(id, r)| (id.0, r))
+                .collect()
+        };
+        // Tops on the topmost; the first stays, so it is left out.
+        let top = moved(Arrange::Top);
+        assert_eq!(top.len(), 2);
+        assert!(top.iter().all(|(_, r)| r.top == 0.0));
+        // Centres on the first selected's centre (15).
+        assert!(moved(Arrange::Center)
+            .iter()
+            .all(|(_, r)| (r.left + r.right) / 2.0 == 15.0));
+        // Right edges on the rightmost (210).
+        assert!(moved(Arrange::Right).iter().all(|(_, r)| r.right == 210.0));
+        // Equal gaps between 0..210 with 70 of blocks: 70 each.
+        let across = moved(Arrange::Across);
+        assert_eq!(
+            across,
+            vec![("2".to_string(), Rect::new(100.0, 13.0, 130.0, 33.0))]
+        );
+        assert!(arranged(&three[..1], Arrange::Left).is_empty());
     }
 
     #[test]
