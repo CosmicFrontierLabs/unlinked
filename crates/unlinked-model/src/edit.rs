@@ -814,6 +814,51 @@ pub fn touches(line: &Line, id: &BlockId) -> bool {
     ends_at(&line.src, id) || ends_at(&line.dst, id) || branches(&line.branches, id)
 }
 
+/// `sys` with blocks moved as `MoveBlock` would move them, and the indices
+/// of the lines touching a moved block: what an editor draws while blocks
+/// are dragged. Subsystem contents are left out of the copy; lines and
+/// positions are all a preview needs.
+pub fn preview_moves(sys: &System, moves: &[(BlockId, Rect)]) -> (System, Vec<usize>) {
+    let mut moved = System {
+        blocks: sys
+            .blocks
+            .iter()
+            // Field by field, so a subsystem's contents are never cloned.
+            .map(|b| Block {
+                id: b.id.clone(),
+                block_type: b.block_type.clone(),
+                name: b.name.clone(),
+                position: b.position,
+                orientation: b.orientation,
+                mirrored: b.mirrored,
+                ports: b.ports,
+                parameters: b.parameters.clone(),
+                mask: b.mask.clone(),
+                library_source: b.library_source.clone(),
+                subsystem: None,
+                style: b.style.clone(),
+                interface: b.interface.clone(),
+            })
+            .collect(),
+        lines: sys.lines.clone(),
+        annotations: Vec::new(),
+        properties: Default::default(),
+    };
+    for (id, position) in moves {
+        if let Some(index) = moved.blocks.iter().position(|b| b.id == *id) {
+            move_block(&mut moved, index, *position);
+        }
+    }
+    let touched = sys
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| moves.iter().any(|(id, _)| touches(l, id)))
+        .map(|(i, _)| i)
+        .collect();
+    (moved, touched)
+}
+
 /// Move block `index` to `position`, keeping the routes of attached lines
 /// that can be rewritten and clearing the others.
 fn move_block(sys: &mut System, index: usize, position: Rect) {
@@ -1215,6 +1260,30 @@ mod tests {
         .unwrap();
         assert_eq!(m.root.blocks[1].position.left, 100.0);
         assert_eq!(m.root.lines[0].points, vec![Point::new(40.0, 15.0)]);
+    }
+
+    #[test]
+    fn previewed_moves_match_the_edit() {
+        let m = model();
+        let position = Rect::new(100.0, 100.0, 130.0, 130.0);
+        let (moved, touched) = preview_moves(&m.root, &[("2".into(), position)]);
+        let mut edited = m.clone();
+        Edit::MoveBlock {
+            system: vec![],
+            id: "2".into(),
+            position,
+        }
+        .apply(&mut edited)
+        .unwrap();
+        assert_eq!(moved.lines, edited.root.lines);
+        assert_eq!(moved.blocks[1].position, position);
+        assert_eq!(
+            touched,
+            (0..m.root.lines.len())
+                .filter(|&i| touches(&m.root.lines[i], &"2".into()))
+                .collect::<Vec<_>>()
+        );
+        assert!(!touched.is_empty());
     }
 
     /// `a` at the left feeds `b` (straight across) and `c` (below), with

@@ -145,6 +145,19 @@ impl TextBox {
     }
 }
 
+/// Lines `indices` of `sys` as [`render_system_svg`] draws them, without the
+/// document around them, to lay over a rendered diagram: an editor previews
+/// the lines of blocks being dragged this way. Unknown indices are skipped.
+pub fn render_lines_svg(sys: &System, indices: &[usize], opts: &RenderOptions) -> String {
+    let pal = opts.theme.palette();
+    let mut s = Svg::new();
+    for line in indices.iter().filter_map(|&i| sys.lines.get(i)) {
+        let routed = route::route_line(sys, line);
+        draw_line(&mut s, &routed, label_layout(&routed).as_ref(), pal);
+    }
+    s.finish()
+}
+
 pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, RenderError> {
     let pal = opts.theme.palette();
     let routed: Vec<route::RoutedLine> = sys
@@ -259,8 +272,15 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
     }
 
     s.open("g", &[("class", "lines".into()), ("fill", "none".into())]);
-    for (r, label) in routed.iter().zip(&labels) {
+    for (i, (r, label)) in routed.iter().zip(&labels).enumerate() {
+        // An editor can hide a line by its index while previewing it moved.
+        if opts.hit_targets {
+            s.open("g", &[("data-line", i.to_string())]);
+        }
         draw_line(&mut s, r, label.as_ref(), pal);
+        if opts.hit_targets {
+            s.close("g");
+        }
         if s.elements() > MAX_ELEMENTS {
             return Err(RenderError::TooLarge);
         }
@@ -906,6 +926,11 @@ mod tests {
             svg.contains("data-dst-sid=\"2\" data-dst-kind=\"in\" data-dst-index=\"1\""),
             "{svg}"
         );
+        assert!(svg.contains("<g data-line=\"0\">") && !plain.contains("data-line"));
+        // A previewed line is drawn as the diagram draws it.
+        let line = render_lines_svg(&sys, &[0, 7], &opts);
+        assert!(line.starts_with("<polyline"), "{line}");
+        assert!(svg.contains(&line), "{line}");
     }
 
     #[test]

@@ -866,6 +866,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // A connection being dragged: from where it starts to the pointer, or
     // to the port it would connect to (then the flag is set).
     let wire_preview = use_state(|| None::<(Point, Point, bool)>);
+    // The lines of blocks being dragged, by index, drawn where the drop
+    // would put them.
+    let drag_lines = use_state(|| None::<(Vec<usize>, String)>);
     // The outline of a block being resized.
     let resize_preview = use_state(|| None::<Rect>);
     // A wire being rerouted, as it would be drawn.
@@ -1233,6 +1236,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             route_preview.clone(),
         );
         let (model, shown) = (props.model.clone(), (*path).clone());
+        let (drag_lines, theme) = (drag_lines.clone(), *theme);
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
             match drag.borrow_mut().as_mut() {
@@ -1297,12 +1301,41 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         // Snap in diagram units; preview by translating the
                         // blocks' groups until the edits are applied.
                         let snap = |v: f64| (v / view.scale / SNAP).round() * SNAP;
-                        *offset = (snap(dx), snap(dy));
+                        let to = (snap(dx), snap(dy));
+                        if to == *offset {
+                            return;
+                        }
+                        *offset = to;
                         for (group, ..) in blocks.iter() {
                             let _ = group.set_attribute(
                                 "transform",
                                 &format!("translate({} {})", offset.0, offset.1),
                             );
+                        }
+                        // Their lines follow, routed as the move will route
+                        // them.
+                        let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+                        if let Some(sys) = model.system_at(&refs) {
+                            let moves: Vec<(BlockId, Rect)> = blocks
+                                .iter()
+                                .map(|(_, id, r)| {
+                                    let (dx, dy) = to;
+                                    let moved = Rect::new(
+                                        r.left + dx,
+                                        r.top + dy,
+                                        r.right + dx,
+                                        r.bottom + dy,
+                                    );
+                                    (BlockId(id.clone()), moved)
+                                })
+                                .collect();
+                            let (moved, touched) = unlinked_model::edit::preview_moves(sys, &moves);
+                            let opts = RenderOptions {
+                                theme,
+                                ..Default::default()
+                            };
+                            let svg = unlinked_render::render_lines_svg(&moved, &touched, &opts);
+                            drag_lines.set(Some((touched, svg)));
                         }
                     }
                 }
@@ -1399,6 +1432,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let (selection, view) = (selection.clone(), view.clone());
         let (model, on_error) = (props.model.clone(), props.on_error.clone());
+        let drag_lines = drag_lines.clone();
         let blocks: Vec<(String, Rect)> = system
             .map(|s| {
                 s.blocks
@@ -1508,6 +1542,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     moved,
                     ..
                 }) => {
+                    drag_lines.set(None);
                     let copy = e.ctrl_key() || e.meta_key();
                     if let (true, true, Some(on_edits)) =
                         (moved && offset != (0.0, 0.0), copy, &on_edits)
@@ -2263,6 +2298,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             .map(|(i, _)| format!(".diagram .annotation[data-annotation=\"{i}\"] {{ fill: #ff9e64; }}"))
             .unwrap_or_default(),
     };
+    // Lines being previewed moved are hidden where they were.
+    let highlight = match &*drag_lines {
+        Some((touched, _)) => {
+            let hidden: String = touched
+                .iter()
+                .map(|i| format!(".diagram g[data-line=\"{i}\"] {{ visibility: hidden; }}\n"))
+                .collect();
+            hidden + &highlight
+        }
+        None => highlight,
+    };
     let highlight = match &props.diff {
         Some(d) => diff_css(d, &path, system) + &highlight,
         None => highlight,
@@ -2415,14 +2461,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 let points: Vec<String> = pts.iter().map(|p| format!("{},{}", p.x, p.y)).collect();
                 html! { <polyline class="route-preview" points={points.join(" ")} /> }
             });
+            // Markup parsed as a whole document fragment, so its elements
+            // are SVG ones.
+            let following = drag_lines.as_ref().map(|(_, lines)| {
+                Html::from_html_unchecked(AttrValue::from(format!(
+                    "<svg class=\"overlay\" viewBox=\"{vx} {vy} {vw} {vh}\" width=\"{vw}\" height=\"{vh}\"><g fill=\"none\">{lines}</g></svg>"
+                )))
+            });
             html! {
-                <svg class="overlay" viewBox={format!("{vx} {vy} {vw} {vh}")}
-                    width={vw.to_string()} height={vh.to_string()}>
-                    { for wire }
-                    { for handles }
-                    { for selecting }
-                    { for rerouting }
-                </svg>
+                <>
+                    { for following }
+                    <svg class="overlay" viewBox={format!("{vx} {vy} {vw} {vh}")}
+                        width={vw.to_string()} height={vh.to_string()}>
+                        { for wire }
+                        { for handles }
+                        { for selecting }
+                        { for rerouting }
+                    </svg>
+                </>
             }
         }
         None => html! {},
