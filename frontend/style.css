@@ -1249,7 +1249,8 @@ button.tool.run-button.running {
     fill: #2d6a00;
 }
 
-.overlay .display-values.stale text {
+.overlay .display-values.stale text,
+.diagram.light .overlay :is(.display-values, .port-values).stale text {
     fill: var(--muted);
     font-style: italic;
 }
