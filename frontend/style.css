@@ -1188,6 +1188,24 @@ button.active {
     stroke-dasharray: none;
 }
 
+/* Running the simulation from the diagram */
+button.tool.run-button {
+    color: var(--green);
+    font-weight: 600;
+}
+
+button.tool.run-button.running {
+    color: var(--red);
+}
+
+.run-error {
+    padding: 0.35rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: rgba(247, 118, 142, 0.12);
+    color: var(--red);
+    font-size: 0.85rem;
+}
+
 /* Port value labels: recorded values at each line's source */
 .overlay .port-values text {
     fill: #9ece6a;
