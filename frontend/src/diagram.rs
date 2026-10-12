@@ -620,6 +620,39 @@ fn menu_place(x: i32, y: i32, items: usize) -> String {
     )
 }
 
+/// Where annotation `index` shows inside the diagram container, in pixels:
+/// left, top, width and height, enlarged a little for typing.
+fn annotation_box(container: &NodeRef, index: usize) -> Option<(f64, f64, f64, f64)> {
+    let c = container.cast::<Element>()?;
+    let list = c
+        .query_selector_all(&format!("[data-annotation=\"{index}\"]"))
+        .ok()?;
+    let rects: Vec<web_sys::DomRect> = (0..list.length())
+        .filter_map(|i| list.item(i)?.dyn_into::<Element>().ok())
+        .map(|el| el.get_bounding_client_rect())
+        .collect();
+    let left = rects.iter().map(|r| r.left()).fold(f64::INFINITY, f64::min);
+    let top = rects.iter().map(|r| r.top()).fold(f64::INFINITY, f64::min);
+    let right = rects
+        .iter()
+        .map(|r| r.right())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let bottom = rects
+        .iter()
+        .map(|r| r.bottom())
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !left.is_finite() {
+        return None;
+    }
+    let base = c.get_bounding_client_rect();
+    Some((
+        (left - base.left() - 6.0).max(0.0),
+        (top - base.top() - 4.0).max(0.0),
+        (right - left + 40.0).max(160.0),
+        (bottom - top + 24.0).max(48.0),
+    ))
+}
+
 /// Where a block's name text shows inside the diagram container, in pixels:
 /// left, top and width, widened a little for typing.
 fn name_box(text: &Element, container: &NodeRef) -> Option<(f64, f64, f64)> {
@@ -1325,6 +1358,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let rename_field = use_node_ref();
     // Set by Escape, so leaving the field then cancels rather than commits.
     let rename_cancelled = use_mut_ref(|| false);
+    // An annotation being edited in place: its index, its content then, and
+    // where it shows (left, top, width, height in container pixels).
+    let annotating = use_state(|| None::<(usize, Annotation, (f64, f64, f64, f64))>);
+    let note_field = use_node_ref();
+    {
+        let field = note_field.clone();
+        use_effect_with(annotating.as_ref().map(|(i, ..)| *i), move |open| {
+            if let (Some(_), Some(area)) = (open, field.cast::<HtmlTextAreaElement>()) {
+                let _ = area.focus();
+                area.select();
+            }
+        });
+    }
     // Ready to type over once it opens.
     {
         let field = rename_field.clone();
@@ -2858,7 +2904,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let model = props.model.clone();
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         let (quick, editable) = (quick.clone(), props.on_edit.is_some());
-        let renaming = renaming.clone();
+        let (renaming, annotating) = (renaming.clone(), annotating.clone());
         Callback::from(move |e: MouseEvent| {
             // While editing, double-clicking empty canvas opens the quick
             // insert there.
@@ -2938,6 +2984,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             // Double-clicking another block edits its parameters, and an
             // annotation its text, as in Simulink: the first click selected
             // it, so its inspector is showing.
+            // A plain annotation is edited where it shows.
+            let note = closest(e.target(), "[data-annotation]").and_then(|el| {
+                let index: usize = el.get_attribute("data-annotation")?.parse().ok()?;
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                let a = model.system_at(&refs)?.annotations.get(index)?.clone();
+                let at = annotation_box(&container, index)?;
+                (!a.rich_text).then_some((index, a, at))
+            });
+            if let (true, Some(note)) = (editable, note) {
+                annotating.set(Some(note));
+                return;
+            }
             let field = if closest(e.target(), "[data-annotation]").is_some() {
                 ".inspector textarea.annotation-text"
             } else if block_group(e.target()).is_some() {
@@ -3629,6 +3687,59 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                             name,
                                         });
                                     }
+                                })
+                            }} />
+                    }
+                    if let (Some((index, expected, (left, top, width, height))), Some(on_edit)) = ((*annotating).clone(), on_edit.clone()) {
+                        <textarea class="annotate-in-place" ref={note_field.clone()} value={expected.text.clone()}
+                            aria-label="Annotation text"
+                            style={format!("left: {left}px; top: {top}px; width: {width}px; height: {height}px;")}
+                            onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                            ondblclick={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                            onkeydown={{
+                                let (annotating, container) = (annotating.clone(), container.clone());
+                                let cancelled = rename_cancelled.clone();
+                                Callback::from(move |e: KeyboardEvent| {
+                                    // Keys typed here are not diagram shortcuts.
+                                    e.stop_propagation();
+                                    let leave = match e.key().as_str() {
+                                        // Enter starts a new line; Ctrl+Enter is done.
+                                        "Enter" => e.ctrl_key() || e.meta_key(),
+                                        "Escape" => {
+                                            *cancelled.borrow_mut() = true;
+                                            annotating.set(None);
+                                            true
+                                        }
+                                        _ => false,
+                                    };
+                                    if let (true, Some(el)) = (leave, container.cast::<HtmlElement>()) {
+                                        e.prevent_default();
+                                        let _ = el.focus();
+                                    }
+                                })
+                            }}
+                            onblur={{
+                                let (annotating, selection, system) =
+                                    (annotating.clone(), selection.clone(), system_ref.clone());
+                                let cancelled = rename_cancelled.clone();
+                                Callback::from(move |e: FocusEvent| {
+                                    annotating.set(None);
+                                    if std::mem::take(&mut *cancelled.borrow_mut()) {
+                                        return;
+                                    }
+                                    let text = e.target_unchecked_into::<HtmlTextAreaElement>().value();
+                                    if text == expected.text {
+                                        return;
+                                    }
+                                    on_edit.emit(Edit::SetAnnotationText {
+                                        system: system.clone(),
+                                        target: AnnotationTarget { index, expected: expected.clone() },
+                                        text: text.clone(),
+                                    });
+                                    // Still selected, with its new text.
+                                    let mut edited = expected.clone();
+                                    edited.text = text;
+                                    selection.set(Selection::Annotation(index, edited));
                                 })
                             }} />
                     }
