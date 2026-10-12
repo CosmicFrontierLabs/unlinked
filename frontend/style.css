@@ -1226,6 +1226,11 @@ button.tool.run-button.running {
     font-style: italic;
 }
 
+/* The readable dark-page muted token is too pale against the light canvas. */
+.diagram.light .overlay :is(.port-values, .display-values).stale text {
+    fill: #565f89;
+}
+
 button.tool.stale {
     color: var(--muted);
 }
