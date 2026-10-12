@@ -969,6 +969,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let drag_lines = use_state(|| None::<(Vec<usize>, String)>);
     // Smart guides for the blocks being dragged.
     let guides = use_state(Vec::<Guide>::new);
+    // The block under a resting pointer and where its card shows, in
+    // container pixels.
+    let hover = use_state(|| None::<(String, f64, f64)>);
+    // Whether the model browser and library are shown beside the canvas.
+    let side = use_state(|| true);
     // The outline of a block being resized.
     let resize_preview = use_state(|| None::<Rect>);
     // A wire being rerouted, as it would be drawn.
@@ -1337,8 +1342,26 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let (model, shown) = (props.model.clone(), (*path).clone());
         let (drag_lines, guides, theme) = (drag_lines.clone(), guides.clone(), *theme);
+        let hover = hover.clone();
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
+            // The hover card follows the block under a resting pointer, and
+            // goes while dragging.
+            let over = drag
+                .borrow()
+                .as_ref()
+                .is_none_or(|d| matches!(d, Drag::Ended { .. }))
+                .then(|| block_group(e.target())?.get_attribute("data-sid"))
+                .flatten();
+            if over.as_ref() != hover.as_ref().map(|(id, ..)| id) {
+                let r = container
+                    .cast::<HtmlElement>()
+                    .map(|el| el.get_bounding_client_rect());
+                hover.set(
+                    over.zip(r)
+                        .map(|(id, r)| (id, cx - r.left() + 14.0, cy - r.top() + 18.0)),
+                );
+            }
             match drag.borrow_mut().as_mut() {
                 Some(Drag::Resize {
                     sx,
@@ -2293,6 +2316,25 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
                 return;
             }
+            // Double-clicking a line names its signal, as in Simulink: the
+            // first click selected it, so its inspector is showing.
+            let wire = closest(e.target(), "polyline.wire-hit, polyline.trunk-hit").is_some();
+            if editable && wire {
+                let field = container
+                    .cast::<Element>()
+                    .and_then(|c| c.parent_element())
+                    .and_then(|v| {
+                        v.query_selector(".inspector input.signal-name")
+                            .ok()
+                            .flatten()
+                    })
+                    .and_then(|i| i.dyn_into::<HtmlInputElement>().ok());
+                if let Some(field) = field {
+                    let _ = field.focus();
+                    field.select();
+                }
+                return;
+            }
             let name = if let Some(g) = closest(e.target(), "g.state[data-subchart]") {
                 let refs: Vec<&str> = path.iter().map(String::as_str).collect();
                 g.get_attribute("data-sid")
@@ -2664,6 +2706,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     html! {
         <div class="viewer">
             <div class="toolbar">
+                <button class={classes!("tool", "icon", (*side).then_some("active"))}
+                    title="Model browser and library"
+                    onclick={{
+                        let side = side.clone();
+                        Callback::from(move |_: MouseEvent| side.set(!*side))
+                    }}>{ icons::sidebar() }</button>
                 { props.leading.clone() }
                 if props.on_edit.is_some() {
                     { for TOOLBAR.iter().map(|group| html! {
@@ -2701,36 +2749,46 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 { props.trailing.clone() }
             </div>
             <div class="viewer-body">
-                <aside class="tree">
-                    <SystemTree model={props.model.clone()} current={(*path).clone()} on_open={Callback::from({
-                        let path = path.clone();
-                        move |p: Vec<String>| path.set(p)
-                    })} />
-                    if props.on_edit.is_some() {
-                        <BlockPalette theme={*theme} on_add={{
-                            let (add_at, container, rendered, view) =
-                                (add_at.clone(), container.clone(), rendered.clone(), view.clone());
-                            // In the middle of what is shown.
-                            Callback::from(move |type_key: &'static str| {
-                                let el = container.cast::<HtmlElement>();
-                                let vb = (*rendered).as_ref().ok().and_then(|svg| view_box(svg));
-                                if let (Some(el), Some([vx, vy, ..])) = (el, vb) {
-                                    let at = Point::new(
-                                        (el.client_width() as f64 / 2.0 - view.x) / view.scale + vx,
-                                        (el.client_height() as f64 / 2.0 - view.y) / view.scale + vy,
-                                    );
-                                    add_at.emit((Pick::Block(type_key), at));
-                                }
-                            })
-                        }} />
-                    }
-                </aside>
+                if *side {
+                    <aside class="tree">
+                        <SystemTree model={props.model.clone()} current={(*path).clone()} on_open={Callback::from({
+                            let path = path.clone();
+                            move |p: Vec<String>| path.set(p)
+                        })} />
+                        if props.on_edit.is_some() {
+                            <BlockPalette theme={*theme} on_add={{
+                                let (add_at, container, rendered, view) =
+                                    (add_at.clone(), container.clone(), rendered.clone(), view.clone());
+                                // In the middle of what is shown.
+                                Callback::from(move |type_key: &'static str| {
+                                    let el = container.cast::<HtmlElement>();
+                                    let vb = (*rendered).as_ref().ok().and_then(|svg| view_box(svg));
+                                    if let (Some(el), Some([vx, vy, ..])) = (el, vb) {
+                                        let at = Point::new(
+                                            (el.client_width() as f64 / 2.0 - view.x) / view.scale + vx,
+                                            (el.client_height() as f64 / 2.0 - view.y) / view.scale + vy,
+                                        );
+                                        add_at.emit((Pick::Block(type_key), at));
+                                    }
+                                })
+                            }} />
+                        }
+                    </aside>
+                }
                 <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"))}
                     ref={container.clone()} tabindex="0"
-                    {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={end_drag}
+                    {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={{
+                        let (hover, end_drag) = (hover.clone(), end_drag.clone());
+                        Callback::from(move |e: MouseEvent| { hover.set(None); end_drag.emit(e) })
+                    }}
                     {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop} {oncontextmenu}>
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
+                    if let Some(b) = hover.as_ref().and_then(|(id, x, y)| {
+                        Some((system?.block(&BlockId(id.clone()))?, *x, *y))
+                    }) {
+                        <HoverCard block={Rc::new(b.0.clone())} x={b.1} y={b.2} />
+                    }
                     // Over the canvas, as Simulink's address bar.
                     <nav class="crumbs" onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
                         ondblclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
@@ -2825,6 +2883,56 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
             </div>
             { for problem_list }
+        </div>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+struct HoverCardProps {
+    block: Rc<Block>,
+    /// Position inside the diagram container, in pixels.
+    x: f64,
+    y: f64,
+}
+
+/// What a block is, shown while the pointer rests on it: its name, type,
+/// ports and first few parameters.
+#[function_component(HoverCard)]
+fn hover_card(props: &HoverCardProps) -> Html {
+    const SHOWN: usize = 4;
+    let b = &props.block;
+    let descriptor = catalog::find(&b.block_type).filter(|_| b.mask.is_none());
+    let parameters: Vec<(String, String)> = match descriptor {
+        Some(d) => d
+            .parameters
+            .iter()
+            .filter_map(|p| Some((p.label.to_string(), b.param(p.name)?.to_string())))
+            .take(SHOWN)
+            .collect(),
+        None => b
+            .parameters
+            .iter()
+            .filter(|(k, _)| !HIDDEN_PARAMETERS.contains(&k.as_str()))
+            .take(SHOWN)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    };
+    let (inputs, outputs) = (b.ports.inputs, b.ports.outputs);
+    let plural = |n: u32, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    html! {
+        <div class="hover-card" style={format!("left: {}px; top: {}px;", props.x, props.y)}>
+            <div class="hover-name">{ b.name.replace('\n', " ") }</div>
+            <div class="muted">
+                { b.stateflow_type().unwrap_or_else(|| b.display_type()) }
+                { format!(" · {} · {}", plural(inputs, "input"), plural(outputs, "output")) }
+            </div>
+            if !parameters.is_empty() {
+                <table>
+                    { for parameters.iter().map(|(k, v)| html! {
+                        <tr><td class="muted">{ k }</td><td class="mono">{ v }</td></tr>
+                    }) }
+                </table>
+            }
         </div>
     }
 }
