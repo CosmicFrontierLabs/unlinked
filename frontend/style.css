@@ -1022,6 +1022,13 @@ button.active {
     stroke-dasharray: none;
 }
 
+.overlay line.guide {
+    stroke: var(--teal);
+    stroke-width: 1;
+    stroke-dasharray: 3 3;
+    vector-effect: non-scaling-stroke;
+}
+
 .overlay circle.snap-ring {
     fill: rgba(158, 206, 106, 0.25);
     stroke: var(--green);

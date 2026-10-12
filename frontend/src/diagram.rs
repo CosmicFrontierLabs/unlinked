@@ -82,6 +82,10 @@ const SNAP: f64 = 5.0;
 /// it.
 const SNAP_RADIUS: f64 = 24.0;
 
+/// How near, in screen pixels, dragged blocks must come to lining up with
+/// another for the smart guides to line them up.
+const GUIDE_REACH: f64 = 6.0;
+
 /// Pointer interaction in progress on the diagram.
 enum Drag {
     Pan {
@@ -429,6 +433,94 @@ fn auto_connect(sys: &System, from: &BlockId, to: &BlockId) -> Option<(Endpoint,
                 .any(|l| unlinked_model::edit::drives(l, ep))
         })?;
     Some((src, dst))
+}
+
+/// A smart guide shown while dragging: blocks lined up along a horizontal
+/// (`y`) or vertical (`x`) line, from `from` to `to` along it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Guide {
+    Horizontal { y: f64, from: f64, to: f64 },
+    Vertical { x: f64, from: f64, to: f64 },
+}
+
+/// Smart guides for blocks `moving` of `sys` dragged by `offset`: the
+/// offset adjusted, within `reach` on each axis, to line a moving block up
+/// with a block staying put, and the guides showing how. Ports facing each
+/// other are lined up so the line between them runs straight, as are
+/// centres and edges.
+fn align(
+    sys: &System,
+    moving: &[BlockId],
+    offset: (f64, f64),
+    reach: f64,
+) -> ((f64, f64), Vec<Guide>) {
+    let shifted = |r: Rect, (dx, dy): (f64, f64)| {
+        Rect::new(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy)
+    };
+    // Points worth lining up on a block: its ports, centre and corners.
+    let marks = |b: &Block, at: Rect| -> Vec<Point> {
+        let mut placed = b.clone();
+        placed.position = at;
+        let mut out: Vec<Point> = [PortKind::In, PortKind::Out]
+            .into_iter()
+            .flat_map(|kind| {
+                (1..=placed.ports.count(kind).min(64)).map(move |index| PortRef { kind, index })
+            })
+            .map(|port| geometry::port_anchor(&placed, port))
+            .collect();
+        let c = Point::new((at.left + at.right) / 2.0, (at.top + at.bottom) / 2.0);
+        out.extend([
+            c,
+            Point::new(at.left, at.top),
+            Point::new(at.right, at.bottom),
+        ]);
+        out
+    };
+    let (moved, fixed): (Vec<&Block>, Vec<&Block>) =
+        sys.blocks.iter().partition(|b| moving.contains(&b.id));
+    // The smallest change on each axis that lines a mark up, with what it
+    // lines up.
+    let mut best_x: Option<(f64, f64, Rect, Rect)> = None;
+    let mut best_y: Option<(f64, f64, Rect, Rect)> = None;
+    for m in &moved {
+        let at = shifted(m.position, offset);
+        let ours = marks(m, at);
+        for f in &fixed {
+            let theirs = marks(f, f.position);
+            for p in &ours {
+                for q in &theirs {
+                    let (dx, dy) = (q.x - p.x, q.y - p.y);
+                    if dx.abs() <= reach && best_x.is_none_or(|(d, ..)| dx.abs() < d.abs()) {
+                        best_x = Some((dx, q.x, at, f.position));
+                    }
+                    if dy.abs() <= reach && best_y.is_none_or(|(d, ..)| dy.abs() < d.abs()) {
+                        best_y = Some((dy, q.y, at, f.position));
+                    }
+                }
+            }
+        }
+    }
+    let mut guides = Vec::new();
+    let mut adjusted = offset;
+    if let Some((dx, x, a, b)) = best_x {
+        adjusted.0 += dx;
+        let (a, b) = (shifted(a, (dx, 0.0)), b);
+        guides.push(Guide::Vertical {
+            x,
+            from: a.top.min(b.top),
+            to: a.bottom.max(b.bottom),
+        });
+    }
+    if let Some((dy, y, a, b)) = best_y {
+        adjusted.1 += dy;
+        let (a, b) = (shifted(a, (0.0, dy)), b);
+        guides.push(Guide::Horizontal {
+            y,
+            from: a.left.min(b.left),
+            to: a.right.max(b.right),
+        });
+    }
+    (adjusted, guides)
 }
 
 /// An orthogonal path from `a` to `b` turning halfway across, as a new
@@ -869,6 +961,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // The lines of blocks being dragged, by index, drawn where the drop
     // would put them.
     let drag_lines = use_state(|| None::<(Vec<usize>, String)>);
+    // Smart guides for the blocks being dragged.
+    let guides = use_state(Vec::<Guide>::new);
     // The outline of a block being resized.
     let resize_preview = use_state(|| None::<Rect>);
     // A wire being rerouted, as it would be drawn.
@@ -1236,7 +1330,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             route_preview.clone(),
         );
         let (model, shown) = (props.model.clone(), (*path).clone());
-        let (drag_lines, theme) = (drag_lines.clone(), *theme);
+        let (drag_lines, guides, theme) = (drag_lines.clone(), guides.clone(), *theme);
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
             match drag.borrow_mut().as_mut() {
@@ -1301,11 +1395,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         // Snap in diagram units; preview by translating the
                         // blocks' groups until the edits are applied.
                         let snap = |v: f64| (v / view.scale / SNAP).round() * SNAP;
-                        let to = (snap(dx), snap(dy));
+                        let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+                        let sys = model.system_at(&refs);
+                        // Smart guides line blocks up, unless Alt is held.
+                        let (to, lined_up) = match sys.filter(|_| !e.alt_key()) {
+                            Some(sys) => {
+                                let ids: Vec<BlockId> = blocks
+                                    .iter()
+                                    .map(|(_, id, _)| BlockId(id.clone()))
+                                    .collect();
+                                align(sys, &ids, (snap(dx), snap(dy)), GUIDE_REACH / view.scale)
+                            }
+                            None => ((snap(dx), snap(dy)), Vec::new()),
+                        };
                         if to == *offset {
                             return;
                         }
                         *offset = to;
+                        guides.set(lined_up);
                         for (group, ..) in blocks.iter() {
                             let _ = group.set_attribute(
                                 "transform",
@@ -1314,8 +1421,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         }
                         // Their lines follow, routed as the move will route
                         // them.
-                        let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
-                        if let Some(sys) = model.system_at(&refs) {
+                        if let Some(sys) = sys {
                             let moves: Vec<(BlockId, Rect)> = blocks
                                 .iter()
                                 .map(|(_, id, r)| {
@@ -1432,7 +1538,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let (selection, view) = (selection.clone(), view.clone());
         let (model, on_error) = (props.model.clone(), props.on_error.clone());
-        let drag_lines = drag_lines.clone();
+        let (drag_lines, guides) = (drag_lines.clone(), guides.clone());
         let blocks: Vec<(String, Rect)> = system
             .map(|s| {
                 s.blocks
@@ -1543,6 +1649,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     ..
                 }) => {
                     drag_lines.set(None);
+                    guides.set(Vec::new());
                     let copy = e.ctrl_key() || e.meta_key();
                     if let (true, true, Some(on_edits)) =
                         (moved && offset != (0.0, 0.0), copy, &on_edits)
@@ -2461,6 +2568,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 let points: Vec<String> = pts.iter().map(|p| format!("{},{}", p.x, p.y)).collect();
                 html! { <polyline class="route-preview" points={points.join(" ")} /> }
             });
+            // Guides overhang what they line up a little.
+            let overhang = 12.0 / view.scale;
+            let lined_up = guides.iter().map(|g| {
+                let (x1, y1, x2, y2) = match *g {
+                    Guide::Horizontal { y, from, to } => (from - overhang, y, to + overhang, y),
+                    Guide::Vertical { x, from, to } => (x, from - overhang, x, to + overhang),
+                };
+                html! {
+                    <line class="guide" x1={x1.to_string()} y1={y1.to_string()}
+                        x2={x2.to_string()} y2={y2.to_string()} />
+                }
+            });
             // Markup parsed as a whole document fragment, so its elements
             // are SVG ones.
             let following = drag_lines.as_ref().map(|(_, lines)| {
@@ -2477,6 +2596,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         { for handles }
                         { for selecting }
                         { for rerouting }
+                        { for lined_up }
                     </svg>
                 </>
             }
@@ -3292,6 +3412,24 @@ mod tests {
         assert_eq!(name, long);
         let inner = render(&model, &["Sub", &name], &opts).unwrap();
         assert!(inner.contains("Inner"));
+    }
+
+    #[test]
+    fn guides_line_up_ports_within_reach() {
+        let mdl = "Model {\n Name m\n System {\n Name m\n Block {\n BlockType Gain\n Name a\n SID 1\n Ports [1, 1]\n Position [0, 0, 30, 30]\n }\n Block {\n BlockType Gain\n Name b\n SID 2\n Ports [1, 1]\n Position [100, 40, 130, 70]\n }\n }\n}\n";
+        let model = unlinked_import::import_mdl("m.mdl", mdl).unwrap();
+        let moving = [BlockId::from("2")];
+        // Dragged up to 3 units below a's output: lined up exactly.
+        let ((dx, dy), guides) = align(&model.root, &moving, (0.0, -37.0), 6.0);
+        assert_eq!((dx, dy), (0.0, -40.0));
+        assert!(
+            matches!(guides[..], [Guide::Horizontal { y, .. }] if y == 15.0),
+            "{guides:?}"
+        );
+        // Out of reach: left alone.
+        let (offset, guides) = align(&model.root, &moving, (0.0, -18.0), 0.5);
+        assert_eq!(offset, (0.0, -18.0));
+        assert!(guides.is_empty());
     }
 
     #[test]
