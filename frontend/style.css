@@ -432,6 +432,20 @@ svg.icon {
     overflow-wrap: anywhere;
 }
 
+/* A line's data tip stays within the box `diagram.rs` keeps in view. */
+.hover-card.line-tip {
+    box-sizing: border-box;
+    max-width: 300px;
+    max-height: 110px;
+    overflow: hidden;
+}
+
+.hover-card.line-tip > div {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
 /* Shortcut help */
 .shortcut-help {
     position: absolute;

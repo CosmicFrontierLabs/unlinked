@@ -1350,6 +1350,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let hover = use_state(|| None::<(String, f64, f64)>);
     // The line under a resting pointer, by index, highlighted as a whole.
     let hover_line = use_state(|| None::<usize>);
+    // The hovered line's data tip: the line and where it shows.
+    let line_tip = use_state(|| None::<(usize, f64, f64)>);
     // Whether the model browser and library are shown beside the canvas.
     // Shown unless hidden before, or, never chosen, on a narrow screen where
     // it would cover the diagram.
@@ -1741,6 +1743,30 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             },
         )
     };
+    // The hovered line's name and recorded signals, found again only when
+    // another line is hovered or the model, level or signals change.
+    let tip_signals = {
+        let (model, run) = (props.model.clone(), run.clone());
+        use_memo(
+            (
+                (*line_tip).map(|(i, ..)| i),
+                Rc::as_ptr(&props.model) as usize,
+                (*path).clone(),
+                run.as_ref().map(|r| Rc::as_ptr(&r.signals) as usize),
+            ),
+            move |(line, _, path, _)| {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                let (run, sys) = (run?, model.system_at(&refs)?);
+                let line = sys.lines.get((*line)?)?;
+                let src = line.src.as_ref()?;
+                let name = line.name.clone().unwrap_or_else(|| {
+                    let block = sys.block(&src.block).map_or("", |b| b.name.as_str());
+                    format!("{} out {}", block.replace('\n', " "), src.port.index)
+                });
+                Some((name, run.signal_indices(&model, path, src)))
+            },
+        )
+    };
     let values: Vec<(Point, String)> = match &run {
         Some(run) => sources
             .0
@@ -1968,7 +1994,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let (model, shown) = (props.model.clone(), (*path).clone());
         let (drag_lines, guides, theme) = (drag_lines.clone(), guides.clone(), *theme);
-        let (hover, hover_line) = (hover.clone(), hover_line.clone());
+        let (hover, hover_line, line_tip) = (hover.clone(), hover_line.clone(), line_tip.clone());
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
             // The hover card follows the block under a resting pointer, and
@@ -1998,6 +2024,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 .flatten();
             if line != *hover_line {
                 hover_line.set(line);
+                // Where its data tip shows, below right of the pointer.
+                let r = container
+                    .cast::<HtmlElement>()
+                    .map(|el| el.get_bounding_client_rect());
+                line_tip.set(line.zip(r).map(|(i, r)| {
+                    // At the card's largest, as `.line-tip` bounds it.
+                    let x = (cx - r.left() + 14.0).min(r.width() - 300.0).max(0.0);
+                    let y = (cy - r.top() + 18.0).min(r.height() - 110.0).max(0.0);
+                    (i, x, y)
+                }));
             }
             if over.as_ref() != hover.as_ref().map(|(id, ..)| id) {
                 let r = container
@@ -3839,15 +3875,32 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     ref={container.clone()} tabindex="0" style={grid}
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={{
                         let (hover, hover_line, end_drag) = (hover.clone(), hover_line.clone(), end_drag.clone());
+                        let line_tip = line_tip.clone();
                         Callback::from(move |e: MouseEvent| {
                             hover.set(None);
                             hover_line.set(None);
+                            line_tip.set(None);
                             end_drag.emit(e)
                         })
                     }}
                     {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop} {oncontextmenu}>
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
+                    // With a run shown, a hovered line tells its value.
+                    if let Some((name, value, x, y)) = (*line_tip).zip((*tip_signals).as_ref()).and_then(|((_, x, y), (name, indices))| {
+                        Some((name, value_label(run.as_ref()?, indices)?, x, y))
+                    }) {
+                        <div class="hover-card line-tip" style={format!("left: {x}px; top: {y}px;")}>
+                            <div class="hover-name" title={name.clone()}>{ name }</div>
+                            <div class="mono">{ value }</div>
+                            <div class="muted">{ run.as_ref().map(|r| format!("at t = {} in the v{} run",
+                                r.time.get(r.sample_index).copied().map(short_value).unwrap_or_default(),
+                                r.version)).unwrap_or_default() }</div>
+                            if stale {
+                                <div class="muted">{ "The diagram changed since this run." }</div>
+                            }
+                        </div>
+                    }
                     if let Some((id, x, y)) = &*hover {
                         <HoverCard model={props.model.clone()} path={(*path).clone()}
                             id={BlockId(id.clone())} x={*x} y={*y} />
