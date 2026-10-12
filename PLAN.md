@@ -102,8 +102,10 @@ CI. Per-model import, render and simulation coverage is tracked in
     delete; cut/copy/paste and duplicate (from the context menu, or Ctrl-drag
     to copy to where the blocks are dropped) of native blocks with the lines
     between them, copies numbered as Simulink numbers them, pasting into
-    whichever level is shown (another level keeps the names and positions
-    where free); Ctrl-click a block to connect the selected block to it;
+    whichever level of whichever model is shown (elsewhere, copies keep
+    their names where free and their positions unless taken; read-only
+    models can be copied from); Ctrl-click a block to connect the selected
+    block to it;
     align, space and size selected blocks alike; undo/redo by action, named
     in their tooltips and in the default version message. Arrow keys nudge the
     selection by a grid step (Shift for one unit); a toolstrip and a
