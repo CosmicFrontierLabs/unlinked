@@ -34,6 +34,13 @@ pub struct EditorProps {
     pub fit_key: AttrValue,
     /// Called after a new version has been saved.
     pub on_saved: Callback<()>,
+    /// Whether the editor is shown. A hidden editor keeps its edits but
+    /// takes no keyboard shortcuts.
+    #[prop_or(true)]
+    pub active: bool,
+    /// Told whether there are unsaved edits, whenever that changes.
+    #[prop_or_default]
+    pub on_dirty_change: Callback<bool>,
 }
 
 /// A file version edits apply to.
@@ -232,7 +239,11 @@ pub fn model_editor(props: &EditorProps) -> Html {
     // Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes, unless typing in
     // a field. Re-registered each render so it acts on the current state.
     {
-        let (undo, redo, active) = (undo.clone(), redo.clone(), *editing && !*busy);
+        let (undo, redo, active) = (
+            undo.clone(),
+            redo.clone(),
+            props.active && *editing && !*busy,
+        );
         use_effect(move || {
             // Not passive, so the browser's own shortcut can be suppressed.
             let listener = active.then(|| {
@@ -417,6 +428,10 @@ pub fn model_editor(props: &EditorProps) -> Html {
     };
 
     let count = pending.len();
+    {
+        let on_dirty_change = props.on_dirty_change.clone();
+        use_effect_with(count > 0, move |dirty| on_dirty_change.emit(*dirty));
+    }
     let settings_button = {
         let settings = settings.clone();
         html! {
@@ -572,7 +587,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 <ModelSettings config={model.config.clone()}
                     on_edit={(*editing && !*busy).then(|| on_edit.clone())} />
             }
-            <DiagramView {model} fit_key={props.fit_key.clone()} {problems} {problems_truncated}
+            <DiagramView {model} fit_key={props.fit_key.clone()} active={props.active} {problems} {problems_truncated}
                 on_compile={(!compile_running).then_some(check_compile)}
                 {compile_status}
                 on_settings={Callback::from({

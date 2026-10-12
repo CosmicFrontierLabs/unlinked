@@ -61,6 +61,10 @@ pub struct DiagramProps {
     /// Opens the model settings, for problems with them.
     #[prop_or_default]
     pub on_settings: Option<Callback<()>>,
+    /// Whether the view is shown. A hidden view has no size, so fitting
+    /// waits until it is shown again.
+    #[prop_or(true)]
+    pub active: bool,
 }
 
 /// Grid block positions snap to when dragged.
@@ -777,18 +781,38 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         },
     );
 
-    // Fit whenever a new diagram level is shown.
+    // Fit whenever a new diagram level is shown, or once a hidden view that
+    // needed fitting is shown.
+    let needs_fit = use_mut_ref(|| false);
     {
         let view = view.clone();
         let container = container.clone();
         let rendered = rendered.clone();
-        use_effect_with((fit_key.clone(), (*path).clone()), move |_| {
-            if let (Some(el), Ok(svg)) = (container.cast::<HtmlElement>(), rendered.as_ref()) {
-                if let Some(size) = svg_size(svg) {
-                    view.dispatch(ViewAction::Set(fit(&el, size)));
+        let needs_fit = needs_fit.clone();
+        {
+            let needs_fit = needs_fit.clone();
+            use_effect_with((fit_key.clone(), (*path).clone()), move |_| {
+                *needs_fit.borrow_mut() = true;
+            });
+        }
+        use_effect_with(
+            (fit_key.clone(), (*path).clone(), props.active),
+            move |(_, _, active)| {
+                if !*active || !*needs_fit.borrow() {
+                    return;
                 }
-            }
-        });
+                // Laid out with a size, so the fit is not to a hidden box.
+                let shown = container
+                    .cast::<HtmlElement>()
+                    .filter(|el| el.client_width() > 0 && el.client_height() > 0);
+                if let (Some(el), Ok(svg)) = (shown, rendered.as_ref()) {
+                    if let Some(size) = svg_size(svg) {
+                        view.dispatch(ViewAction::Set(fit(&el, size)));
+                        *needs_fit.borrow_mut() = false;
+                    }
+                }
+            },
+        );
     }
 
     // A selection belongs to the level it was made on, except a block that
