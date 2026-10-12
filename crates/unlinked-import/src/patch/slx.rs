@@ -523,11 +523,28 @@ fn apply_edit(parent: &mut XElem, resolved: &Resolved) -> Result<(), ImportError
                 Some(p) => p.set_text(&format_rect(position)),
                 None => block.push_prop("Position", &format_rect(position)),
             }
+            let mut written = vec![0; resolved.routes.len()];
             for line in parent
                 .elements_mut()
                 .filter(|l| l.name == "Line" && touches(l, &sid))
             {
-                clear_points(line);
+                let src = line.prop("Src");
+                let update = resolved.routes.iter().position(|u| {
+                    src.as_deref()
+                        .is_some_and(|v| is_endpoint(v, &u.src, PortKind::Out))
+                });
+                match update {
+                    Some(r) => {
+                        set_route_points(line, &resolved.routes[r].points)?;
+                        written[r] += 1;
+                    }
+                    None => clear_points(line),
+                }
+            }
+            if written.iter().any(|&n| n != 1) {
+                return Err(ImportError::Edit(
+                    "serialized route source missing or ambiguous".into(),
+                ));
             }
         }
         Edit::SetOrientation {
@@ -1261,6 +1278,7 @@ mod tests {
             names: Default::default(),
             added: None,
             route: None,
+            routes: Vec::new(),
             hierarchy: None,
             expansion: None,
             source_line_count: 0,
@@ -1329,6 +1347,7 @@ mod tests {
             names: Default::default(),
             added: None,
             route: None,
+            routes: Vec::new(),
             hierarchy: None,
             expansion: None,
             source_line_count: 0,

@@ -93,6 +93,10 @@ CI. Per-model import, render and simulation coverage is tracked in
     them, since the file can refuse what the preview allows.
   - Lines: connect ports by dragging, disconnect, reroute by dragging a
     segment of a final leg or of a branched line's trunk, and name signals.
+    Moving a block keeps its lines' routes: the vertex next to a moved port
+    follows it so that segment stays straight. Lines without a unique signal
+    source (and physical connections) are routed afresh instead; rotating
+    or flipping a block reroutes its lines.
   - Annotations: add, move, edit plain or TeX-source text, and delete.
   - Selection by box, Shift-click and Ctrl+A; group move, rotate and delete;
     copy/paste of native blocks with the lines between them; undo/redo by

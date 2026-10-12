@@ -13,7 +13,8 @@ use crate::{decode_text, import, ImportError};
 use std::collections::HashMap;
 use unlinked_model::boundary::{boundary_remap, BoundaryRemap};
 use unlinked_model::catalog::interface_port_number;
-use unlinked_model::edit::{structural_regression, system_names, Edit};
+use unlinked_model::edit::{structural_regression, system_names, touches, Edit};
+use unlinked_model::route_edit::rewritable;
 use unlinked_model::{Block, BlockId, PortCounts, PortKind};
 
 /// An edit with the names its targets have in the file at that point of
@@ -21,6 +22,8 @@ use unlinked_model::{Block, BlockId, PortCounts, PortKind};
 struct Resolved {
     edit: Edit,
     route: Option<RouteUpdate>,
+    /// The routes a `MoveBlock` keeps on lines attached to the block.
+    routes: Vec<RouteUpdate>,
     hierarchy: Option<unlinked_model::hierarchy::CreatePlan>,
     expansion: Option<unlinked_model::expand::ExpandPlan>,
     source_line_count: usize,
@@ -155,6 +158,19 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
             }
             _ => None,
         };
+        // Moving a block rewrites the routes it keeps in the IR; lines
+        // without an update have their vertices cleared.
+        let routes = match edit {
+            Edit::MoveBlock { id, .. } => sys
+                .lines
+                .iter()
+                .filter(|l| touches(l, id) && rewritable(sys, l))
+                .filter_map(|l| l.src.as_ref())
+                .map(|src| route_update(sys, src, true))
+                .collect::<Result<_, _>>()
+                .map_err(|e| failed(e.to_string()))?,
+            _ => Vec::new(),
+        };
         let renumbered = ports_numbered
             .into_iter()
             .filter_map(|(id, before)| {
@@ -182,6 +198,7 @@ pub fn apply_edits(filename: &str, bytes: &[u8], edits: &[Edit]) -> Result<Vec<u
         resolved.push(Resolved {
             edit: edit.clone(),
             route,
+            routes,
             hierarchy,
             expansion,
             source_line_count,

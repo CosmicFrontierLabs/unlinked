@@ -653,11 +653,35 @@ fn apply_edit(file: &mut MdlFile, resolved: &Resolved) -> Result<(), ImportError
     match edit {
         Edit::MoveBlock { position, .. } => {
             block_at(sys, i).set_prop("Position", &format_rect(position), true);
+            let routes = resolved
+                .routes
+                .iter()
+                .map(|u| {
+                    let src =
+                        Port::new(sys, resolved.name(&u.src.block)?, u.src.port, PortKind::Out);
+                    Ok((src, &u.points))
+                })
+                .collect::<Result<Vec<_>, ImportError>>()?;
+            let mut written = vec![0; routes.len()];
             for line in sys
                 .sections_mut()
                 .filter(|l| l.tag == "Line" && touches(l, name, sid))
             {
-                clear_points(line);
+                match routes
+                    .iter()
+                    .position(|(src, _)| src.is_at(line, SRC_FORMS))
+                {
+                    Some(r) => {
+                        set_route_points(line, routes[r].1)?;
+                        written[r] += 1;
+                    }
+                    None => clear_points(line),
+                }
+            }
+            if written.iter().any(|&n| n != 1) {
+                return Err(ImportError::Edit(
+                    "serialized route source missing or ambiguous".into(),
+                ));
             }
         }
         Edit::SetOrientation {
@@ -1154,6 +1178,7 @@ mod tests {
             names: [("x".into(), name.into())].into(),
             added: None,
             route: None,
+            routes: Vec::new(),
             hierarchy: None,
             expansion: None,
             source_line_count: 0,
