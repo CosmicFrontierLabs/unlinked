@@ -128,6 +128,16 @@ with sync_playwright() as p:
     assert page.evaluate('window.workspaceCanvas === document.querySelector(".plot-host canvas")')
     page.wait_for_timeout(150)
     assert canvas.screenshot() == plot_before, 'Plot appearance/zoom changed after tab switch'
+    original_width = canvas.evaluate('(c) => c.width')
+    page.set_viewport_size({'width': 1100, 'height': 1000})
+    page.wait_for_function('(w) => document.querySelector(".plot-host canvas").width !== w', arg=original_width)
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.wait_for_function('(w) => document.querySelector(".plot-host canvas").width === w', arg=original_width)
+    page.wait_for_timeout(150)
+    assert canvas.screenshot() == plot_before, 'Plot zoom changed after resize'
+    simulation.get_by_role('button', name='Fit plot', exact=True).click()
+    page.wait_for_timeout(150)
+    assert canvas.screenshot() != plot_before, 'Fit plot did not restore full trace'
     # Text uploads also keep body, badge, and download pinned until opened.
     metadata.clear()
     metadata.update(copy.deepcopy(original_info))
