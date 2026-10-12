@@ -78,6 +78,10 @@ pub struct DiagramProps {
 /// Grid block positions snap to when dragged.
 const SNAP: f64 = 5.0;
 
+/// How near a port, in screen pixels, a dragged connection's end snaps to
+/// it.
+const SNAP_RADIUS: f64 = 24.0;
+
 /// Pointer interaction in progress on the diagram.
 enum Drag {
     Pan {
@@ -108,8 +112,12 @@ enum Drag {
         /// The new stored vertices once the drag has moved anything.
         route: Option<Vec<Point>>,
     },
-    /// Dragging a new connection out of port `from`.
-    Wire { from: Endpoint },
+    /// Dragging a new connection out of port `from`, toward `target` if it
+    /// is near enough to one to connect.
+    Wire {
+        from: Endpoint,
+        target: Option<Endpoint>,
+    },
     /// Moving annotation `index` (its rendered elements) by `offset`.
     Annotation {
         sx: f64,
@@ -319,6 +327,67 @@ impl RouteTarget {
 /// Whether a line may start at a port of this kind.
 fn is_source(kind: PortKind) -> bool {
     matches!(kind, PortKind::Out | PortKind::State)
+}
+
+/// Port kinds a connection can be dragged to, as the renderer marks them.
+const WIRABLE: [PortKind; 7] = [
+    PortKind::In,
+    PortKind::Out,
+    PortKind::Enable,
+    PortKind::Trigger,
+    PortKind::State,
+    PortKind::IfAction,
+    PortKind::Reset,
+];
+
+/// The port a connection dragged from `from` would end at, and its anchor:
+/// the nearest port of the other direction within `radius` of `at`, or, over
+/// block `over`, that block's nearest such port. Inputs already driven and
+/// `from` itself are skipped.
+fn snap_port(
+    sys: &System,
+    from: &Endpoint,
+    at: Point,
+    radius: f64,
+    over: Option<&BlockId>,
+) -> Option<(Endpoint, Point)> {
+    let want_source = !is_source(from.port.kind);
+    let mut best: Option<(f64, Endpoint, Point)> = None;
+    for b in &sys.blocks {
+        if over.is_some_and(|id| *id != b.id) {
+            continue;
+        }
+        for kind in WIRABLE.into_iter().filter(|k| is_source(*k) == want_source) {
+            for index in 1..=b.ports.count(kind).min(64) {
+                let ep = Endpoint {
+                    block: b.id.clone(),
+                    port: PortRef { kind, index },
+                };
+                if ep == *from
+                    || (!want_source
+                        && sys
+                            .lines
+                            .iter()
+                            .any(|l| unlinked_model::edit::drives(l, &ep)))
+                {
+                    continue;
+                }
+                let p = geometry::port_anchor(b, ep.port);
+                let d = ((p.x - at.x).powi(2) + (p.y - at.y).powi(2)).sqrt();
+                if (over.is_some() || d <= radius) && best.as_ref().is_none_or(|(bd, ..)| d < *bd) {
+                    best = Some((d, ep, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, ep, p)| (ep, p))
+}
+
+/// An orthogonal path from `a` to `b` turning halfway across, as a new
+/// connection is previewed.
+fn elbow(a: Point, b: Point) -> Vec<Point> {
+    let mid = (a.x + b.x) / 2.0;
+    vec![a, Point::new(mid, a.y), Point::new(mid, b.y), b]
 }
 
 /// The endpoint an element's `data-{prefix}sid/kind/index` attributes name.
@@ -746,8 +815,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let selection = use_state(Selection::default);
     // The selection box being drawn, corner to corner.
     let select_box = use_state(|| None::<(Point, Point)>);
-    // A connection being dragged: from its first port to the pointer.
-    let wire_preview = use_state(|| None::<(Point, Point)>);
+    // A connection being dragged: from where it starts to the pointer, or
+    // to the port it would connect to (then the flag is set).
+    let wire_preview = use_state(|| None::<(Point, Point, bool)>);
     // The outline of a block being resized.
     let resize_preview = use_state(|| None::<Rect>);
     // A wire being rerouted, as it would be drawn.
@@ -924,6 +994,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_box.clone(),
         );
         let quick = quick.clone();
+        let (model, shown) = (props.model.clone(), (*path).clone());
         Callback::from(move |e: MouseEvent| {
             // Pressing elsewhere closes the quick insert.
             if quick.is_some() {
@@ -948,13 +1019,30 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             let port = on_edit
                 .as_ref()
                 .and_then(|_| endpoint_of(&closest(e.target(), "circle.port-hit")?, ""));
-            if let Some(from) = port {
+            // Ctrl/Cmd-dragging a line branches it, as in Simulink: the new
+            // connection comes from the line's source.
+            let branch = on_edit
+                .as_ref()
+                .filter(|_| e.ctrl_key() || e.meta_key())
+                .and_then(|_| {
+                    let hit = closest(e.target(), "polyline.wire-hit, polyline.trunk-hit")?;
+                    match endpoint_of(&hit, "src-") {
+                        Some(src) => Some(src),
+                        None => {
+                            let dst = endpoint_of(&hit, "dst-")?;
+                            let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+                            let sys = model.system_at(&refs)?;
+                            unlinked_model::edit::line_into(sys, &dst)?.src.clone()
+                        }
+                    }
+                });
+            if let Some(from) = port.or(branch) {
                 let start = (*rendered)
                     .as_ref()
                     .ok()
                     .and_then(|svg| to_diagram(&e, &container, &view, svg));
-                wire_preview.set(start.map(|p| (p, p)));
-                *drag.borrow_mut() = Some(Drag::Wire { from });
+                wire_preview.set(start.map(|p| (p, p, false)));
+                *drag.borrow_mut() = Some(Drag::Wire { from, target: None });
                 return;
             }
             let handle = closest(e.target(), "rect.resize-handle").and_then(|h| {
@@ -1096,6 +1184,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_box.clone(),
             route_preview.clone(),
         );
+        let (model, shown) = (props.model.clone(), (*path).clone());
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
             match drag.borrow_mut().as_mut() {
@@ -1110,14 +1199,26 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     let (dx, dy) = ((cx - *sx) / view.scale, (cy - *sy) / view.scale);
                     resize_preview.set(Some(resized(*rect, *right, *bottom, dx, dy)));
                 }
-                Some(Drag::Wire { .. }) => {
+                // The end snaps to the nearest port it can connect to, or
+                // over a block to that block's nearest free one.
+                Some(Drag::Wire { from, target }) => {
                     let to = (*rendered)
                         .as_ref()
                         .ok()
                         .and_then(|svg| to_diagram(&e, &container, &view, svg));
-                    if let (Some((from, _)), Some(to)) = (*wire_preview, to) {
-                        wire_preview.set(Some((from, to)));
-                    }
+                    let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+                    let (Some(start), Some(to), Some(sys)) =
+                        (*wire_preview, to, model.system_at(&refs))
+                    else {
+                        return;
+                    };
+                    let over = block_group(e.target())
+                        .and_then(|g| g.get_attribute("data-sid"))
+                        .map(BlockId);
+                    let snapped = snap_port(sys, from, to, SNAP_RADIUS / view.scale, over.as_ref());
+                    let end = snapped.as_ref().map_or(to, |(_, p)| *p);
+                    *target = snapped.map(|(ep, _)| ep);
+                    wire_preview.set(Some((start.0, end, target.is_some())));
                 }
                 Some(Drag::Pan {
                     sx,
@@ -1276,10 +1377,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
                 // Dropped on a port of the opposite direction: connect,
                 // whichever end the drag started from.
-                Some(Drag::Wire { from }) => {
+                Some(Drag::Wire { from, target }) => {
                     wire_preview.set(None);
-                    let to =
-                        closest(e.target(), "circle.port-hit").and_then(|c| endpoint_of(&c, ""));
+                    let to = target.or_else(|| {
+                        closest(e.target(), "circle.port-hit").and_then(|c| endpoint_of(&c, ""))
+                    });
                     let pair = match to {
                         Some(to) if is_source(from.port.kind) && !is_source(to.port.kind) => {
                             Some((from, to))
@@ -2076,8 +2178,21 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // and the selected block's resize handles and new outline.
     let overlay = match (*rendered).as_ref().ok().and_then(|s| view_box(s)) {
         Some([vx, vy, vw, vh]) => {
-            let wire = wire_preview.map(|(a, b)| html! {
-                <line class="wire-preview" x1={a.x.to_string()} y1={a.y.to_string()} x2={b.x.to_string()} y2={b.y.to_string()} />
+            let wire = wire_preview.map(|(a, b, snapped)| {
+                let points: Vec<String> = elbow(a, b)
+                    .iter()
+                    .map(|p| format!("{},{}", p.x, p.y))
+                    .collect();
+                html! {
+                    <>
+                        <polyline class={classes!("wire-preview", snapped.then_some("snapped"))}
+                            points={points.join(" ")} />
+                        if snapped {
+                            <circle class="snap-ring" cx={b.x.to_string()} cy={b.y.to_string()}
+                                r={(7.0 / view.scale).to_string()} />
+                        }
+                    </>
+                }
             });
             let handles = selected_block.filter(|_| props.on_edit.is_some()).map(|b| {
                 let r = resize_preview.unwrap_or(b.position);
