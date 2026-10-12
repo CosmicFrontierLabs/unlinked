@@ -82,14 +82,15 @@ fn thumbnail(type_key: &str, theme: Theme) -> Option<String> {
     render_system_svg(&model.root, &opts).ok()
 }
 
-/// Thumbnails of every creatable block, rendered once per theme.
+/// Thumbnails of every creatable block, rendered once, dark like the panels
+/// they show in whatever the canvas theme.
 #[hook]
-fn use_thumbnails(theme: Theme) -> Rc<HashMap<&'static str, String>> {
-    use_memo(theme, |theme| {
+fn use_thumbnails() -> Rc<HashMap<&'static str, String>> {
+    use_memo((), |_| {
         catalog::BLOCKS
             .iter()
             .filter(|b| b.creatable)
-            .filter_map(|b| Some((b.type_key, thumbnail(b.type_key, *theme)?)))
+            .filter_map(|b| Some((b.type_key, thumbnail(b.type_key, Theme::Dark)?)))
             .collect()
     })
 }
@@ -105,7 +106,6 @@ fn tile_image(thumbs: &HashMap<&'static str, String>, type_key: &str) -> Html {
 
 #[derive(Properties, PartialEq)]
 pub struct PaletteProps {
-    pub theme: Theme,
     /// Adds a block of the given type where the diagram is shown.
     pub on_add: Callback<&'static str>,
 }
@@ -115,7 +115,7 @@ pub struct PaletteProps {
 #[function_component(BlockPalette)]
 pub fn block_palette(props: &PaletteProps) -> Html {
     let query = use_state(String::new);
-    let thumbs = use_thumbnails(props.theme);
+    let thumbs = use_thumbnails();
     let tile = |b: &'static BlockDescriptor| {
         let type_key = b.type_key;
         let ondragstart = Callback::from(move |e: DragEvent| {
@@ -179,7 +179,6 @@ pub enum Pick {
 
 #[derive(Properties, PartialEq)]
 pub struct QuickInsertProps {
-    pub theme: Theme,
     /// Position inside the diagram container, in pixels.
     pub x: f64,
     pub y: f64,
@@ -210,7 +209,7 @@ pub fn quick_insert(props: &QuickInsertProps) -> Html {
     let chosen = use_state(|| 0usize);
     let input = use_node_ref();
     let list = use_node_ref();
-    let thumbs = use_thumbnails(props.theme);
+    let thumbs = use_thumbnails();
     {
         let input = input.clone();
         use_effect_with((), move |_| {

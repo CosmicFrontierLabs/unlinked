@@ -576,6 +576,19 @@ kbd {
     background: #ffffff;
 }
 
+/* The editing grid shows through the diagram's own background */
+.diagram.editing {
+    background-image: radial-gradient(circle, rgba(192, 202, 245, 0.16) 1px, transparent 1.4px);
+}
+
+.diagram.editing.light {
+    background-image: radial-gradient(circle, rgba(26, 27, 38, 0.18) 1px, transparent 1.4px);
+}
+
+.diagram.editing .canvas svg rect.canvas {
+    fill: transparent;
+}
+
 .diagram:active {
     cursor: grabbing;
 }

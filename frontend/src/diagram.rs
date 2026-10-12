@@ -437,6 +437,21 @@ fn auto_connect(sys: &System, from: &BlockId, to: &BlockId) -> Option<(Endpoint,
     Some((src, dst))
 }
 
+/// A canvas preference kept in the browser between visits.
+fn pref(key: &str) -> Option<String> {
+    gloo_utils::window()
+        .local_storage()
+        .ok()??
+        .get_item(&format!("unlinked.canvas.{key}"))
+        .ok()?
+}
+
+fn set_pref(key: &str, value: &str) {
+    if let Ok(Some(storage)) = gloo_utils::window().local_storage() {
+        let _ = storage.set_item(&format!("unlinked.canvas.{key}"), value);
+    }
+}
+
 /// A smart guide shown while dragging: blocks lined up along a horizontal
 /// (`y`) or vertical (`x`) line, from `from` to `to` along it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -978,16 +993,35 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // The line under a resting pointer, by index, highlighted as a whole.
     let hover_line = use_state(|| None::<usize>);
     // Whether the model browser and library are shown beside the canvas.
-    let side = use_state(|| true);
+    let side = use_state(|| pref("side").as_deref() != Some("hidden"));
+    use_effect_with(*side, |side| {
+        set_pref("side", if *side { "shown" } else { "hidden" })
+    });
     // The run shown in the simulation pane, if any, and whether its values
     // label the diagram's lines.
     let results = use_context::<ResultsContext>();
-    let show_values = use_state(|| true);
+    let show_values = use_state(|| pref("values").as_deref() != Some("hidden"));
+    use_effect_with(*show_values, |shown| {
+        set_pref("values", if *shown { "shown" } else { "hidden" })
+    });
     // The outline of a block being resized.
     let resize_preview = use_state(|| None::<Rect>);
     // A wire being rerouted, as it would be drawn.
     let route_preview = use_state(|| None::<Vec<Point>>);
-    let theme = use_state(|| Theme::Dark);
+    let theme = use_state(|| match pref("theme").as_deref() {
+        Some("light") => Theme::Light,
+        _ => Theme::Dark,
+    });
+    use_effect_with(*theme, |theme| {
+        set_pref(
+            "theme",
+            if *theme == Theme::Light {
+                "light"
+            } else {
+                "dark"
+            },
+        )
+    });
     let view = use_reducer(|| View {
         scale: 1.0,
         x: 0.0,
@@ -2818,6 +2852,20 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         "transform: translate({}px, {}px) scale({}); transform-origin: 0 0;",
         v.x, v.y, v.scale
     );
+    // While editing, a dot every four grid steps, laid on the diagram's own
+    // coordinates so it pans and zooms with it.
+    let grid = props
+        .on_edit
+        .as_ref()
+        .and((*rendered).as_ref().ok().and_then(|svg| view_box(svg)))
+        .map(|[vx, vy, ..]| {
+            let size = SNAP * 4.0 * v.scale;
+            format!(
+                "background-size: {size}px {size}px; background-position: {}px {}px;",
+                v.x - vx * v.scale,
+                v.y - vy * v.scale
+            )
+        });
 
     let toggle_help = {
         let help = help.clone();
@@ -2955,7 +3003,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             move |p: Vec<String>| path.set(p)
                         })} />
                         if props.on_edit.is_some() {
-                            <BlockPalette theme={*theme} on_add={{
+                            <BlockPalette on_add={{
                                 let (add_at, container, rendered, view) =
                                     (add_at.clone(), container.clone(), rendered.clone(), view.clone());
                                 // In the middle of what is shown.
@@ -2975,7 +3023,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     </aside>
                 }
                 <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"))}
-                    ref={container.clone()} tabindex="0"
+                    ref={container.clone()} tabindex="0" style={grid}
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={{
                         let (hover, hover_line, end_drag) = (hover.clone(), hover_line.clone(), end_drag.clone());
                         Callback::from(move |e: MouseEvent| {
@@ -2997,7 +3045,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         { for crumbs }
                     </nav>
                     if let Some((x, y, at)) = *quick {
-                        <QuickInsert theme={*theme} {x} {y}
+                        <QuickInsert {x} {y}
                             on_pick={{
                                 let (add_at, quick, container) = (add_at.clone(), quick.clone(), container.clone());
                                 Callback::from(move |pick: Pick| {
