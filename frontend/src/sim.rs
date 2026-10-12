@@ -38,6 +38,8 @@ pub struct SimProps {
     /// Whether the simulation workspace is visible. Streaming survives tab changes.
     #[prop_or(true)]
     pub active: bool,
+    #[prop_or_default]
+    pub on_running_change: Callback<bool>,
     /// Project holding the model; its `.m` files are offered as init scripts.
     pub project_id: Uuid,
     pub file_id: Uuid,
@@ -485,10 +487,15 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let init_script = use_state(|| None::<(Uuid, i32)>);
     let canvas_id = format!("sim-plot-{}", props.file_id);
 
+    let needs_rebind = use_mut_ref(|| true);
+    {
+        let needs_rebind = needs_rebind.clone();
+        use_effect_with(rebind.0, move |_| *needs_rebind.borrow_mut() = true);
+    }
     {
         let (ctl, plot_host, canvas_id) = (ctl.clone(), plot_host.clone(), canvas_id.clone());
         use_effect_with((rebind.0, props.active), move |(_, active)| {
-            if !active {
+            if !active || !*needs_rebind.borrow() {
                 return;
             }
             let width = plot_host
@@ -497,6 +504,8 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 .unwrap_or(800.0);
             if let Err(e) = ctl.borrow_mut().bind_plot(&canvas_id, width) {
                 web_sys::console::error_1(&e.into());
+            } else {
+                *needs_rebind.borrow_mut() = false;
             }
         });
     }
@@ -756,6 +765,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     };
 
     let running = state.active();
+    {
+        let on_running_change = props.on_running_change.clone();
+        use_effect_with(running, move |running| on_running_change.emit(*running));
+    }
     let c = ctl.borrow();
     let samples = c.time.len();
     let generated_count = c.signals.iter().filter(|s| is_generated(s)).count();

@@ -8,6 +8,9 @@ Uses dev login and changes an unsaved solver setting. Never saves model edits.
 The selected model should have a completed simulation in its run history.
 """
 import argparse
+import copy
+import json
+import uuid
 from playwright.sync_api import sync_playwright, expect
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -25,7 +28,8 @@ with sync_playwright() as p:
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(args.url + '/api/auth/dev-login')
-    page.goto(args.url + args.model)
+    # Create an in-app history entry so Back can exercise the leave guard.
+    page.evaluate("path => { history.pushState(null, '', path); window.dispatchEvent(new PopStateEvent('popstate')); }", args.model)
     diagram = page.get_by_role('region', name='Diagram', exact=True)
     simulation = page.get_by_role('region', name='Simulation', exact=True)
     expect(diagram.locator('.diagram svg').first).to_be_visible()
@@ -39,12 +43,58 @@ with sync_playwright() as p:
     page.evaluate('window.workspaceDiagram = document.querySelector(".diagram")')
     if diagram.get_by_role('button', name='Edit', exact=True).count():
         diagram.get_by_role('button', name='Edit', exact=True).click()
-    diagram.get_by_role('button', name='Model settings', exact=True).click()
+    diagram.get_by_role('button', name='Model settings' if diagram.get_by_role('button', name='Model settings', exact=True).count() else 'Settings', exact=True).click()
     stop = diagram.get_by_label('Stop time', exact=True)
     before = stop.input_value()
     stop.fill('17')
     stop.blur()
     expect(stop).to_have_value('17')
+    # Mock metadata mutations: exercise refreshes without changing the server.
+    resource = args.url + '/api' + args.model
+    original_info = page.request.get(resource).json()
+    original_versions = page.request.get(resource + '/versions').json()
+    metadata = copy.deepcopy(original_info)
+    content_requests = []
+    page.on('request', lambda request: content_requests.append(request.url) if '/content' in request.url else None)
+    def file_metadata(route):
+        if route.request.method == 'PATCH':
+            metadata['path'] = route.request.post_data_json['path']
+            route.fulfill(status=204)
+        else:
+            route.fulfill(status=200, content_type='application/json', body=json.dumps(metadata))
+    page.route(resource, file_metadata)
+    page.once('dialog', lambda dialog: dialog.accept('workspace-review.mdl'))
+    page.get_by_role('button', name='Rename', exact=True).click()
+    expect(page.locator('.file-breadcrumbs strong')).to_have_text('workspace-review.mdl')
+    expect(stop).to_have_value('17')
+    assert page.evaluate('window.workspaceDiagram === document.querySelector(".diagram")')
+    metadata['latest']['id'] = str(uuid.uuid4())
+    metadata['latest']['version'] += 1
+    page.route(resource + '/versions', lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps([metadata['latest'], *original_versions])))
+    page.route('**/api/projects/*/files?*', lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(metadata)))
+    page.locator('.file-bar input[type=file]').set_input_files({'name':'review.mdl', 'mimeType':'application/octet-stream', 'buffer':b'Model {}'})
+    expect(page.get_by_role('button', name='Open newer version')).to_be_visible()
+    expect(stop).to_have_value('17')
+    assert not content_requests, content_requests
+    assert page.evaluate('window.workspaceDiagram === document.querySelector(".diagram")')
+    # Declining navigation must retain the same editor and draft.
+    prompts = []
+    def reject_exit(dialog):
+        prompts.append(dialog.message)
+        dialog.dismiss()
+    page.on('dialog', reject_exit)
+    page.get_by_role('navigation', name='File breadcrumb').get_by_role('link', name='Projects', exact=True).click()
+    expect(stop).to_have_value('17')
+    assert len(prompts) == 1 and 'Unsaved' in prompts[-1]
+    page.get_by_role('button', name='Open newer version').click()
+    expect(stop).to_have_value('17')
+    assert len(prompts) == 2
+    page.evaluate('history.back()')
+    page.wait_for_timeout(300)
+    expect(stop).to_have_value('17')
+    assert len(prompts) == 3 and 'Unsaved' in prompts[-1]
+    assert page.url == args.url + args.model
+    page.remove_listener('dialog', reject_exit)
     page.get_by_role('button', name='Simulate', exact=True).click()
     expect(diagram).to_be_hidden()
     expect(simulation).to_be_visible()
@@ -66,11 +116,18 @@ with sync_playwright() as p:
     expect(simulation.locator('.signal-list input[type=checkbox]').first).to_be_visible()
     selected = simulation.locator('.signal-list input[type=checkbox]:checked').count()
     page.evaluate('window.workspaceCanvas = document.querySelector(".plot-host canvas")')
+    canvas = simulation.locator('.plot-host canvas')
+    canvas.hover()
+    page.mouse.wheel(0, -300)
+    page.wait_for_timeout(150)
+    plot_before = canvas.screenshot()
     page.get_by_role('button', name='Diagram', exact=True).click()
     page.get_by_role('button', name='Simulate', exact=True).click()
     expect(simulation.locator('.sim-actions')).to_contain_text('Completed')
     assert simulation.locator('.signal-list input[type=checkbox]:checked').count() == selected
     assert page.evaluate('window.workspaceCanvas === document.querySelector(".plot-host canvas")')
+    page.wait_for_timeout(150)
+    assert canvas.screenshot() == plot_before, 'Plot appearance/zoom changed after tab switch'
     assert not errors, errors
     print('PASS: history visibility, edits retained, hidden shortcuts disabled, visible undo restored, results retained; no browser errors')
     browser.close()

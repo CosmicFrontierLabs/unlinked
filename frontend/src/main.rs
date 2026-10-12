@@ -7,6 +7,7 @@ mod editor;
 mod fetch;
 mod icons;
 mod local_viewer;
+mod navigation;
 mod pages;
 mod plot;
 mod settings;
@@ -156,5 +157,6 @@ fn home() -> Html {
 }
 
 fn main() {
+    navigation::install_history_guard();
     yew::Renderer::<App>::new().render();
 }
