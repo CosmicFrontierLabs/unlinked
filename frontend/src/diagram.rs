@@ -3003,6 +3003,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         let (quick, editable) = (quick.clone(), props.on_edit.is_some());
         let (renaming, annotating) = (renaming.clone(), annotating.clone());
+        let (results, run) = (results.clone(), run.clone());
         Callback::from(move |e: MouseEvent| {
             // While editing, double-clicking empty canvas opens the quick
             // insert there.
@@ -3078,6 +3079,21 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 path.set(p);
                 selection.set(Selection::Nothing);
                 return;
+            }
+            // With a run shown, double-clicking a Scope opens what it shows,
+            // as Simulink opens a Scope's window.
+            let scope = closest(e.target(), "g.block[data-type=\"Scope\"]")
+                .and_then(|g| g.get_attribute("data-sid"))
+                .map(BlockId);
+            if let (Some(id), Some(r), Some(run)) = (scope, &results, &run) {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                if let Some(sys) = model.system_at(&refs) {
+                    let ids = scope_signals(&model, &path, sys, &id, run);
+                    if !ids.is_empty() {
+                        r.on_show_signals.emit(ids);
+                        return;
+                    }
+                }
             }
             // Double-clicking another block edits its parameters, and an
             // annotation its text, as in Simulink: the first click selected
@@ -4034,7 +4050,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         })} />
                 }
                 if let Some(b) = (*inspected).clone() {
-                    <Inspector block={b} chart={selected_chart.map(|c| Rc::new(c.clone()))}
+                    <Inspector block={b.clone()} chart={selected_chart.map(|c| Rc::new(c.clone()))}
+                        on_open_scope={(b.block_type == "Scope").then(|| {
+                            let (r, run, sys) = (results.as_ref()?, run.as_ref()?, system?);
+                            let ids = scope_signals(&props.model, &path, sys, &b.id, run);
+                            (!ids.is_empty()).then(|| r.on_show_signals.reform(move |()| ids.clone()))
+                        }).flatten()}
                         system={system_ref.clone()} lines={level_lines.clone()}
                         model={props.model.clone()} problems={Rc::new(block_problems)}
                         on_edit={on_edit.clone()} on_open={Callback::from({
@@ -4101,6 +4122,42 @@ fn value_label(run: &ShownRun, indices: &[usize]) -> Option<String> {
             Some(format!("[{}{more}]", shown.join(", ")))
         }
     }
+}
+
+/// The recorded signals a Scope (or any block) `id` of the shown system
+/// displays: those of the lines driving its inputs, in input order, as
+/// opening a Scope in Simulink shows them.
+fn scope_signals(
+    model: &Model,
+    path: &[String],
+    sys: &System,
+    id: &BlockId,
+    run: &ShownRun,
+) -> Vec<String> {
+    let Some(block) = sys.block(id) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for index in 1..=block.ports.inputs.min(64) {
+        let input = Endpoint {
+            block: id.clone(),
+            port: PortRef {
+                kind: PortKind::In,
+                index,
+            },
+        };
+        let Some(src) = unlinked_model::edit::line_into(sys, &input).and_then(|l| l.src.as_ref())
+        else {
+            continue;
+        };
+        for i in run.signal_indices(model, path, src) {
+            let signal = &run.signals[i].id;
+            if !ids.contains(signal) {
+                ids.push(signal.clone());
+            }
+        }
+    }
+    ids
 }
 
 /// Where the shown system's lines get port value labels, and the recorded
@@ -4655,6 +4712,9 @@ struct InspectorProps {
     problems: Rc<Vec<Diagnostic>>,
     on_open: Callback<String>,
     on_edit: Option<Callback<Edit>>,
+    /// Shows what a Scope displays in the shown run, if it shows any.
+    #[prop_or_default]
+    on_open_scope: Option<Callback<()>>,
 }
 
 #[function_component(Inspector)]
@@ -4791,6 +4851,10 @@ fn inspector(props: &InspectorProps) -> Html {
                 html! { <div class={problem_class(d)}>{ about }{ &d.message }</div> }
             }) }
             { for open }
+            if let Some(open_scope) = &props.on_open_scope {
+                <button onclick={open_scope.reform(|_: MouseEvent| ())}
+                    title="Plot what this Scope shows from the shown run">{ "Open scope" }</button>
+            }
             { for expand }
             { for delete }
             if let Some(script) = script {
@@ -5070,6 +5134,12 @@ mod tests {
             value_label(&run, &sources[0].1).as_deref(),
             Some("[1, 2.5]")
         );
+        // What the Demux's input carries, as a Scope there would show it.
+        assert_eq!(
+            scope_signals(&model, &[], &model.root, &"2".into(), &run),
+            ["1[1]", "1[2]"]
+        );
+        assert!(scope_signals(&model, &[], &model.root, &"1".into(), &run).is_empty());
     }
 
     #[test]
