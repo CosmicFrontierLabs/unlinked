@@ -457,16 +457,19 @@ fn align(
     let shifted = |r: Rect, (dx, dy): (f64, f64)| {
         Rect::new(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy)
     };
-    // Points worth lining up on a block: its ports, centre and corners.
-    let marks = |b: &Block, at: Rect| -> Vec<Point> {
-        let mut placed = b.clone();
-        placed.position = at;
+    // Points worth lining up on a block moved by `by`: its ports, centre and
+    // corners. A move keeps a block's size, so its ports move with it.
+    let marks = |b: &Block, by: (f64, f64)| -> Vec<Point> {
+        let at = shifted(b.position, by);
         let mut out: Vec<Point> = [PortKind::In, PortKind::Out]
             .into_iter()
             .flat_map(|kind| {
-                (1..=placed.ports.count(kind).min(64)).map(move |index| PortRef { kind, index })
+                (1..=b.ports.count(kind).min(64)).map(move |index| PortRef { kind, index })
             })
-            .map(|port| geometry::port_anchor(&placed, port))
+            .map(|port| {
+                let p = geometry::port_anchor(b, port);
+                Point::new(p.x + by.0, p.y + by.1)
+            })
             .collect();
         let c = Point::new((at.left + at.right) / 2.0, (at.top + at.bottom) / 2.0);
         out.extend([
@@ -478,23 +481,26 @@ fn align(
     };
     let (moved, fixed): (Vec<&Block>, Vec<&Block>) =
         sys.blocks.iter().partition(|b| moving.contains(&b.id));
+    let fixed: Vec<(Rect, Vec<Point>)> = fixed
+        .iter()
+        .map(|f| (f.position, marks(f, (0.0, 0.0))))
+        .collect();
     // The smallest change on each axis that lines a mark up, with what it
     // lines up.
     let mut best_x: Option<(f64, f64, Rect, Rect)> = None;
     let mut best_y: Option<(f64, f64, Rect, Rect)> = None;
     for m in &moved {
         let at = shifted(m.position, offset);
-        let ours = marks(m, at);
-        for f in &fixed {
-            let theirs = marks(f, f.position);
+        let ours = marks(m, offset);
+        for (position, theirs) in &fixed {
             for p in &ours {
-                for q in &theirs {
+                for q in theirs {
                     let (dx, dy) = (q.x - p.x, q.y - p.y);
                     if dx.abs() <= reach && best_x.is_none_or(|(d, ..)| dx.abs() < d.abs()) {
-                        best_x = Some((dx, q.x, at, f.position));
+                        best_x = Some((dx, q.x, at, *position));
                     }
                     if dy.abs() <= reach && best_y.is_none_or(|(d, ..)| dy.abs() < d.abs()) {
-                        best_y = Some((dy, q.y, at, f.position));
+                        best_y = Some((dy, q.y, at, *position));
                     }
                 }
             }
