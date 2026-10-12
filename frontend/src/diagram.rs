@@ -3450,6 +3450,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_settings.clone(),
             show_problems.clone(),
         );
+        // What Ctrl+T starts, as in Simulink: a run, unless one is going.
+        let run_now = results
+            .as_ref()
+            .filter(|r| !r.running)
+            .and_then(|r| r.on_run.clone());
         // The subsystem Enter would open: the lone selected block's.
         let opens = system.and_then(|s| match selection.blocks() {
             [id] => s
@@ -3481,6 +3486,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
                 "?" => help.set(!*help),
                 "f" if command => finding.set(true),
+                "t" if command => {
+                    if let Some(run) = &run_now {
+                        run.emit(());
+                    }
+                }
                 // Enter opens a selected subsystem, as double-clicking does.
                 "Enter" if opens.is_some() => {
                     if let Some(name) = &opens {
@@ -3583,6 +3593,23 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     title={if *theme == Theme::Dark { "Light canvas" } else { "Dark canvas" }}>
                     { if *theme == Theme::Dark { icons::sun() } else { icons::moon() } }
                 </button>
+                // Run and stop the simulation from the diagram, as Simulink's
+                // toolstrip does; values label the lines once it finishes.
+                if let Some(r) = &results {
+                    if r.running {
+                        <button class="tool run-button running" disabled={r.on_stop.is_none()}
+                            title="Stop the simulation"
+                            onclick={r.on_stop.clone().map(|stop| stop.reform(|_: MouseEvent| ()))}>
+                            { icons::stop() }<span>{ "Stop" }</span>
+                        </button>
+                    } else {
+                        <button class="tool run-button" disabled={r.on_run.is_none()}
+                            title={r.run_unavailable.clone().unwrap_or_else(|| "Run the simulation with the Simulate tab's settings (Ctrl+T)".into())}
+                            onclick={r.on_run.clone().map(|run| run.reform(|_: MouseEvent| ()))}>
+                            { icons::run() }<span>{ "Run" }</span>
+                        </button>
+                    }
+                }
                 if let Some(run) = &run {
                     <button class={classes!("tool", (*show_values).then_some("active"), stale.then_some("stale"))}
                         aria-pressed={show_values.to_string()}
@@ -3607,6 +3634,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     onclick={toggle_help} title="Keyboard and mouse shortcuts (?)">{ icons::help() }</button>
                 { props.trailing.clone() }
             </div>
+            if let Some(error) = results.as_ref().and_then(|r| r.run_error.clone()) {
+                <div class="run-error" role="alert">{ format!("The simulation failed: {error}") }</div>
+            }
             <div class="viewer-body">
                 if *side {
                     <aside class="tree">
@@ -4046,6 +4076,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Ctrl+= / Ctrl+- / Ctrl+0", "Zoom in / out / to 100%"),
         ("Double-click a subsystem, or Enter", "Open it"),
         ("Ctrl+F", "Find blocks anywhere in the model"),
+        ("Ctrl+T", "Run the simulation"),
         (
             "Tab / Shift+Tab",
             "With a block selected, select the next / previous",
