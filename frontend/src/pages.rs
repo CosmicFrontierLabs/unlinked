@@ -273,7 +273,7 @@ pub fn org_page(props: &OrgProps) -> Html {
         let (reload, error) = (reload.clone(), error.clone());
         move |members: &Vec<shared::OrgMember>| -> Html {
             html! {
-                <table>
+                <div class="admin-table-scroll" role="region" aria-label="Organization members" tabindex="0"><table>
                     <tr><th>{ "Member" }</th><th>{ "Role" }</th><th>{ "Joined" }</th><th /></tr>
                     { for members.iter().map(|m| {
                         let user = m.user.id;
@@ -312,7 +312,7 @@ pub fn org_page(props: &OrgProps) -> Html {
                             </tr>
                         }
                     }) }
-                </table>
+                </table></div>
             }
         }
     };
@@ -346,7 +346,7 @@ pub fn org_page(props: &OrgProps) -> Html {
 
             <h2>{ "Projects" }</h2>
             { view(&projects, |ps: &Vec<Project>| html! {
-                <table>
+                <div class="admin-table-scroll" role="region" aria-label="Organization projects" tabindex="0"><table>
                     <tr><th>{ "Project" }</th><th>{ "Your role" }</th><th>{ "Default access" }</th><th>{ "Created" }</th></tr>
                     { for ps.iter().map(|p| html! {
                         <tr>
@@ -359,7 +359,7 @@ pub fn org_page(props: &OrgProps) -> Html {
                             <td class="muted">{ when(&p.created_at) }</td>
                         </tr>
                     }) }
-                </table>
+                </table></div>
             }) }
             <form class="inline-form" onsubmit={create_project}>
                 { text_input(&project_name, "Project name") }
@@ -389,7 +389,7 @@ pub fn org_page(props: &OrgProps) -> Html {
 
                 <h2>{ "Audit log" }</h2>
                 { view(&audit, |entries: &Vec<shared::AuditEntry>| html! {
-                    <table class="audit">
+                    <div class="admin-table-scroll" role="region" aria-label="Organization audit log" tabindex="0"><table class="audit">
                         { for entries.iter().take(100).map(|a| html! {
                             <tr>
                                 <td class="muted">{ when(&a.created_at) }</td>
@@ -398,7 +398,7 @@ pub fn org_page(props: &OrgProps) -> Html {
                                 <td><code>{ a.detail.to_string() }</code></td>
                             </tr>
                         }) }
-                    </table>
+                    </table></div>
                 }) }
             }
         </div>
@@ -555,7 +555,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
         let (reload, error) = (reload.clone(), error.clone());
         move |members: &Vec<shared::ProjectMember>| -> Html {
             html! {
-                <table>
+                <div class="admin-table-scroll" role="region" aria-label="Project members" tabindex="0"><table>
                     { for members.iter().map(|m| {
                         let user = m.user.id;
                         let on_role = {
@@ -592,7 +592,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
                             </tr>
                         }
                     }) }
-                </table>
+                </table></div>
             }
         }
     };
