@@ -721,6 +721,10 @@ kbd {
     gap: 0.3rem;
 }
 
+.inspector a.line-end {
+    cursor: pointer;
+}
+
 .inspector h3 {
     margin: 0 0 0.25rem;
 }
