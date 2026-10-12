@@ -208,6 +208,8 @@ code {
 .toolbar .zoom {
     color: var(--muted);
     min-width: 3rem;
+    justify-content: center;
+    padding: 0 0.25rem;
     text-align: center;
     font-size: 0.8rem;
     font-variant-numeric: tabular-nums;
@@ -530,6 +532,12 @@ kbd {
 
 .context-menu .shortcut {
     color: var(--muted);
+}
+
+.context-menu .submenu {
+    display: flex;
+    flex-direction: column;
+    padding-left: 0.8rem;
 }
 
 .crumbs .crumb {
