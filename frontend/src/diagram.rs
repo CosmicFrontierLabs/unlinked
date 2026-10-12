@@ -6,6 +6,7 @@
 //! block name subcharted states.
 
 use crate::dialog::ParameterDialog;
+use crate::icons;
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
@@ -65,6 +66,12 @@ pub struct DiagramProps {
     /// waits until it is shown again.
     #[prop_or(true)]
     pub active: bool,
+    /// Tools shown first on the toolbar, such as undo and redo.
+    #[prop_or_default]
+    pub leading: Html,
+    /// Tools shown last on the toolbar, such as saving.
+    #[prop_or_default]
+    pub trailing: Html,
 }
 
 /// Grid block positions snap to when dragged.
@@ -141,15 +148,12 @@ enum Action {
     Nudge(f64, f64),
 }
 
-/// Actions on the editing toolbar, and in the context menu, in order.
-const TOOLBAR: [Action; 7] = [
-    Action::Rotate,
-    Action::Flip,
-    Action::Group,
-    Action::Expand,
-    Action::Copy,
-    Action::Paste,
-    Action::Delete,
+/// Actions on the editing toolbar, in groups, and in the context menu, in
+/// order.
+const TOOLBAR: [&[Action]; 3] = [
+    &[Action::Copy, Action::Paste, Action::Delete],
+    &[Action::Rotate, Action::Flip],
+    &[Action::Group, Action::Expand],
 ];
 const MENU: [Action; 8] = [
     Action::Copy,
@@ -214,12 +218,28 @@ fn action_button(action: Action, enabled: bool, act: &Callback<Action>, menu: bo
         }
     } else {
         html! {
-            <button {onclick} disabled={!enabled} title={format!("{label} ({shortcut})")}>{ label }</button>
+            <button class="tool icon" {onclick} disabled={!enabled}
+                title={format!("{label} ({shortcut})")} aria-label={label}>
+                { action.icon() }
+            </button>
         }
     }
 }
 
 impl Action {
+    fn icon(self) -> Html {
+        match self {
+            Action::Copy => icons::copy(),
+            Action::Paste => icons::paste(),
+            Action::Rotate => icons::rotate(),
+            Action::Flip => icons::flip(),
+            Action::Group => icons::group(),
+            Action::Expand => icons::expand(),
+            Action::Delete => icons::delete(),
+            Action::SelectAll | Action::Nudge(..) => html! {},
+        }
+    }
+
     /// Label and shortcut, as shown on buttons and in the context menu.
     fn label(self) -> (&'static str, &'static str) {
         match self {
@@ -750,6 +770,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // The open context menu's client position.
     let menu = use_state(|| None::<(i32, i32)>);
     let show_problems = use_state(|| false);
+    let help = use_state(|| false);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -1634,7 +1655,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
         })
     };
-    let onkeydown = {
+    let edit_keydown = {
         let (act, selection, clipboard) = (act.clone(), selection.clone(), clipboard.clone());
         let (editable, subsystem) = (props.on_edit.is_some(), lone_subsystem);
         Callback::from(move |e: KeyboardEvent| {
@@ -1852,11 +1873,24 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let view = view.clone();
         let container = container.clone();
         let rendered = rendered.clone();
-        Callback::from(move |_: MouseEvent| {
+        Callback::from(move |()| {
             if let (Some(el), Ok(svg)) = (container.cast::<HtmlElement>(), rendered.as_ref()) {
                 if let Some(size) = svg_size(svg) {
                     view.dispatch(ViewAction::Set(fit(&el, size)));
                 }
+            }
+        })
+    };
+    // Zoom by `factor` about the middle of the canvas.
+    let zoom_by = {
+        let (view, container) = (view.clone(), container.clone());
+        Callback::from(move |factor: f64| {
+            if let Some(el) = container.cast::<HtmlElement>() {
+                view.dispatch(ViewAction::Zoom {
+                    factor,
+                    cx: el.client_width() as f64 / 2.0,
+                    cy: el.client_height() as f64 / 2.0,
+                });
             }
         })
     };
@@ -2045,26 +2079,87 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         v.x, v.y, v.scale
     );
 
+    let toggle_help = {
+        let help = help.clone();
+        Callback::from(move |_: MouseEvent| help.set(!*help))
+    };
+    // Viewing keys work whether or not the diagram is editable; the rest
+    // are editing actions.
+    let onkeydown = {
+        let (fit_view, zoom_by, help) = (fit_view.clone(), zoom_by.clone(), help.clone());
+        let (selection, path, menu) = (selection.clone(), path.clone(), menu.clone());
+        Callback::from(move |e: KeyboardEvent| {
+            // Keys for controls shown over the canvas are theirs.
+            let control = closest(
+                e.target(),
+                "button, input, select, textarea, a, [contenteditable]",
+            )
+            .is_some();
+            if control {
+                return;
+            }
+            let command = e.ctrl_key() || e.meta_key();
+            match e.key().as_str() {
+                " " if !command => fit_view.emit(()),
+                "=" | "+" if command => zoom_by.emit(1.25),
+                "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
+                "?" => help.set(!*help),
+                "Escape" => {
+                    if menu.is_some() {
+                        menu.set(None);
+                    } else if *help {
+                        help.set(false);
+                    } else if *selection != Selection::Nothing {
+                        selection.set(Selection::Nothing);
+                    } else if !path.is_empty() {
+                        let mut p = (*path).clone();
+                        p.pop();
+                        path.set(p);
+                    }
+                }
+                _ => return edit_keydown.emit(e),
+            }
+            e.prevent_default();
+        })
+    };
     html! {
         <div class="viewer">
             <div class="toolbar">
-                <nav class="crumbs">{ for crumbs }</nav>
+                { props.leading.clone() }
                 if props.on_edit.is_some() {
-                    <span class="edit-tools">
-                        { for TOOLBAR.iter().map(|&a| action_button(a, enabled(a), &act, false)) }
-                    </span>
+                    { for TOOLBAR.iter().map(|group| html! {
+                        <span class="tool-group">
+                            { for group.iter().map(|&a| action_button(a, enabled(a), &act, false)) }
+                        </span>
+                    }) }
                 }
                 <span class="spacer" />
-                <button class={classes!("problems-button", (errors > 0).then_some("has-errors"),
+                <button class={classes!("tool", "problems-button", (errors > 0).then_some("has-errors"),
+                    (warnings > 0 && errors == 0).then_some("has-warnings"),
                     (*show_problems).then_some("active"))} onclick={toggle_problems}
-                    title="Problems found by the static check">
-                    { format!("{errors} error{} · {warnings} warning{}{}",
+                    title={format!("{errors} error{} and {warnings} warning{} found by the static check{}",
                         if errors == 1 { "" } else { "s" }, if warnings == 1 { "" } else { "s" },
-                        if props.problems_truncated { " (incomplete)" } else { "" }) }
+                        if props.problems_truncated { " (incomplete)" } else { "" })}>
+                    <span class="count error-count">{ errors }</span>
+                    <span class="count warning-count">{ warnings }</span>
+                    <span>{ "Problems" }</span>
                 </button>
-                <span class="zoom">{ format!("{:.0}%", v.scale * 100.0) }</span>
-                <button onclick={fit_view}>{ "Fit" }</button>
-                <button onclick={toggle_theme}>{ if *theme == Theme::Dark { "Light" } else { "Dark" } }</button>
+                <span class="tool-group zoom-group">
+                    <button class="tool icon" title="Zoom out (Ctrl+-)"
+                        onclick={zoom_by.reform(|_: MouseEvent| 1.0 / 1.25)}>{ icons::zoom_out() }</button>
+                    <span class="zoom" title="Zoom">{ format!("{:.0}%", v.scale * 100.0) }</span>
+                    <button class="tool icon" title="Zoom in (Ctrl+=)"
+                        onclick={zoom_by.reform(|_: MouseEvent| 1.25)}>{ icons::zoom_in() }</button>
+                    <button class="tool icon" title="Fit to view (Space)"
+                        onclick={fit_view.reform(|_: MouseEvent| ())}>{ icons::fit() }</button>
+                </span>
+                <button class="tool icon" onclick={toggle_theme}
+                    title={if *theme == Theme::Dark { "Light canvas" } else { "Dark canvas" }}>
+                    { if *theme == Theme::Dark { icons::sun() } else { icons::moon() } }
+                </button>
+                <button class={classes!("tool", "icon", (*help).then_some("active"))}
+                    onclick={toggle_help} title="Keyboard and mouse shortcuts (?)">{ icons::help() }</button>
+                { props.trailing.clone() }
             </div>
             <div class="viewer-body">
                 <aside class="tree">
@@ -2082,6 +2177,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop} {oncontextmenu}>
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
+                    // Over the canvas, as Simulink's address bar.
+                    <nav class="crumbs" onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                        ondblclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
+                        { for crumbs }
+                    </nav>
+                    if *help {
+                        <ShortcutHelp editable={props.on_edit.is_some()} on_close={{
+                            let help = help.clone();
+                            Callback::from(move |()| help.set(false))
+                        }} />
+                    }
                 </div>
                 if let (Some((x, y)), true) = (*menu, props.on_edit.is_some()) {
                     // Clicking anywhere, including an item, closes it.
@@ -2143,6 +2249,63 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 }
             </div>
             { for problem_list }
+        </div>
+    }
+}
+
+#[derive(Properties, PartialEq)]
+struct ShortcutHelpProps {
+    editable: bool,
+    on_close: Callback<()>,
+}
+
+/// The keyboard and mouse shortcuts, those for editing only when editing.
+#[function_component(ShortcutHelp)]
+fn shortcut_help(props: &ShortcutHelpProps) -> Html {
+    const VIEW: &[(&str, &str)] = &[
+        ("Scroll", "Zoom about the pointer"),
+        ("Drag, or middle-drag", "Pan (middle-drag while editing)"),
+        ("Space", "Fit to view"),
+        ("Ctrl+= / Ctrl+-", "Zoom in / out"),
+        ("Double-click a subsystem", "Open it"),
+        ("Esc", "Clear the selection, or go up a level"),
+        ("?", "Show these shortcuts"),
+    ];
+    const EDIT: &[(&str, &str)] = &[
+        ("Drag on empty canvas", "Select by box; Shift adds"),
+        ("Shift+click", "Add to or remove from the selection"),
+        ("Drag from a port", "Connect to another port"),
+        ("Drag a line segment", "Reroute it"),
+        ("Ctrl+C / Ctrl+V", "Copy / paste"),
+        ("Delete", "Delete the selection"),
+        ("Arrows", "Nudge by a grid step (Shift: one unit)"),
+        ("Ctrl+R / Ctrl+I", "Rotate / flip"),
+        ("Ctrl+G / Ctrl+Shift+G", "Group into a subsystem / expand"),
+        ("Ctrl+A", "Select all blocks"),
+        ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"),
+        ("Ctrl+S", "Save as a new version"),
+    ];
+    let rows = |list: &[(&str, &str)]| {
+        list.iter()
+            .map(|(keys, what)| html! { <tr><td><kbd>{ *keys }</kbd></td><td>{ *what }</td></tr> })
+            .collect::<Html>()
+    };
+    let stop = Callback::from(|e: MouseEvent| e.stop_propagation());
+    html! {
+        <div class="shortcut-help" onmousedown={stop.clone()} onclick={stop.clone()} ondblclick={stop}>
+            <div class="shortcut-head">
+                <strong>{ "Shortcuts" }</strong>
+                <button class="tool icon" title="Close" onclick={props.on_close.reform(|_: MouseEvent| ())}>
+                    { icons::close() }
+                </button>
+            </div>
+            <table>
+                { rows(VIEW) }
+                if props.editable {
+                    <tr><th colspan="2">{ "Editing" }</th></tr>
+                    { rows(EDIT) }
+                }
+            </table>
         </div>
     }
 }

@@ -207,19 +207,207 @@ code {
 
 .toolbar .zoom {
     color: var(--muted);
-    min-width: 3.5rem;
-    text-align: right;
-}
-
-.toolbar .edit-tools {
-    display: flex;
-    gap: 0.25rem;
-    margin-left: 1rem;
-}
-
-.toolbar .edit-tools button {
+    min-width: 3rem;
+    text-align: center;
     font-size: 0.8rem;
-    padding: 0.15rem 0.5rem;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Toolstrip: icon tools in bordered groups */
+.toolbar {
+    gap: 0.4rem;
+    padding: 0.3rem 0.6rem;
+    min-height: 2.6rem;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+}
+
+.tool-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    padding-right: 0.4rem;
+    border-right: 1px solid var(--border);
+}
+
+.tool-group:last-of-type {
+    border-right: none;
+}
+
+button.tool {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    height: 1.85rem;
+    padding: 0 0.55rem;
+    border-color: transparent;
+    background: none;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+button.tool.icon {
+    width: 1.85rem;
+    padding: 0;
+    justify-content: center;
+}
+
+button.tool:hover:not(:disabled) {
+    background: var(--panel);
+    border-color: var(--border);
+}
+
+button.tool:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+button.tool.active {
+    background: var(--panel);
+    border-color: var(--blue);
+    color: var(--blue);
+}
+
+button.tool.primary {
+    background: var(--blue);
+    color: var(--bg);
+    border-color: var(--blue);
+    font-weight: 600;
+}
+
+button.tool.primary:hover:not(:disabled) {
+    background: var(--teal);
+    border-color: var(--teal);
+}
+
+svg.icon {
+    flex: none;
+    display: block;
+}
+
+.problems-button .count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.2rem;
+    height: 1.2rem;
+    padding: 0 0.3rem;
+    border-radius: 0.6rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: var(--panel);
+    color: var(--muted);
+}
+
+.problems-button.has-errors .error-count {
+    background: var(--red);
+    color: var(--bg);
+}
+
+.problems-button.has-warnings .warning-count,
+.problems-button.has-errors .warning-count {
+    color: var(--orange);
+}
+
+.save-group {
+    gap: 0.4rem;
+    padding: 0 0 0 0.6rem;
+    border-left: 1px solid var(--border);
+    border-right: none;
+}
+
+.save-group .changes {
+    color: var(--orange);
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.save-group .change-message {
+    width: 12rem;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.85rem;
+}
+
+/* Breadcrumbs over the canvas */
+.diagram nav.crumbs {
+    position: absolute;
+    top: 0.5rem;
+    left: 0.5rem;
+    max-width: calc(100% - 1rem);
+    padding: 0.2rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--bg-alt) 88%, transparent);
+    font-size: 0.85rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: default;
+}
+
+.diagram nav.crumbs .crumb {
+    cursor: pointer;
+}
+
+.diagram nav.crumbs .crumb:last-child {
+    color: var(--blue);
+    font-weight: 600;
+}
+
+.diagram.light nav.crumbs {
+    background: rgba(255, 255, 255, 0.9);
+    border-color: #c8ccd8;
+}
+
+.diagram.light nav.crumbs .crumb {
+    color: #1a1b26;
+}
+
+/* Shortcut help */
+.shortcut-help {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    max-height: calc(100% - 1rem);
+    overflow: auto;
+    padding: 0.6rem 0.8rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    font-size: 0.85rem;
+    cursor: default;
+    z-index: 5;
+}
+
+.shortcut-help .shortcut-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.3rem;
+}
+
+.shortcut-help th {
+    text-align: left;
+    padding-top: 0.6rem;
+    color: var(--muted);
+    font-weight: 600;
+}
+
+.shortcut-help td {
+    padding: 0.12rem 0.8rem 0.12rem 0;
+    vertical-align: top;
+}
+
+kbd {
+    font-family: inherit;
+    font-size: 0.78rem;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--bg-alt);
+    white-space: nowrap;
 }
 
 .context-backdrop {
@@ -646,10 +834,6 @@ a.compare {
     padding: 0.4rem 1rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-alt);
-}
-
-.edit-bar.editing {
-    border-bottom-color: var(--orange);
 }
 
 .edit-bar .spacer {
