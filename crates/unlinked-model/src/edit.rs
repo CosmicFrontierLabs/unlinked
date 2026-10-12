@@ -13,7 +13,7 @@ pub use crate::duplicate::duplicate;
 use crate::validation::{validate_structure, DiagnosticTarget, Severity};
 use crate::{
     Annotation, Block, BlockId, BlockStyle, Branch, Chart, Endpoint, Line, Model, Orientation,
-    PortKind, Rect, System,
+    Point, PortKind, PortRef, Rect, System,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -41,7 +41,10 @@ pub struct AnnotationTarget {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Edit {
-    /// Move and/or resize a block. Lines attached to it lose their stored
+    /// Move and/or resize a block. Attached lines keep their stored
+    /// vertices; the one next to a port of the block follows the port along
+    /// the axis that keeps that segment straight. Lines whose route cannot
+    /// be rewritten (see [`crate::route_edit::rewritable`]) lose their
     /// vertices so they are routed afresh.
     MoveBlock {
         system: SystemRef,
@@ -688,12 +691,7 @@ impl Edit {
             }
         }
         match self {
-            Edit::MoveBlock { position, .. } => {
-                sys.blocks[index].position = *position;
-                for line in sys.lines.iter_mut().filter(|l| touches(l, id)) {
-                    clear_points(line);
-                }
-            }
+            Edit::MoveBlock { position, .. } => move_block(sys, index, *position),
             Edit::SetOrientation {
                 orientation,
                 mirrored,
@@ -814,6 +812,113 @@ pub fn touches(line: &Line, id: &BlockId) -> bool {
             .any(|b| ends_at(&b.dst, id) || branches(&b.branches, id))
     }
     ends_at(&line.src, id) || ends_at(&line.dst, id) || branches(&line.branches, id)
+}
+
+/// Move block `index` to `position`, keeping the routes of attached lines
+/// that can be rewritten and clearing the others.
+fn move_block(sys: &mut System, index: usize, position: Rect) {
+    let id = sys.blocks[index].id.clone();
+    let keep: Vec<bool> = sys
+        .lines
+        .iter()
+        .map(|l| touches(l, &id) && crate::route_edit::rewritable(sys, l))
+        .collect();
+    let mut ports = Vec::new();
+    for line in sys.lines.iter().filter(|l| touches(l, &id)) {
+        endpoints_at(&line.src, &line.dst, &line.branches, &id, &mut ports);
+    }
+    let anchor = |block: &Block, port| crate::geometry::port_anchor(block, port);
+    let old: BTreeMap<PortRef, Point> = ports
+        .iter()
+        .map(|&p| (p, anchor(&sys.blocks[index], p)))
+        .collect();
+    sys.blocks[index].position = position;
+    let block = &sys.blocks[index];
+    let moved: BTreeMap<PortRef, PortMove> = old
+        .into_iter()
+        .map(|(p, from)| {
+            let to = anchor(block, p);
+            let dir = crate::geometry::port_outward(block, p);
+            (p, PortMove { from, to, dir })
+        })
+        .collect();
+    for (line, keep) in sys.lines.iter_mut().zip(keep) {
+        if !keep {
+            if touches(line, &id) {
+                clear_points(line);
+            }
+            continue;
+        }
+        let at = |ep: &Option<Endpoint>| {
+            ep.as_ref()
+                .filter(|e| e.block == id)
+                .and_then(|e| moved.get(&e.port))
+        };
+        if let Some(m) = at(&line.src) {
+            if let Some(first) = line.points.first_mut() {
+                m.align(first);
+            } else {
+                for b in &mut line.branches {
+                    if let Some(first) = b.points.first_mut() {
+                        m.align(first);
+                    }
+                }
+            }
+        }
+        if line.branches.is_empty() {
+            if let (Some(m), Some(last)) = (at(&line.dst), line.points.last_mut()) {
+                m.align(last);
+            }
+        }
+        let mut pending: Vec<&mut Branch> = line.branches.iter_mut().collect();
+        while let Some(b) = pending.pop() {
+            if let (Some(m), Some(last)) = (at(&b.dst), b.points.last_mut()) {
+                m.align(last);
+            }
+            pending.extend(b.branches.iter_mut());
+        }
+    }
+}
+
+/// A port's line anchor before and after a move, and its outward axis.
+struct PortMove {
+    from: Point,
+    to: Point,
+    dir: (f64, f64),
+}
+
+impl PortMove {
+    /// Make the vertex next to the port follow it, if the segment between
+    /// them ran straight out of the port.
+    fn align(&self, v: &mut Point) {
+        const EPS: f64 = 1e-6;
+        let (dx, dy) = self.dir;
+        if dy.abs() < EPS && (v.y - self.from.y).abs() < EPS {
+            v.y = self.to.y;
+        } else if dx.abs() < EPS && (v.x - self.from.x).abs() < EPS {
+            v.x = self.to.x;
+        }
+    }
+}
+
+/// The ports of block `id` among a line's (or branch's) endpoints.
+fn endpoints_at(
+    src: &Option<Endpoint>,
+    dst: &Option<Endpoint>,
+    branches: &[Branch],
+    id: &BlockId,
+    out: &mut Vec<PortRef>,
+) {
+    out.extend(
+        [src, dst]
+            .into_iter()
+            .flatten()
+            .filter(|e| &e.block == id)
+            .map(|e| e.port),
+    );
+    for b in branches {
+        endpoints_at(&None, &b.dst, &b.branches, id, out);
+    }
 }
 
 fn clear_points(line: &mut Line) {
@@ -1099,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn move_clears_attached_line_points() {
+    fn move_keeps_attached_line_points() {
         let mut m = model();
         Edit::MoveBlock {
             system: vec![],
@@ -1109,7 +1214,124 @@ mod tests {
         .apply(&mut m)
         .unwrap();
         assert_eq!(m.root.blocks[1].position.left, 100.0);
+        assert_eq!(m.root.lines[0].points, vec![Point::new(40.0, 15.0)]);
+    }
+
+    /// `a` at the left feeds `b` (straight across) and `c` (below), with
+    /// orthogonal vertices on the trunk and on `c`'s branch.
+    fn routed() -> Model {
+        let mut m = model();
+        for (b, x, y) in [(1, 100.0, 0.0), (2, 100.0, 100.0)] {
+            m.root.blocks[b].position = Rect::new(x, y, x + 30.0, y + 30.0);
+        }
+        m.root.lines[0].points = vec![Point::new(50.0, 15.0)];
+        m.root.lines[0].branches[1].points = vec![Point::new(50.0, 115.0)];
+        m
+    }
+
+    fn shift(m: &mut Model, id: &str, dx: f64, dy: f64) {
+        let p = m.root.block(&id.into()).unwrap().position;
+        Edit::MoveBlock {
+            system: vec![],
+            id: id.into(),
+            position: Rect::new(p.left + dx, p.top + dy, p.right + dx, p.bottom + dy),
+        }
+        .apply(m)
+        .unwrap();
+    }
+
+    #[test]
+    fn moving_the_source_realigns_the_first_vertex() {
+        let mut m = routed();
+        shift(&mut m, "1", 10.0, 20.0);
+        let line = &m.root.lines[0];
+        assert_eq!(line.points, vec![Point::new(50.0, 35.0)]);
+        assert!(line.branches[0].points.is_empty());
+        assert_eq!(line.branches[1].points, vec![Point::new(50.0, 115.0)]);
+
+        // Without trunk vertices, each branch's first vertex follows.
+        let mut m = routed();
+        m.root.lines[0].points.clear();
+        m.root.lines[0].branches[0].points = vec![Point::new(60.0, 15.0)];
+        m.root.lines[0].branches[1].points = vec![Point::new(50.0, 15.0), Point::new(50.0, 115.0)];
+        shift(&mut m, "1", 0.0, -5.0);
+        let line = &m.root.lines[0];
+        assert_eq!(line.branches[0].points, vec![Point::new(60.0, 10.0)]);
+        assert_eq!(
+            line.branches[1].points,
+            vec![Point::new(50.0, 10.0), Point::new(50.0, 115.0)]
+        );
+    }
+
+    #[test]
+    fn moving_a_destination_realigns_the_last_vertex_of_its_leaf() {
+        let mut m = routed();
+        shift(&mut m, "3", 0.0, 10.0);
+        let line = &m.root.lines[0];
+        assert_eq!(line.points, vec![Point::new(50.0, 15.0)]);
+        assert!(line.branches[0].points.is_empty());
+        assert_eq!(line.branches[1].points, vec![Point::new(50.0, 125.0)]);
+
+        // A point-to-point line's own vertices are its leaf's.
+        let mut m = routed();
+        m.root.lines[0].branches.truncate(1);
+        let b = m.root.lines[0].branches.remove(0);
+        m.root.lines[0].dst = b.dst;
+        m.root.lines[0].points = vec![
+            Point::new(50.0, 40.0),
+            Point::new(70.0, 40.0),
+            Point::new(70.0, 15.0),
+        ];
+        shift(&mut m, "2", 10.0, 5.0);
+        assert_eq!(
+            m.root.lines[0].points,
+            vec![
+                Point::new(50.0, 40.0),
+                Point::new(70.0, 40.0),
+                Point::new(70.0, 20.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn moving_one_branch_end_keeps_the_other_branches() {
+        let mut m = routed();
+        let before = m.root.lines[0].clone();
+        shift(&mut m, "2", 20.0, 30.0);
+        assert_eq!(m.root.lines[0], before);
+    }
+
+    #[test]
+    fn unaligned_vertices_stay_put() {
+        let mut m = routed();
+        m.root.lines[0].points = vec![Point::new(50.0, 40.0)];
+        m.root.lines[0].branches[1].points = vec![Point::new(50.0, 100.0)];
+        shift(&mut m, "1", 0.0, 10.0);
+        shift(&mut m, "3", 0.0, 10.0);
+        assert_eq!(m.root.lines[0].points, vec![Point::new(50.0, 40.0)]);
+        assert_eq!(
+            m.root.lines[0].branches[1].points,
+            vec![Point::new(50.0, 100.0)]
+        );
+    }
+
+    #[test]
+    fn lines_that_cannot_be_rewritten_are_cleared() {
+        // A second line from the same source makes it ambiguous.
+        let mut m = routed();
+        let mut extra = m.root.lines[0].clone();
+        extra.branches.truncate(1);
+        m.root.lines.push(extra);
+        shift(&mut m, "3", 0.0, 10.0);
         assert!(m.root.lines[0].points.is_empty());
+        assert!(m.root.lines[0].branches[1].points.is_empty());
+        assert_eq!(m.root.lines[1].points, vec![Point::new(50.0, 15.0)]);
+
+        let mut m = routed();
+        m.root.lines[0].src = None;
+        shift(&mut m, "3", 0.0, 10.0);
+        assert!(m.root.lines[0].points.is_empty());
+        assert!(m.root.lines[0].branches[1].points.is_empty());
     }
 
     fn delete(id: &str, disconnect: DisconnectPolicy) -> Edit {

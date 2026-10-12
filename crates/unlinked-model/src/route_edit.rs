@@ -1,6 +1,6 @@
 //! Explicit leaf/trunk routing in absolute diagram coordinates.
 use crate::edit::EditError;
-use crate::{Branch, Endpoint, Point, PortKind, System};
+use crate::{Branch, Endpoint, Line, Point, PortKind, System};
 
 pub(crate) fn validate_points(points: &[Point]) -> Result<(), EditError> {
     if points.len() > 4096
@@ -134,6 +134,15 @@ pub fn route_location(
         ));
     }
     Ok((root, path))
+}
+
+/// Whether `line`'s stored route can be rewritten in place: it is an
+/// ordinary, fully attached line from a unique signal source. Moving a block
+/// keeps such routes and clears the others, in the IR and in the file alike.
+pub fn rewritable(sys: &System, line: &Line) -> bool {
+    line.src
+        .as_ref()
+        .is_some_and(|src| route_location(sys, src, true).is_ok())
 }
 
 pub(crate) fn set_route(
