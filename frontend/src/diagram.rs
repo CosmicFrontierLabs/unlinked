@@ -2089,6 +2089,15 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let (fit_view, zoom_by, help) = (fit_view.clone(), zoom_by.clone(), help.clone());
         let (selection, path, menu) = (selection.clone(), path.clone(), menu.clone());
         Callback::from(move |e: KeyboardEvent| {
+            // Keys for controls shown over the canvas are theirs.
+            let control = closest(
+                e.target(),
+                "button, input, select, textarea, a, [contenteditable]",
+            )
+            .is_some();
+            if control {
+                return;
+            }
             let command = e.ctrl_key() || e.meta_key();
             match e.key().as_str() {
                 " " if !command => fit_view.emit(()),
