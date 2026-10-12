@@ -689,6 +689,22 @@ pub fn file_page(props: &FileProps) -> Html {
     let simulation_running = use_state(|| false);
     let shown_run = use_state(|| None::<Rc<crate::results::ShownRun>>);
     let requested_signals = use_state(|| None::<crate::results::PlotRequest>);
+    let simulation_tab = use_node_ref();
+    {
+        let simulation_tab = simulation_tab.clone();
+        // Plot/Show scope hide the control that initiated navigation. Give
+        // keyboard users a visible focus target in the newly opened view.
+        use_effect_with(
+            requested_signals.as_ref().map(|r| r.serial),
+            move |serial| {
+                if serial.is_some() {
+                    if let Some(button) = simulation_tab.cast::<web_sys::HtmlElement>() {
+                        let _ = button.focus();
+                    }
+                }
+            },
+        );
+    }
     let on_result = {
         let (shown_run, requested_signals) = (shown_run.clone(), requested_signals.clone());
         Callback::from(move |run: Option<Rc<crate::results::ShownRun>>| {
@@ -976,6 +992,7 @@ pub fn file_page(props: &FileProps) -> Html {
         let tab = tab.clone();
         html! {
             <button class={classes!("tab", (*tab == t).then_some("active"))}
+                ref={if t == Tab::Simulate { simulation_tab.clone() } else { NodeRef::default() }}
                 aria-pressed={(*tab == t).to_string()}
                 onclick={Callback::from(move |_: MouseEvent| { tab.set(t); })}>{ label }</button>
         }
