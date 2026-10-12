@@ -603,8 +603,9 @@ struct Clipboard {
     model: Rc<Model>,
     system: SystemRef,
     ids: Vec<BlockId>,
-    /// Pastes so far; each lands further down and right.
-    pastes: u32,
+    /// Pastes so far into each system; each into the same one lands
+    /// further down and right.
+    pastes: std::collections::HashMap<SystemRef, u32>,
 }
 
 /// Smallest block side a resize leaves.
@@ -1975,7 +1976,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             model: model.clone(),
                             system: system_ref.clone(),
                             ids,
-                            pastes: 0,
+                            pastes: Default::default(),
                         });
                         on_edits.emit(group);
                         selection.set(Selection::Nothing);
@@ -2038,7 +2039,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         model: model.clone(),
                         system: system_ref.clone(),
                         ids: selection.blocks().iter().cloned().map(BlockId).collect(),
-                        pastes: 0,
+                        pastes: Default::default(),
                     });
                     // Paste becomes available.
                     refresh.force_update();
@@ -2049,18 +2050,20 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         return;
                     };
                     // Into the shown system, whichever it was copied from.
+                    let nth = clip.pastes.get(&system_ref).copied().unwrap_or(0);
                     let pasted = unlinked_model::clipboard::paste(
                         &clip.model,
                         &clip.system,
                         &clip.ids,
-                        clip.pastes,
+                        nth,
                         &model,
                         &system_ref,
                     )
                     .map_err(|e| e.to_string());
                     match pasted {
                         Ok(group) => {
-                            clip.pastes = clip.pastes.saturating_add(1);
+                            clip.pastes
+                                .insert(system_ref.clone(), nth.saturating_add(1));
                             let added = group
                                 .iter()
                                 .filter_map(|edit| match edit {
