@@ -684,7 +684,20 @@ pub fn file_page(props: &FileProps) -> Html {
     let request_plot = {
         let (requested, tab, serial) =
             (requested_signals.clone(), tab.clone(), plot_serial.clone());
+        let shown_run = shown_run.clone();
         Callback::from(move |(ids, replace): (Vec<String>, bool)| {
+            let Some(run) = &*shown_run else {
+                return;
+            };
+            let recorded: std::collections::HashSet<&str> = run
+                .signals
+                .iter()
+                .map(|signal| signal.id.as_str())
+                .collect();
+            let ids: Vec<String> = ids
+                .into_iter()
+                .filter(|id| recorded.contains(id.as_str()))
+                .collect();
             if ids.is_empty() {
                 return;
             }
