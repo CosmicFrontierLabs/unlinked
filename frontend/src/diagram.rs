@@ -3510,8 +3510,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if selected_line.is_some() || selected_annotation.is_some() || selected_block.is_some() {
                     <button class="tool icon inspector-close" title="Close (Esc)" aria-label="Close the inspector"
                         onclick={{
-                            let selection = selection.clone();
-                            Callback::from(move |_: MouseEvent| selection.set(Selection::Nothing))
+                            let (selection, container) = (selection.clone(), container.clone());
+                            // Back to the canvas, where the keys act.
+                            Callback::from(move |_: MouseEvent| {
+                                selection.set(Selection::Nothing);
+                                if let Some(el) = container.cast::<HtmlElement>() {
+                                    let _ = el.focus();
+                                }
+                            })
                         }}>{ icons::close() }</button>
                 }
             </div>
