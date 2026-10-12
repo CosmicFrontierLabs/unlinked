@@ -99,8 +99,9 @@ CI. Per-model import, render and simulation coverage is tracked in
     or flipping a block reroutes its lines.
   - Annotations: add, move, edit plain or TeX-source text, and delete.
   - Selection by box, Shift-click and Ctrl+A; group move, rotate and delete;
-    cut/copy/paste and duplicate (Ctrl+D, or Ctrl-drag to copy to where the
-    blocks are dropped) of native blocks with the lines between them, copies
+    cut/copy/paste and duplicate (from the context menu, or Ctrl-drag to copy
+    to where the blocks are dropped) of native blocks with the lines between
+    them, copies
     numbered as Simulink numbers them, pasting into whichever level is
     shown (another level keeps the names and positions where free);
     Ctrl-click a block to connect the
