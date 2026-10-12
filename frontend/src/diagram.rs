@@ -1588,6 +1588,20 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let rename_field = use_node_ref();
     // Set by Escape, so leaving the field then cancels rather than commits.
     let rename_cancelled = use_mut_ref(|| false);
+    // A signal being named in place: the source of its line, where the
+    // field shows in the container (left, top, in pixels) and its name
+    // before.
+    let naming = use_state(|| None::<(Endpoint, (f64, f64), String)>);
+    let name_field = use_node_ref();
+    {
+        let field = name_field.clone();
+        use_effect_with(naming.as_ref().map(|(src, ..)| src.clone()), move |open| {
+            if let (Some(_), Some(input)) = (open, field.cast::<HtmlInputElement>()) {
+                let _ = input.focus();
+                input.select();
+            }
+        });
+    }
     // An annotation being edited in place: its index, its content then, and
     // where it shows (left, top, width, height in container pixels).
     let annotating = use_state(|| None::<(usize, Annotation, (f64, f64, f64, f64))>);
@@ -3352,7 +3366,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let model = props.model.clone();
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         let (quick, editable) = (quick.clone(), props.on_edit.is_some());
-        let (renaming, annotating) = (renaming.clone(), annotating.clone());
+        let (renaming, annotating, naming) = (renaming.clone(), annotating.clone(), naming.clone());
         let (results, run) = (results.clone(), run.clone());
         Callback::from(move |e: MouseEvent| {
             // While editing, double-clicking empty canvas opens the quick
@@ -3396,22 +3410,29 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     return;
                 }
             }
-            // Double-clicking a line names its signal, as in Simulink: the
-            // first click selected it, so its inspector is showing.
-            let wire = closest(e.target(), "polyline.wire-hit, polyline.trunk-hit").is_some();
-            if editable && wire {
-                let field = container
-                    .cast::<Element>()
-                    .and_then(|c| c.parent_element())
-                    .and_then(|v| {
-                        v.query_selector(".inspector input.signal-name")
-                            .ok()
-                            .flatten()
-                    })
-                    .and_then(|i| i.dyn_into::<HtmlInputElement>().ok());
-                if let Some(field) = field {
-                    let _ = field.focus();
-                    field.select();
+            // Double-clicking a line names its signal where it was clicked,
+            // as in Simulink.
+            let wire = closest(e.target(), "polyline.wire-hit, polyline.trunk-hit");
+            if let (true, Some(wire)) = (editable, wire) {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                let line = model.system_at(&refs).and_then(|sys| {
+                    match (endpoint_of(&wire, "dst-"), endpoint_of(&wire, "src-")) {
+                        (Some(dst), _) => unlinked_model::edit::line_into(sys, &dst),
+                        (None, Some(src)) => unlinked_model::edit::line_from(sys, &src),
+                        _ => None,
+                    }
+                });
+                let rect = container
+                    .cast::<HtmlElement>()
+                    .map(|el| el.get_bounding_client_rect());
+                if let (Some(line), Some(r)) = (line, rect) {
+                    if let Some(src) = line.src.clone() {
+                        // Centred on the click, just above the line.
+                        let left = (e.client_x() as f64 - r.left() - 80.0).max(0.0);
+                        let top = (e.client_y() as f64 - r.top() - 30.0).max(0.0);
+                        let name = line.name.clone().unwrap_or_default();
+                        naming.set(Some((src, (left, top), name)));
+                    }
                 }
                 return;
             }
@@ -4318,6 +4339,56 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                         on_edit.emit(Edit::RenameBlock {
                                             system: system.clone(),
                                             id: id.clone(),
+                                            name,
+                                        });
+                                    }
+                                })
+                            }} />
+                    }
+                    if let (Some((src, (left, top), before)), Some(on_edit)) = ((*naming).clone(), on_edit.clone()) {
+                        <input class="rename-in-place" ref={name_field.clone()} value={before.clone()}
+                            aria-label="Signal name" placeholder="Signal name"
+                            style={format!("left: {left}px; top: {top}px; width: 160px;")}
+                            onmousedown={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                            ondblclick={Callback::from(|e: MouseEvent| e.stop_propagation())}
+                            onkeydown={{
+                                let (naming, container) = (naming.clone(), container.clone());
+                                let rename_cancelled = rename_cancelled.clone();
+                                Callback::from(move |e: KeyboardEvent| {
+                                    // Keys typed here are not diagram shortcuts.
+                                    e.stop_propagation();
+                                    match e.key().as_str() {
+                                        // Leaving the field commits, as below.
+                                        "Enter" => {
+                                            if let Some(el) = container.cast::<HtmlElement>() {
+                                                let _ = el.focus();
+                                            }
+                                        }
+                                        "Escape" => {
+                                            *rename_cancelled.borrow_mut() = true;
+                                            naming.set(None);
+                                            if let Some(el) = container.cast::<HtmlElement>() {
+                                                let _ = el.focus();
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                })
+                            }}
+                            onblur={{
+                                let (naming, system) = (naming.clone(), system_ref.clone());
+                                let rename_cancelled = rename_cancelled.clone();
+                                Callback::from(move |e: FocusEvent| {
+                                    naming.set(None);
+                                    if std::mem::take(&mut *rename_cancelled.borrow_mut()) {
+                                        return;
+                                    }
+                                    // An empty name removes the label.
+                                    let name = e.target_unchecked_into::<HtmlInputElement>().value();
+                                    if name != before {
+                                        on_edit.emit(Edit::SetSignalName {
+                                            system: system.clone(),
+                                            src: src.clone(),
                                             name,
                                         });
                                     }
