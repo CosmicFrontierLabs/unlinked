@@ -1249,6 +1249,19 @@ button.active {
     overflow-y: auto;
 }
 
+.quick-insert.find-blocks {
+    top: 0.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 28rem;
+    max-width: calc(100% - 1rem);
+}
+
+.find-blocks .quick-row {
+    justify-content: space-between;
+    padding: 0.3rem 0.5rem;
+}
+
 .quick-row {
     display: flex;
     align-items: center;

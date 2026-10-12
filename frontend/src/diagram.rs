@@ -6,6 +6,7 @@
 //! block name subcharted states.
 
 use crate::dialog::ParameterDialog;
+use crate::find::{FindBlocks, Found};
 use crate::icons;
 use crate::palette::{BlockPalette, Pick, QuickInsert, PALETTE_DRAG};
 use gloo_events::{EventListener, EventListenerOptions};
@@ -997,6 +998,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let menu = use_state(|| None::<(i32, i32)>);
     let show_problems = use_state(|| false);
     let help = use_state(|| false);
+    // Whether the find box is open.
+    let finding = use_state(|| false);
     // The open quick insert: where it shows in the container, in pixels,
     // and the diagram point it adds at.
     let quick = use_state(|| None::<(f64, f64, Point)>);
@@ -2700,6 +2703,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // are editing actions.
     let onkeydown = {
         let (fit_view, zoom_by, help) = (fit_view.clone(), zoom_by.clone(), help.clone());
+        let finding = finding.clone();
         let (selection, path, menu) = (selection.clone(), path.clone(), menu.clone());
         Callback::from(move |e: KeyboardEvent| {
             // Keys for controls shown over the canvas are theirs.
@@ -2717,6 +2721,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "=" | "+" if command => zoom_by.emit(1.25),
                 "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
                 "?" => help.set(!*help),
+                "f" if command => finding.set(true),
                 "Escape" => {
                     if menu.is_some() {
                         menu.set(None);
@@ -2776,6 +2781,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     title={if *theme == Theme::Dark { "Light canvas" } else { "Dark canvas" }}>
                     { if *theme == Theme::Dark { icons::sun() } else { icons::moon() } }
                 </button>
+                <button class={classes!("tool", "icon", (*finding).then_some("active"))}
+                    title="Find blocks (Ctrl+F)" onclick={{
+                        let finding = finding.clone();
+                        Callback::from(move |_: MouseEvent| finding.set(!*finding))
+                    }}>{ icons::search() }</button>
                 <button class={classes!("tool", "icon", (*help).then_some("active"))}
                     onclick={toggle_help} title="Keyboard and mouse shortcuts (?)">{ icons::help() }</button>
                 { props.trailing.clone() }
@@ -2845,6 +2855,40 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                 let (quick, container) = (quick.clone(), container.clone());
                                 Callback::from(move |()| {
                                     quick.set(None);
+                                    if let Some(el) = container.cast::<HtmlElement>() {
+                                        let _ = el.focus();
+                                    }
+                                })
+                            }} />
+                    }
+                    if *finding {
+                        <FindBlocks model={props.model.clone()}
+                            on_pick={{
+                                let (finding, path, selection, select_on_open, container) = (
+                                    finding.clone(),
+                                    path.clone(),
+                                    selection.clone(),
+                                    select_on_open.clone(),
+                                    container.clone(),
+                                );
+                                Callback::from(move |f: Found| {
+                                    finding.set(false);
+                                    // Another level selects the block once shown.
+                                    if f.path == *path {
+                                        selection.set(Selection::Blocks(vec![f.id]));
+                                    } else {
+                                        *select_on_open.borrow_mut() = Some(f.id);
+                                        path.set(f.path);
+                                    }
+                                    if let Some(el) = container.cast::<HtmlElement>() {
+                                        let _ = el.focus();
+                                    }
+                                })
+                            }}
+                            on_close={{
+                                let (finding, container) = (finding.clone(), container.clone());
+                                Callback::from(move |()| {
+                                    finding.set(false);
                                     if let Some(el) = container.cast::<HtmlElement>() {
                                         let _ = el.focus();
                                     }
@@ -2998,6 +3042,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Space", "Fit to view"),
         ("Ctrl+= / Ctrl+-", "Zoom in / out"),
         ("Double-click a subsystem", "Open it"),
+        ("Ctrl+F", "Find blocks anywhere in the model"),
         ("Esc", "Clear the selection, or go up a level"),
         ("?", "Show these shortcuts"),
     ];

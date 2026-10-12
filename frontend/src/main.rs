@@ -5,6 +5,7 @@ mod diagram;
 mod dialog;
 mod editor;
 mod fetch;
+mod find;
 mod icons;
 mod local_viewer;
 mod navigation;
