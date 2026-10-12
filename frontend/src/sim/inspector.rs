@@ -95,12 +95,14 @@ pub(super) struct InspectorProps {
     pub controller: Rc<RefCell<Controller>>,
     pub samples: usize,
     pub selected: Vec<usize>,
+    pub on_cursor: Callback<usize>,
 }
 impl PartialEq for InspectorProps {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.controller, &other.controller)
             && self.samples == other.samples
             && self.selected == other.selected
+            && self.on_cursor == other.on_cursor
     }
 }
 
@@ -124,6 +126,14 @@ pub(super) fn measurements(props: &InspectorProps) -> Html {
     };
     let ia = cursor(&a, c.time.first()).and_then(|v| nearest(&c.time, v));
     let ib = cursor(&b, c.time.last()).and_then(|v| nearest(&c.time, v));
+    {
+        let on_cursor = props.on_cursor.clone();
+        use_effect_with(ib, move |index| {
+            if let Some(index) = index {
+                on_cursor.emit(*index);
+            }
+        });
+    }
     let input = |name: &'static str,
                  draft: &UseStateHandle<String>,
                  default: Option<&f64>,

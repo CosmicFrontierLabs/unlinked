@@ -16,6 +16,7 @@ use crate::api;
 use crate::diagram::fmt_num;
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
 use crate::plot::{self, PlotSession};
+use crate::results::{ShownRun, ShownSignal};
 use futures_util::future::{AbortHandle, Abortable};
 use rizzma::wasm::WasmFigure;
 use shared::{
@@ -46,6 +47,12 @@ pub struct SimProps {
     pub active: bool,
     #[prop_or_default]
     pub on_running_change: Callback<bool>,
+    #[prop_or_default]
+    pub on_result: Callback<Option<Rc<ShownRun>>>,
+    #[prop_or_default]
+    pub on_cursor: Callback<usize>,
+    #[prop_or_default]
+    pub requested_signal: Option<(u64, String)>,
     /// Project holding the model; its `.m` files are offered as init scripts.
     pub project_id: Uuid,
     pub file_id: Uuid,
@@ -184,6 +191,7 @@ struct Controller {
     columns: Vec<Vec<f64>>,
     session: Option<PlotSession>,
     user_view: bool,
+    cursor_index: Option<usize>,
     sender: Option<Sender<SimulationSocket>>,
     /// Server id of the live run, once known.
     run_id: Option<Uuid>,
@@ -208,6 +216,7 @@ impl Controller {
         self.columns.clear();
         self.session = None;
         self.user_view = false;
+        self.cursor_index = None;
         self.sender = None;
         self.run_id = None;
         self.run_version = None;
@@ -215,6 +224,32 @@ impl Controller {
         self.requested_options = None;
         self.last_refresh = 0.0;
         self.generation
+    }
+
+    fn snapshot(&self) -> Option<Rc<ShownRun>> {
+        if self.time.is_empty() || self.signals.is_empty() {
+            return None;
+        }
+        Some(Rc::new(ShownRun {
+            run_id: self.run_id?,
+            version: self.run_version?,
+            time: Rc::new(self.time.clone()),
+            sample_index: self
+                .cursor_index
+                .unwrap_or(self.time.len() - 1)
+                .min(self.time.len() - 1),
+            signals: Rc::new(
+                self.signals
+                    .iter()
+                    .zip(&self.columns)
+                    .map(|(s, values)| ShownSignal {
+                        id: s.id.clone(),
+                        name: s.name.clone(),
+                        values: Rc::new(values.clone()),
+                    })
+                    .collect(),
+            ),
+        }))
     }
 
     fn refresh_plot(&self) {
@@ -955,6 +990,49 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         let on_running_change = props.on_running_change.clone();
         use_effect_with(running, move |running| on_running_change.emit(*running));
     }
+    let result_revision = {
+        let c = ctl.borrow();
+        (
+            c.generation,
+            matches!(&*state, RunState::Finished(..) | RunState::Error(_)),
+        )
+    };
+    {
+        let (ctl, on_result) = (ctl.clone(), props.on_result.clone());
+        use_effect_with(result_revision, move |(_, terminal)| {
+            on_result.emit(if *terminal {
+                ctl.borrow().snapshot()
+            } else {
+                None
+            });
+        });
+    }
+    {
+        let (ctl, rebind) = (ctl.clone(), rebind.clone());
+        use_effect_with(
+            (props.requested_signal.clone(), signal_revision),
+            move |(requested, _)| {
+                if let Some((_, id)) = requested {
+                    let mut c = ctl.borrow_mut();
+                    if let Some(i) = c.signals.iter().position(|s| s.id == *id) {
+                        if !c.plotted.contains(&i) {
+                            c.plotted.push(i);
+                            c.plotted.sort_unstable();
+                            drop(c);
+                            rebind.dispatch(());
+                        }
+                    }
+                }
+            },
+        );
+    }
+    let set_cursor = {
+        let (ctl, on_cursor) = (ctl.clone(), props.on_cursor.clone());
+        Callback::from(move |index: usize| {
+            ctl.borrow_mut().cursor_index = Some(index);
+            on_cursor.emit(index);
+        })
+    };
     let c = ctl.borrow();
     let samples = c.time.len();
     let plotted: HashSet<usize> = c.plotted.iter().copied().collect();
@@ -1115,7 +1193,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         </div>
                     }
                 </div>
-                    if samples > 0 { <Measurements key={c.generation.to_string()} controller={ctl.clone()} samples={samples} selected={c.plotted.clone()} /> }
+                    if samples > 0 { <Measurements key={c.generation.to_string()} controller={ctl.clone()} samples={samples} selected={c.plotted.clone()} on_cursor={set_cursor} /> }
                 </div>
                 <aside class="signal-list">
                     <h4>{ format!("Signals · {} selected", c.plotted.len()) }</h4>
@@ -1194,6 +1272,30 @@ mod tests {
             .map(|v| v.parse().unwrap())
             .collect();
         assert_eq!(values, [1e300, 1e-300]);
+    }
+
+    #[test]
+    fn published_results_are_immutable_and_pin_the_recorded_version() {
+        let mut c = Controller {
+            run_id: Some(Uuid::nil()),
+            run_version: Some(3),
+            time: vec![0.0, 0.5, 1.0],
+            columns: vec![vec![1.0, 2.0, 3.0]],
+            signals: vec![SimulationSignal {
+                id: "1".into(),
+                name: "m/y:1".into(),
+            }],
+            cursor_index: Some(1),
+            ..Default::default()
+        };
+        let snapshot = c.snapshot().unwrap();
+        c.columns[0][1] = 99.0;
+        c.reset();
+        assert_eq!(snapshot.version, 3);
+        assert_eq!(snapshot.sample_index, 1);
+        assert_eq!(snapshot.signals[0].values[1], 2.0);
+        assert_eq!(*snapshot.time, [0.0, 0.5, 1.0]);
+        assert!(c.snapshot().is_none());
     }
 
     fn config(entries: &[(&str, &str)]) -> SimConfig {

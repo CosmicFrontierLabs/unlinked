@@ -11,7 +11,6 @@ mod navigation;
 mod pages;
 mod palette;
 mod plot;
-#[allow(dead_code)]
 mod results;
 mod settings;
 mod sim;

@@ -4,14 +4,14 @@ use unlinked_model::{Endpoint, Model, PortKind, System};
 use uuid::Uuid;
 use yew::Callback;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct ShownSignal {
     pub id: String,
     pub name: String,
     pub values: Rc<Vec<f64>>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct ShownRun {
     pub run_id: Uuid,
     pub version: i32,
@@ -19,6 +19,23 @@ pub struct ShownRun {
     pub signals: Rc<Vec<ShownSignal>>,
     /// The selected recorded sample (cursor B), initially the final sample.
     pub sample_index: usize,
+}
+
+// Data snapshots are immutable. Identity comparisons avoid scanning every
+// sample on context updates, and remain reflexive for recorded NaNs.
+impl PartialEq for ShownSignal {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.name == other.name && Rc::ptr_eq(&self.values, &other.values)
+    }
+}
+impl PartialEq for ShownRun {
+    fn eq(&self, other: &Self) -> bool {
+        self.run_id == other.run_id
+            && self.version == other.version
+            && self.sample_index == other.sample_index
+            && Rc::ptr_eq(&self.time, &other.time)
+            && Rc::ptr_eq(&self.signals, &other.signals)
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -30,6 +47,7 @@ pub struct ResultsContext {
     pub on_plot: Callback<String>,
 }
 
+#[allow(dead_code)]
 impl ShownRun {
     /// Resolve a displayed output to recorded scalar components. Numeric
     /// Simulink SIDs have an unambiguous lowering vocabulary: virtual scopes
@@ -92,6 +110,7 @@ impl ShownRun {
     }
 }
 
+#[allow(dead_code)]
 fn numeric_ids(system: &System) -> bool {
     system.blocks.iter().all(|b| {
         !b.id.0.is_empty()
@@ -99,6 +118,7 @@ fn numeric_ids(system: &System) -> bool {
             && b.subsystem.as_ref().is_none_or(|s| numeric_ids(s))
     })
 }
+#[allow(dead_code)]
 fn component_suffix(suffix: &str) -> bool {
     let Some(indices) = suffix.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
         return false;
@@ -114,6 +134,30 @@ fn component_suffix(suffix: &str) -> bool {
 mod tests {
     use super::*;
     use unlinked_model::PortRef;
+    #[test]
+    fn snapshots_compare_by_identity_even_with_nan_samples() {
+        let signal = ShownSignal {
+            id: "1".into(),
+            name: "y".into(),
+            values: Rc::new(vec![f64::NAN]),
+        };
+        assert!(signal == signal.clone());
+        let run = ShownRun {
+            run_id: Uuid::nil(),
+            version: 1,
+            time: Rc::new(vec![0.0]),
+            signals: Rc::new(vec![signal]),
+            sample_index: 0,
+        };
+        assert!(run == run.clone());
+        let mut changed = run.clone();
+        changed.version = 2;
+        assert!(run != changed);
+        let mut changed = run.clone();
+        changed.signals = Rc::new((*run.signals).clone());
+        assert!(run != changed);
+    }
+
     fn compiled_run(model: &Model) -> ShownRun {
         let graph = unlinked_sim::compile_with_inputs(
             model,
