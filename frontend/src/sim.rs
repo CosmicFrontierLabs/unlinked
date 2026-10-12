@@ -201,6 +201,7 @@ struct Controller {
     run_id: Option<Uuid>,
     run_version: Option<i32>,
     stopping: bool,
+    in_flight: bool,
     /// Aborts the live run's socket task, dropping its receiver at once.
     task: Option<AbortHandle>,
     last_refresh: f64,
@@ -228,6 +229,7 @@ impl Controller {
         self.run_id = None;
         self.run_version = None;
         self.stopping = false;
+        self.in_flight = false;
         self.requested_options = None;
         self.last_refresh = 0.0;
         self.generation
@@ -666,13 +668,28 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let plot_width = plot::use_plot_width(plot_host.clone());
     let reload = use_reload();
     let runs = use_fetch((props.file_id, reload.0), |(f, _)| api::simulation_runs(f));
-    let scripts = use_fetch(props.project_id, |p| async move {
-        let files = api::files(p).await?;
-        Ok(files
-            .into_iter()
-            .filter(|f| f.path.to_ascii_lowercase().ends_with(".m"))
-            .collect::<Vec<FileInfo>>())
-    });
+    let scripts_seen = use_state(|| props.active);
+    {
+        let seen = scripts_seen.clone();
+        use_effect_with(props.active, move |active| {
+            if *active {
+                seen.set(true);
+            }
+        });
+    }
+    let scripts = use_fetch(
+        (props.project_id, *scripts_seen),
+        |(p, needed)| async move {
+            if !needed {
+                return Ok(Vec::new());
+            }
+            let files = api::files(p).await?;
+            Ok(files
+                .into_iter()
+                .filter(|f| f.path.to_ascii_lowercase().ends_with(".m"))
+                .collect::<Vec<FileInfo>>())
+        },
+    );
     // Selected init script as (file, pinned version number).
     let init_script = use_state(|| None::<(Uuid, i32)>);
     let canvas_id = format!("sim-plot-{}", props.file_id);
@@ -751,7 +768,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         let init_script = init_script.clone();
         let progress = progress.clone();
         Callback::from(move |_: ()| {
-            if state.active() {
+            if state.active() || ctl.borrow().in_flight {
                 return;
             }
             let Ok((validated, _)) = options.validate() else {
@@ -792,6 +809,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 }
             };
             let generation = ctl.borrow_mut().reset();
+            ctl.borrow_mut().in_flight = true;
             ctl.borrow_mut().run_version = Some(version);
             ctl.borrow_mut().requested_options = Some(request.options.clone());
             rebind.dispatch(());
@@ -807,12 +825,15 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             let (abort, registration) = AbortHandle::new_pair();
             ctl.borrow_mut().task = Some(abort);
             let progress = progress.clone();
+            let cleanup = ctl.clone();
             let task = async move {
                 if let Err(e) = tx
                     .send(SimulationClientMsg::Simulate { file_id, request })
                     .await
                 {
-                    state.set(RunState::Error(format!("send failed: {e}")));
+                    if ctl.borrow().generation == generation {
+                        state.set(RunState::Error(format!("send failed: {e}")));
+                    }
                     return;
                 }
                 if ctl.borrow().generation != generation {
@@ -824,6 +845,10 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             };
             spawn_local(async move {
                 let _ = Abortable::new(task, registration).await;
+                let mut c = cleanup.borrow_mut();
+                if c.generation == generation {
+                    c.in_flight = false;
+                }
             });
         })
     };
@@ -832,7 +857,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         let (ctl, state, rebind, reload) =
             (ctl.clone(), state.clone(), rebind.clone(), reload.clone());
         Callback::from(move |_: ()| {
-            if !state.active() || matches!(&*state, RunState::Stopping) {
+            if !state.active() || matches!(&*state, RunState::Stopping) || ctl.borrow().stopping {
                 return;
             }
             let run_id = ctl.borrow().run_id;
