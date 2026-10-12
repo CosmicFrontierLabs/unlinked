@@ -3042,4 +3042,60 @@ mod tests {
         let inner = render(&model, &["Sub", &name], &opts).unwrap();
         assert!(inner.contains("Inner"));
     }
+
+    #[test]
+    fn connections_snap_within_reach_to_free_ports() {
+        let mut mdl = String::from("Model {\n Name m\n System {\n Name m\n");
+        for (id, x) in [("1", 0), ("2", 100), ("3", 200)] {
+            mdl += &format!(
+                " Block {{\n BlockType Gain\n Name b{id}\n SID {id}\n Ports [1, 1]\n Position [{x}, 0, {}, 30]\n }}\n",
+                x + 30
+            );
+        }
+        mdl += " }\n}\n";
+        let mut model = unlinked_import::import_mdl("m.mdl", &mdl).unwrap();
+        let ep = |id: &str, kind| Endpoint {
+            block: id.into(),
+            port: PortRef { kind, index: 1 },
+        };
+        let from = ep("1", PortKind::Out);
+        let to = ep("2", PortKind::In);
+        let anchor = geometry::port_anchor(&model.root.blocks[1], to.port);
+        let near = Point::new(anchor.x - 20.0, anchor.y);
+        // Within reach, and not beyond it.
+        assert_eq!(
+            snap_port(&model.root, &from, near, 24.0, None).unwrap().0,
+            to
+        );
+        assert!(snap_port(&model.root, &from, near, 10.0, None).is_none());
+        // Over a block, its nearest free port at any distance.
+        let over = Some(&BlockId::from("2"));
+        let body = Point::new(125.0, 15.0);
+        assert_eq!(
+            snap_port(&model.root, &from, body, 1.0, over).unwrap().0,
+            to
+        );
+        // A driven input is no target.
+        model.root.lines.push(unlinked_model::Line {
+            src: Some(from.clone()),
+            dst: Some(to),
+            ..Default::default()
+        });
+        assert!(snap_port(&model.root, &from, anchor, 24.0, over).is_none());
+        // Dragged from an input, the end snaps to outputs.
+        let output = geometry::port_anchor(
+            &model.root.blocks[1],
+            PortRef {
+                kind: PortKind::Out,
+                index: 1,
+            },
+        );
+        let reverse = ep("3", PortKind::In);
+        assert_eq!(
+            snap_port(&model.root, &reverse, output, 24.0, None)
+                .unwrap()
+                .0,
+            ep("2", PortKind::Out)
+        );
+    }
 }
