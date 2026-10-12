@@ -21,6 +21,8 @@ with sync_playwright() as p:
     page = browser.new_page(viewport={'width': 1440, 'height': 1000})
     errors, requests, cancelled = [], [], []
     sockets = []
+    script_lists = []
+    page.on('request', lambda request: script_lists.append(request.url) if request.url.endswith('/api/projects/' + args.model.split('/projects/')[1].split('/')[0] + '/files') else None)
     file_id = args.model.split('/files/')[1].split('/')[0]
     run_id = str(uuid.uuid4())
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -48,6 +50,8 @@ with sync_playwright() as p:
     page.goto(args.url + '/api/auth/dev-login')
     page.goto(args.url + args.model)
     page.evaluate("() => { window.closedSimulationSockets = 0; const close = WebSocket.prototype.close; WebSocket.prototype.close = function(...args) { window.closedSimulationSockets++; return close.apply(this, args); }; }")
+    expect(page.locator('.diagram')).to_be_visible()
+    assert not script_lists, 'Hidden simulation pane eagerly fetched script choices'
     page.get_by_role('button', name='Simulate', exact=True).click()
     sim = page.get_by_role('region', name='Simulation', exact=True)
     run = sim.get_by_role('button', name='▶ Run', exact=True)
@@ -70,10 +74,11 @@ with sync_playwright() as p:
     expect(sim.locator('.field-error')).to_contain_text('sample limit')
     step.fill(original_step)
     expect(run).to_be_enabled()
-    run.click()
+    run.evaluate("el => { el.click(); el.click(); }")
     expect(sim.get_by_role('status')).to_contain_text('Running')
     expect(sim.get_by_role('progressbar')).to_have_attribute('value', '10')
     expect(stop_time).to_be_disabled()
+    assert len(requests) == 1, 'Synchronous repeated Run submitted two jobs'
     assert requests[0]['options']['stop'] == 10
     assert not page.evaluate("window.dispatchEvent(new Event('beforeunload', {cancelable:true}))")
     page.get_by_role('button', name='Diagram', exact=True).click()
