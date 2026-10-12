@@ -600,6 +600,26 @@ fn auto_connect(sys: &System, from: &BlockId, to: &BlockId) -> Option<(Endpoint,
     Some((src, dst))
 }
 
+/// Where a context menu of `items` rows opened at client point (x, y) is
+/// drawn: below and right of the point, moved up and left to stay in the
+/// window, and scrolling only if the window is shorter than the menu.
+fn menu_place(x: i32, y: i32, items: usize) -> String {
+    const ROW: f64 = 29.0;
+    const WIDTH: f64 = 240.0;
+    const MARGIN: f64 = 8.0;
+    let window = web_sys::window();
+    let size = |v: Option<wasm_bindgen::JsValue>| v.and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
+    let width = size(window.as_ref().and_then(|w| w.inner_width().ok()));
+    let height = size(window.as_ref().and_then(|w| w.inner_height().ok()));
+    let tall = items as f64 * ROW + 2.0 * MARGIN;
+    let left = (x as f64).min(width - WIDTH - MARGIN).max(0.0);
+    let top = (y as f64).min(height - tall - MARGIN).max(MARGIN);
+    format!(
+        "left: {left}px; top: {top}px; max-height: {}px;",
+        (height - top - MARGIN).max(ROW)
+    )
+}
+
 /// A canvas preference kept in the browser between visits.
 fn pref(key: &str) -> Option<String> {
     gloo_utils::window()
@@ -2539,17 +2559,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 Selection::Blocks(ids) if ids.iter().all(|id| selection.blocks().contains(id)) => {}
                 other => selection.set(other),
             }
-            // Kept inside the window, at roughly the menu's largest size.
-            let window = web_sys::window();
-            let size = |v: Option<wasm_bindgen::JsValue>| {
-                v.and_then(|v| v.as_f64()).unwrap_or(f64::MAX) as i32
-            };
-            let width = size(window.as_ref().and_then(|w| w.inner_width().ok()));
-            let height = size(window.as_ref().and_then(|w| w.inner_height().ok()));
-            menu.set(Some((
-                e.client_x().min(width - 240).max(0),
-                e.client_y().min(height - 260).max(0),
-            )));
+            // Placed where it is drawn, once its items are known.
+            menu.set(Some((e.client_x(), e.client_y())));
         })
     };
     // Add a block, or an annotation selected so its text can be typed in
@@ -3319,7 +3330,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         let menu = menu.clone();
                         Callback::from(move |e: MouseEvent| { e.prevent_default(); menu.set(None) })
                     }}>
-                        <div class="context-menu" style={format!("left: {x}px; top: {y}px;")}>
+                        <div class="context-menu" style={menu_place(x, y, MENU.iter().filter(|&&a| enabled(a)).count())}>
                             { for MENU.iter().filter(|&&a| enabled(a)).map(|&a| action_button(a, true, &act, true)) }
                         </div>
                     </div>
