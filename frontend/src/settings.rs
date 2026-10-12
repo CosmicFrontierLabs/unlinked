@@ -2,6 +2,7 @@
 //! and what the simulator supports. Values are written back verbatim: an
 //! unrecognized solver or an expression is kept as it is, never replaced.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use unlinked_model::config::{solver_descriptor, validate_config, SolverKind, SOLVERS};
 use unlinked_model::edit::Edit;
 use unlinked_model::validation::{Diagnostic, DiagnosticTarget, Severity};
@@ -56,6 +57,8 @@ fn messages(diagnostics: &[&Diagnostic]) -> Html {
 
 #[function_component(ModelSettings)]
 pub fn model_settings(props: &SettingsProps) -> Html {
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+    let instance = use_state(|| NEXT_ID.fetch_add(1, Ordering::Relaxed));
     let config = &props.config;
     let report = validate_config(config);
     let about = |key: &str| -> Vec<&Diagnostic> {
@@ -116,10 +119,14 @@ pub fn model_settings(props: &SettingsProps) -> Html {
             )
         })
     };
+    let solver_issues = about("Solver");
+    let solver_invalid = solver_issues.iter().any(|d| d.severity == Severity::Error);
+    let solver_id = format!("settings-{}-solver", *instance);
+    let solver_issues_id = format!("{solver_id}-issues");
     let solver = html! {
-        <label class="setting">
-            <span>{ "Solver" }</span>
-            <select onchange={on_solver} disabled={readonly}>
+        <div class="setting">
+            <label for={solver_id.clone()}>{ "Solver" }</label>
+            <select id={solver_id} onchange={on_solver} disabled={readonly} aria-invalid={solver_invalid.then_some("true")} aria-describedby={solver_issues_id.clone()}>
                 if stored.is_none() {
                     <option value="" selected=true disabled=true>{ "Not set" }</option>
                 }
@@ -129,8 +136,8 @@ pub fn model_settings(props: &SettingsProps) -> Html {
                 { group(SolverKind::FixedStep, "Fixed step") }
                 { group(SolverKind::VariableStep, "Variable step") }
             </select>
-            { messages(&about("Solver")) }
-        </label>
+            <div id={solver_issues_id} aria-live="polite">{ messages(&solver_issues) }</div>
+        </div>
     };
 
     let fields = FIELDS
@@ -139,6 +146,10 @@ pub fn model_settings(props: &SettingsProps) -> Html {
             used_by.is_none() || kind.is_none() || *used_by == kind || config.raw.contains_key(*key)
         })
         .map(|&(key, label, used_by)| {
+            let issues = about(key);
+            let invalid = issues.iter().any(|d| d.severity == Severity::Error);
+            let id = format!("settings-{}-{key}", *instance);
+            let issues_id = format!("{id}-issues");
             let value = config.raw.get(key).cloned().unwrap_or_default();
             let unused = used_by.is_some() && kind.is_some() && used_by != kind;
             let onchange = {
@@ -148,12 +159,15 @@ pub fn model_settings(props: &SettingsProps) -> Html {
                 })
             };
             html! {
-                <label class="setting">
-                    <span>{ label }</span>
-                    <input class="mono" {value} placeholder="Not set" {onchange} disabled={readonly}
-                        title={unused.then_some("Not used by the selected solver")} />
-                    { messages(&about(key)) }
-                </label>
+                <div class={classes!("setting", unused.then_some("setting-inactive"))}>
+                    <label for={id.clone()}>{ label }</label>
+                    <input id={id} class="mono" {value} placeholder="Not set" {onchange} readonly={readonly}
+                        aria-invalid={invalid.then_some("true")} aria-describedby={issues_id.clone()} />
+                    <div id={issues_id} aria-live="polite">
+                        if unused { <small>{ "Stored, but not used by this solver." }</small> }
+                        { messages(&issues) }
+                    </div>
+                </div>
             }
         })
         .collect::<Html>();
@@ -170,12 +184,12 @@ pub fn model_settings(props: &SettingsProps) -> Html {
     let summary = if !report.is_valid() {
         "These settings are invalid as stored."
     } else if report.simulation_supported {
-        "The simulator supports these settings. This says nothing about the model's blocks."
+        "These stored solver settings are supported. Block compatibility is checked separately."
     } else {
         "The simulator cannot use these settings as stored; choose explicit run settings when simulating."
     };
     html! {
-        <div class="settings-panel">
+        <section class="settings-panel" aria-label="Stored model settings">
             <div class="settings-grid">
                 { solver }
                 { fields }
@@ -183,8 +197,8 @@ pub fn model_settings(props: &SettingsProps) -> Html {
             { messages(&others) }
             <p class="muted">
                 { summary }
-                if readonly { { " Read-only: start editing to change them." } }
+                if readonly { { " These stored settings are read-only." } }
             </p>
-        </div>
+        </section>
     }
 }
