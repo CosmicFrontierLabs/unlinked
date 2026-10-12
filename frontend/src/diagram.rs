@@ -1957,9 +1957,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 Action::Cut => {
                     let ids: Vec<BlockId> =
                         selection.blocks().iter().cloned().map(BlockId).collect();
-                    if let Err(e) =
-                        unlinked_model::clipboard::paste(&model, &system_ref, &ids, 0, &model)
-                    {
+                    if let Err(e) = unlinked_model::clipboard::paste(
+                        &model,
+                        &system_ref,
+                        &ids,
+                        0,
+                        &model,
+                        &system_ref,
+                    ) {
                         if let Some(on_error) = &on_error {
                             on_error.emit(format!("Cannot cut: {e}"));
                         }
@@ -1981,7 +1986,14 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 Action::Duplicate => {
                     let ids: Vec<BlockId> =
                         selection.blocks().iter().cloned().map(BlockId).collect();
-                    match unlinked_model::clipboard::paste(&model, &system_ref, &ids, 0, &model) {
+                    match unlinked_model::clipboard::paste(
+                        &model,
+                        &system_ref,
+                        &ids,
+                        0,
+                        &model,
+                        &system_ref,
+                    ) {
                         Ok(group) => {
                             let added = group
                                 .iter()
@@ -2036,18 +2048,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     let Some(clip) = clip.as_mut() else {
                         return;
                     };
-                    let pasted = if clip.system == system_ref {
-                        unlinked_model::clipboard::paste(
-                            &clip.model,
-                            &clip.system,
-                            &clip.ids,
-                            clip.pastes,
-                            &model,
-                        )
-                        .map_err(|e| e.to_string())
-                    } else {
-                        Err("blocks paste only into the system they were copied from".into())
-                    };
+                    // Into the shown system, whichever it was copied from.
+                    let pasted = unlinked_model::clipboard::paste(
+                        &clip.model,
+                        &clip.system,
+                        &clip.ids,
+                        clip.pastes,
+                        &model,
+                        &system_ref,
+                    )
+                    .map_err(|e| e.to_string());
                     match pasted {
                         Ok(group) => {
                             clip.pastes = clip.pastes.saturating_add(1);

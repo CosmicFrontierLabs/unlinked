@@ -13,26 +13,60 @@ use std::collections::HashSet;
 pub const PASTE_STEP: f64 = 20.0;
 
 /// The edits pasting blocks `ids` of system `system`, as they are in
-/// `source`, into the same system of `target` for the `nth` time (from 0).
+/// `source`, into system `into` of `target` for the `nth` time (from 0).
+/// Pasted into another system, the copies keep their positions; into the
+/// same one, they land a step further down and right each time.
 pub fn paste(
     source: &Model,
     system: &SystemRef,
     ids: &[BlockId],
     nth: u32,
     target: &Model,
+    into: &SystemRef,
 ) -> Result<Vec<Edit>, EditError> {
     let next = |m: &Model| next_sid(m).ok_or_else(|| EditError::Invalid("no SIDs left".into()));
     let first_sid = next(target)?.max(next(source)?);
-    let step = PASTE_STEP * (f64::from(nth) + 1.0);
+    let step = if into == system {
+        PASTE_STEP * (f64::from(nth) + 1.0)
+    } else {
+        PASTE_STEP * f64::from(nth)
+    };
     let mut edits = duplicate(source, system, ids, Point::new(step, step), first_sid)?;
-    let names = system_names(target, system).ok_or_else(|| EditError::NoSystem(system.clone()))?;
+    let names = system_names(target, into).ok_or_else(|| EditError::NoSystem(into.clone()))?;
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let sys = target
         .system_at(&refs)
-        .ok_or_else(|| EditError::NoSystem(system.clone()))?;
+        .ok_or_else(|| EditError::NoSystem(into.clone()))?;
     let mut taken: HashSet<String> = sys.blocks.iter().map(|b| b.name.clone()).collect();
+    // The name a copy was given for its own system, or, elsewhere, its
+    // original's: duplicate gives the copy of `ids[i]` SID `first_sid + i`.
+    let original = |id: &BlockId| -> Option<String> {
+        let i = usize::try_from(id.0.parse::<u64>().ok()?.checked_sub(first_sid)?).ok()?;
+        let names = system_names(source, system)?;
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        Some(source.system_at(&refs)?.block(ids.get(i)?)?.name.clone())
+    };
     for edit in &mut edits {
-        if let Edit::AddBlock { name, .. } = edit {
+        // A copy only adds blocks and the lines between them, so all of it
+        // moves to the other system as it is.
+        match edit {
+            Edit::AddBlock { system, .. }
+            | Edit::SetOrientation { system, .. }
+            | Edit::SetParameter { system, .. }
+            | Edit::SetSignalName { system, .. }
+            | Edit::Connect { system, .. } => *system = into.clone(),
+            _ => {
+                return Err(EditError::Invalid(
+                    "a copy holds only blocks and the lines between them".into(),
+                ))
+            }
+        }
+        if let Edit::AddBlock { id, name, .. } = edit {
+            if into != system {
+                if let Some(original) = original(id) {
+                    *name = original;
+                }
+            }
             if !taken.insert(name.clone()) {
                 // Taken since the copy: take the next free number.
                 *name = copy_name(name, |n| taken.insert(n.to_string()));
@@ -135,7 +169,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let edits = paste(&copied, &vec![], &ids, 0, &now).unwrap();
+        let edits = paste(&copied, &vec![], &ids, 0, &now, &vec![]).unwrap();
         apply_batch(&mut now, &edits).unwrap();
         let gain = now.root.blocks.iter().find(|b| b.name == "g1").unwrap();
         assert_eq!(gain.param("Gain"), Some("2"));
@@ -155,7 +189,7 @@ mod tests {
         let mut now = copied.clone();
         let mut seen = Vec::new();
         for nth in 0..3 {
-            let edits = paste(&copied, &vec![], &ids, nth, &now).unwrap();
+            let edits = paste(&copied, &vec![], &ids, nth, &now, &vec![]).unwrap();
             seen.extend(added(&edits));
             apply_batch(&mut now, &edits).unwrap();
         }
@@ -181,8 +215,53 @@ mod tests {
     }
 
     #[test]
+    fn pastes_into_another_system_where_the_blocks_were() {
+        let copied = model();
+        let mut now = copied.clone();
+        // A subsystem holding a third block, to paste the pair into.
+        apply_batch(
+            &mut now,
+            &[
+                Edit::AddBlock {
+                    system: vec![],
+                    id: "3".into(),
+                    block_type: "Gain".into(),
+                    name: "h".into(),
+                    position: Rect::new(0.0, 100.0, 30.0, 130.0),
+                },
+                Edit::CreateSubsystem {
+                    system: vec![],
+                    ids: vec!["3".into()],
+                    id: "4".into(),
+                    name: "Sub".into(),
+                },
+            ],
+        )
+        .unwrap();
+        let into: SystemRef = vec!["4".into()];
+        let edits = paste(&copied, &vec![], &["1".into(), "2".into()], 0, &now, &into).unwrap();
+        assert!(edits.iter().all(|e| e.system() == into.as_slice()));
+        apply_batch(&mut now, &edits).unwrap();
+        let sub = now.system_at(&["Sub"]).unwrap();
+        let gain = sub.blocks.iter().find(|b| b.name == "g").unwrap();
+        assert_eq!(gain.position.left, 60.0);
+        assert_eq!(gain.param("Gain"), Some("2"));
+        assert_eq!(sub.connections().len(), 1);
+        // The originals are untouched.
+        assert_eq!(now.root.blocks.iter().filter(|b| b.name == "g").count(), 1);
+    }
+
+    #[test]
     fn missing_systems_are_reported() {
         let copied = model();
-        assert!(paste(&copied, &vec!["9".into()], &["2".into()], 0, &copied).is_err());
+        assert!(paste(
+            &copied,
+            &vec!["9".into()],
+            &["2".into()],
+            0,
+            &copied,
+            &vec![]
+        )
+        .is_err());
     }
 }
