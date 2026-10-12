@@ -1184,6 +1184,25 @@ impl Reducible for View {
     }
 }
 
+/// Whether the view is easing into place after a jump. Each jump counts,
+/// so one made while another eases restarts the wait to clear it.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Glide {
+    on: bool,
+    jumps: u32,
+}
+
+impl Reducible for Glide {
+    type Action = bool;
+
+    fn reduce(self: Rc<Self>, on: bool) -> Rc<Self> {
+        Rc::new(Glide {
+            on,
+            jumps: self.jumps.wrapping_add(on as u32),
+        })
+    }
+}
+
 /// Width and height from the `viewBox` of a rendered SVG.
 fn svg_size(svg: &str) -> Option<(f64, f64)> {
     view_box(svg).map(|[_, _, w, h]| (w, h))
@@ -1400,11 +1419,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     *view_now.borrow_mut() = *view;
     // Set while a jump of the view (fit, zoom buttons, reveal) eases into
     // place; pointer gestures and level changes stay immediate.
-    let glide = use_state_eq(|| false);
+    let glide = use_reducer_eq(Glide::default);
     {
         let glide = glide.clone();
-        use_effect_with(*glide, move |on| {
-            let timeout = on.then(|| Timeout::new(GLIDE_MS, move || glide.set(false)));
+        use_effect_with(*glide, move |now| {
+            let timeout = now
+                .on
+                .then(|| Timeout::new(GLIDE_MS, move || glide.dispatch(false)));
             move || drop(timeout)
         });
     }
@@ -1505,7 +1526,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 view_now.clone(),
                 view.clone(),
             );
+            let glide = glide.clone();
             use_effect_with((fit_key.clone(), (*path).clone()), move |(key, path)| {
+                // Another level or version shows at once, not eased.
+                glide.dispatch(false);
                 let mut views = level_views.borrow_mut();
                 // Still the view of the level being left: the view changes
                 // only after this.
@@ -1594,7 +1618,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     move |e| {
                         let e = e.dyn_ref::<WheelEvent>().unwrap();
                         e.prevent_default();
-                        glide.set(false);
+                        glide.dispatch(false);
                         let rect = target.get_bounding_client_rect();
                         view.dispatch(ViewAction::Zoom {
                             factor: (-e.delta_y() * 0.0015).exp(),
@@ -1641,7 +1665,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         let Some(e) = e.dyn_ref::<TouchEvent>() else {
                             return;
                         };
-                        glide.set(false);
+                        glide.dispatch(false);
                         // Touches on controls and panels over the canvas
                         // (a result list being scrolled, say) are theirs.
                         let over_control = closest(
@@ -1825,7 +1849,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             if quick.is_some() {
                 quick.set(None);
             }
-            glide.set(false);
+            glide.dispatch(false);
             let (sx, sy) = (e.client_x() as f64, e.client_y() as f64);
             // The middle button always pans; while editing, the left button
             // on empty canvas draws a selection box instead.
@@ -3294,7 +3318,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         Callback::from(move |()| {
             if let (Some(el), Ok(svg)) = (container.cast::<HtmlElement>(), rendered.as_ref()) {
                 if let Some(size) = svg_size(svg) {
-                    glide.set(true);
+                    glide.dispatch(true);
                     view.dispatch(ViewAction::Set(fit(&el, size)));
                 }
             }
@@ -3331,7 +3355,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 return;
             }
             let (cx, cy) = ((r.left + r.right) / 2.0 - vx, (r.top + r.bottom) / 2.0 - vy);
-            glide.set(true);
+            glide.dispatch(true);
             view.dispatch(ViewAction::Set(View {
                 scale: v.scale,
                 x: cw / 2.0 - cx * v.scale,
@@ -3366,7 +3390,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let (view, container, glide) = (view.clone(), container.clone(), glide.clone());
         Callback::from(move |factor: f64| {
             if let Some(el) = container.cast::<HtmlElement>() {
-                glide.set(true);
+                glide.dispatch(true);
                 view.dispatch(ViewAction::Zoom {
                     factor,
                     cx: el.client_width() as f64 / 2.0,
@@ -3894,7 +3918,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         }
                     </aside>
                 }
-                <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"), glide.then_some("glide"))}
+                <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"), glide.on.then_some("glide"))}
                     ref={container.clone()} tabindex="0" style={grid}
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={{
                         let (hover, hover_line, end_drag) = (hover.clone(), hover_line.clone(), end_drag.clone());
