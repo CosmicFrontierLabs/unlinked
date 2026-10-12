@@ -114,6 +114,46 @@ fn describe(group: &[Edit]) -> String {
     }
 }
 
+/// Unsaved edits to a file, kept in the browser until they are saved or
+/// discarded, by the version they apply to.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Draft {
+    version_id: String,
+    pending: Vec<Vec<Edit>>,
+}
+
+fn draft_key(file_id: Uuid) -> String {
+    format!("unlinked.draft.{file_id}")
+}
+
+/// The draft kept for `file_id`, if any can be read.
+fn load_draft(file_id: Uuid) -> Option<Draft> {
+    let storage = gloo_utils::window().local_storage().ok()??;
+    let json = storage.get_item(&draft_key(file_id)).ok()??;
+    serde_json::from_str(&json).ok()
+}
+
+/// Keep `pending` as the draft of `file_id` at `version_id`, or forget the
+/// draft when there is nothing pending. Storage being full or unavailable
+/// only loses the draft.
+fn store_draft(file_id: Uuid, version_id: Uuid, pending: &[Vec<Edit>]) {
+    let Ok(Some(storage)) = gloo_utils::window().local_storage() else {
+        return;
+    };
+    let key = draft_key(file_id);
+    if pending.is_empty() {
+        let _ = storage.remove_item(&key);
+        return;
+    }
+    let draft = Draft {
+        version_id: version_id.to_string(),
+        pending: pending.to_vec(),
+    };
+    if let Ok(json) = serde_json::to_string(&draft) {
+        let _ = storage.set_item(&key, &json);
+    }
+}
+
 /// Replay `edits` onto `base`.
 fn replay(base: &Model, edits: &[Edit]) -> Result<Model, String> {
     let mut model = base.clone();
@@ -444,6 +484,63 @@ pub fn model_editor(props: &EditorProps) -> Html {
         let on_dirty_change = props.on_dirty_change.clone();
         use_effect_with(count > 0, move |dirty| on_dirty_change.emit(*dirty));
     }
+    // Unsaved edits are kept as a draft in the browser, so a reload or a
+    // crash does not lose them (as Simulink's autosave). A draft of the
+    // version opened is offered back; until the user chooses, it is kept.
+    let draft = {
+        let (file_id, version_id, editing) = (props.file_id, props.base.version_id, editing);
+        use_state(move || {
+            load_draft(file_id).filter(|d| {
+                editing && d.version_id == version_id.to_string() && !d.pending.is_empty()
+            })
+        })
+    };
+    {
+        // A view that cannot edit leaves any draft alone.
+        let file_id = props.file_id;
+        use_effect_with(
+            (
+                (*pending).clone(),
+                base.version_id,
+                draft.is_some(),
+                editing,
+            ),
+            move |(pending, version_id, offered, editing)| {
+                if *editing && !offered {
+                    store_draft(file_id, *version_id, pending);
+                }
+            },
+        );
+    }
+    let restore_draft = {
+        let (draft, pending, redo_stack, working, error, base) = (
+            draft.clone(),
+            pending.clone(),
+            redo_stack.clone(),
+            working.clone(),
+            error.clone(),
+            base.clone(),
+        );
+        Callback::from(move |_: MouseEvent| {
+            let Some(d) = (*draft).clone() else {
+                return;
+            };
+            match replay(&base.model, &d.pending.concat()) {
+                Ok(m) => {
+                    working.set(Rc::new(m));
+                    pending.set(d.pending);
+                    redo_stack.set(Vec::new());
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(format!("The kept edits no longer apply: {e}"))),
+            }
+            draft.set(None);
+        })
+    };
+    let discard_draft = {
+        let draft = draft.clone();
+        Callback::from(move |_: MouseEvent| draft.set(None))
+    };
     // A save asked for from the keyboard, made once the render after the
     // request has the edits it should include.
     let save_requested = use_state(|| false);
@@ -664,6 +761,19 @@ pub fn model_editor(props: &EditorProps) -> Html {
     let compile_running = matches!(current_compile, Compile::Running);
     html! {
         <>
+            if let Some(d) = &*draft {
+                <div class="edit-bar" role="status">
+                    <span>{ format!(
+                        "{} unsaved change{} to v{} from an earlier visit were kept in this browser.",
+                        d.pending.len(),
+                        if d.pending.len() == 1 { "" } else { "s" },
+                        base.version
+                    ) }</span>
+                    <span class="spacer" />
+                    <button onclick={restore_draft}>{ "Restore" }</button>
+                    <button onclick={discard_draft}>{ "Discard" }</button>
+                </div>
+            }
             if let Some(reason) = &*stale {
                 <div class="edit-bar error">
                     { reason }
