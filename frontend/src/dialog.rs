@@ -169,12 +169,31 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
             query.set(e.target_unchecked_into::<HtmlInputElement>().value())
         })
     };
+    let hidden_errors = props.problems.iter().filter(|d| {
+        d.severity == Severity::Error && matches!(&d.target, DiagnosticTarget::Block { parameter: Some(name), .. }
+            if sections.iter().flat_map(|s| &s.fields).any(|(p, visible)| p.name == name && *visible && !matches(p, *visible)))
+    }).count();
+    let clear_filter = {
+        let query = query.clone();
+        Callback::from(move |_: MouseEvent| query.set(String::new()))
+    };
+    let onkeydown = {
+        let help = help.clone();
+        Callback::from(move |e: KeyboardEvent| {
+            if e.key() == "Escape" && help.is_some() {
+                e.prevent_default();
+                e.stop_propagation();
+                help.set(None);
+            }
+        })
+    };
     html! {
-        <div class="parameter-dialog">
+        <div class="parameter-dialog" {onkeydown}>
             if visible_count > 6 || !query.is_empty() {
                 <input type="search" class="parameter-search" aria-label="Search parameters" placeholder="Find a parameter…" value={(*query).clone()} oninput={search} />
             }
-            if matched == 0 { <p class="muted" role="status">{ "No matching parameters." }</p> }
+            if hidden_errors > 0 { <p class="parameter-filter-warning" role="status">{format!("{hidden_errors} validation error(s) hidden by this filter. ")}<button onclick={clear_filter}>{"Show all parameters"}</button></p> }
+            if matched == 0 && !needle.is_empty() { <p class="muted" role="status">{ "No matching parameters." }</p> }
             { for sections.iter().filter(|s| s.fields.iter().any(|(p, visible)| matches(p, *visible))).map(|s| html! {
                 <fieldset key={s.name}>
                     <legend>{ s.name }</legend>

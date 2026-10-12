@@ -25,7 +25,7 @@ with sync_playwright() as p:
     step=page.get_by_label('Step time (s)',exact=True)
     ids=step.get_attribute('aria-describedby').split()
     assert all(page.locator('#'+x).count()==1 for x in ids)
-    help_button.press('Enter')
+    help_button.press('Escape')
     expect(help_button).to_have_attribute('aria-expanded','false')
     diagram.get_by_role('button',name='Settings',exact=True).click()
     settings=page.get_by_role('region',name='Stored model settings')
@@ -49,6 +49,8 @@ with sync_playwright() as p:
     search.fill('')
     expect(page.get_by_label('Initial condition',exact=True)).to_be_visible()
     page.screenshot(path='/tmp/unlinked-parameter-help.png')
+    diagram.get_by_role('listitem',name=re.compile(r'^Ground \(Ground\):')).dblclick()
+    expect(page.get_by_text('No matching parameters.',exact=True)).to_have_count(0)
     assert not errors,errors
     print('PASS: keyboard/touch help controls, description IDs, solver validation and recovery, parameter filtering')
     browser.close()
