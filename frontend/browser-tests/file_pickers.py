@@ -37,6 +37,11 @@ with sync_playwright() as p:
     expect(page.locator('.local-viewer')).to_have_class('page-fill local-viewer over')
     page.locator('.diagram').dispatch_event('drop',{'dataTransfer':data})
     expect(page.locator('.crumbs')).to_contain_text('dropped_model')
+    # An accidental non-model file must leave the current diagram intact.
+    data=page.evaluate_handle("()=>{const d=new DataTransfer();d.items.add(new File(['image'],'photo.png',{type:'image/png'}));return d;}")
+    page.locator('.diagram').dispatch_event('drop',{'dataTransfer':data})
+    expect(page.get_by_role('alert')).to_contain_text('choose a .slx or .mdl model file')
+    expect(page.locator('.crumbs')).to_contain_text('dropped_model')
     # A palette-style payload is not a file replacement.
     data=page.evaluate_handle("()=>{const d=new DataTransfer();d.setData('application/x-unlinked-block','Gain');return d;}")
     page.locator('.diagram').dispatch_event('dragover',{'dataTransfer':data})

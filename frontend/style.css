@@ -1731,3 +1731,4 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .file-picker:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; }
 .local-viewer.over { outline: 2px dashed var(--blue); outline-offset: -3px; }
 .local-viewer.over .dropzone { border-color: var(--blue); background: var(--panel); }
+.local-file-error:not(:empty) { padding: .5rem 1rem; }
