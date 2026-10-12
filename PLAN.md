@@ -117,8 +117,9 @@ CI. Per-model import, render and simulation coverage is tracked in
     model. Dragged connections snap to ports within reach (Ctrl-drag a line
     to branch it), and one dropped on empty canvas offers the quick insert
     for a block to end at; lines follow dragged blocks as they will be
-    routed, and smart guides line blocks and ports up. Block names and plain
-    annotations are edited where they show; hovering a block shows what it
+    routed, and smart guides line blocks and ports up (Shift keeps a drag
+    straight). Block names, signal names and plain annotations are edited
+    where they show; hovering a block shows what it
     is, and a hovered line lights up with its branches. With a run shown, lines are
     labelled with its recorded values and a line's inspector shows the
     signal; the diagram can run and stop the simulation (Ctrl+Enter).
