@@ -428,7 +428,7 @@ impl Action {
             Action::Cut => ("Cut", "Ctrl+X"),
             Action::Copy => ("Copy", "Ctrl+C"),
             Action::Paste => ("Paste", "Ctrl+V"),
-            Action::Duplicate => ("Duplicate", "Ctrl+D"),
+            Action::Duplicate => ("Duplicate", ""),
             Action::Rename => ("Rename", "F2"),
             Action::Rotate => ("Rotate", "Ctrl+R"),
             Action::Flip => ("Flip", "Ctrl+I"),
@@ -2669,7 +2669,6 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "x" if command => Action::Cut,
                 "c" if command => Action::Copy,
                 "v" if command => Action::Paste,
-                "d" if command => Action::Duplicate,
                 "f2" => Action::Rename,
                 "r" if command => Action::Rotate,
                 "i" if command => Action::Flip,
@@ -3326,6 +3325,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let onkeydown = {
         let (fit_view, zoom_by, help) = (fit_view.clone(), zoom_by.clone(), help.clone());
         let (finding, reveal) = (finding.clone(), reveal.clone());
+        let (on_compile, on_settings, show_problems) = (
+            props.on_compile.clone(),
+            props.on_settings.clone(),
+            show_problems.clone(),
+        );
         let scale = view.scale;
         let (selection, path, menu) = (selection.clone(), path.clone(), menu.clone());
         let order: Vec<String> = system
@@ -3349,6 +3353,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
                 "?" => help.set(!*help),
                 "f" if command => finding.set(true),
+                // As Simulink's Update Diagram: check it compiles, and show
+                // what the check finds.
+                "d" if command => {
+                    if let Some(compile) = &on_compile {
+                        compile.emit(());
+                    }
+                    show_problems.set(true);
+                }
+                "e" if command => {
+                    if let Some(settings) = &on_settings {
+                        settings.emit(());
+                    }
+                }
                 // With a block selected, Tab steps through the blocks and
                 // Shift+Tab back; otherwise Tab moves focus as usual, so the
                 // canvas never traps it.
@@ -3808,7 +3825,8 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Drag a line segment", "Reroute it"),
         ("Ctrl+drag a block", "Copy it there"),
         ("Ctrl+X / Ctrl+C / Ctrl+V", "Cut / copy / paste"),
-        ("Ctrl+D", "Duplicate"),
+        ("Ctrl+D", "Update the diagram: check that it compiles"),
+        ("Ctrl+E", "Model settings"),
         ("F2", "Rename the selected block"),
         ("Delete", "Delete the selection"),
         ("Arrows", "Nudge by a grid step (Shift: one unit)"),
