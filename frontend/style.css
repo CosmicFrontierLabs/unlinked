@@ -1802,3 +1802,10 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 
 /* Plot image export keeps actions usable on narrow screens. */
 .plot-actions { flex-wrap: wrap; }
+/* Administrative tables scroll within the page on narrow screens. */
+.admin-table-scroll { max-width: 100%; overflow-x: auto; }
+.admin-table-scroll:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.admin-table-scroll td:first-child { overflow-wrap: anywhere; }
+
+/* User-chosen project and organization names can be long identifiers. */
+.page h1, .page .card { overflow-wrap: anywhere; }
