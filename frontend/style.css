@@ -691,6 +691,21 @@ kbd {
     left: 0;
 }
 
+.diagram.glide {
+    transition: background-size 180ms ease-out, background-position 180ms ease-out;
+}
+
+.diagram.glide .canvas {
+    transition: transform 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .diagram.glide,
+    .diagram.glide .canvas {
+        transition: none;
+    }
+}
+
 .diagram .canvas svg {
     display: block;
 }
