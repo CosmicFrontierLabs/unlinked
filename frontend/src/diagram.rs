@@ -8,7 +8,9 @@
 use crate::dialog::ParameterDialog;
 use crate::find::{FindBlocks, Found};
 use crate::icons;
-use crate::palette::{BlockPalette, Pick, QuickInsert, PALETTE_DRAG};
+use crate::palette::{
+    recent_blocks, remember_block, BlockPalette, Pick, QuickInsert, PALETTE_DRAG,
+};
 use crate::results::{ResultsContext, ShownRun};
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
@@ -741,7 +743,7 @@ fn narrow() -> bool {
 }
 
 /// A canvas preference kept in the browser between visits.
-fn pref(key: &str) -> Option<String> {
+pub(crate) fn pref(key: &str) -> Option<String> {
     gloo_utils::window()
         .local_storage()
         .ok()??
@@ -749,7 +751,7 @@ fn pref(key: &str) -> Option<String> {
         .ok()?
 }
 
-fn set_pref(key: &str, value: &str) {
+pub(crate) fn set_pref(key: &str, value: &str) {
     if let Ok(Some(storage)) = gloo_utils::window().local_storage() {
         let _ = storage.set_item(&format!("unlinked.canvas.{key}"), value);
     }
@@ -1352,6 +1354,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // The open quick insert: where it shows in the container, in pixels,
     // and the diagram point it adds at.
     let quick = use_state(|| None::<(f64, f64, Point)>);
+    // Blocks added lately, offered first by the library and quick insert.
+    let recent = use_state(|| Rc::new(recent_blocks()));
     // A block being renamed in place: where its name shows in the
     // container (left, top, width, in pixels) and its name before.
     let renaming = use_state(|| None::<(BlockId, (f64, f64, f64), String)>);
@@ -2829,6 +2833,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_created.clone(),
         );
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
+        let recent = recent.clone();
         Callback::from(move |e: DragEvent| {
             let Some(on_edit) = &on_edit else {
                 return;
@@ -2850,6 +2855,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     *select_created.borrow_mut() = Some(id.clone());
                 }
                 on_edit.emit(edit);
+                if let Some(d) = catalog::find(&type_key) {
+                    recent.set(Rc::new(remember_block(d.type_key)));
+                }
             }
         })
     };
@@ -2882,7 +2890,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             select_created.clone(),
             props.model.clone(),
         );
-        let (on_edit, system_ref) = (on_edit.clone(), system_ref.clone());
+        let (on_edit, system_ref, recent) = (on_edit.clone(), system_ref.clone(), recent.clone());
         let annotation_count = system.map_or(0, |s| s.annotations.len());
         Callback::from(move |(pick, at): (Pick, Point)| {
             let Some(on_edit) = &on_edit else {
@@ -2895,6 +2903,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             *select_created.borrow_mut() = Some(id.clone());
                         }
                         on_edit.emit(edit);
+                        recent.set(Rc::new(remember_block(type_key)));
                     }
                 }
                 Pick::Annotation => {
@@ -3671,7 +3680,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             move |p: Vec<String>| path.set(p)
                         })} />
                         if props.on_edit.is_some() {
-                            <BlockPalette on_add={{
+                            <BlockPalette recent={(*recent).clone()} on_add={{
                                 let (add_at, container, rendered, view) =
                                     (add_at.clone(), container.clone(), rendered.clone(), view.clone());
                                 // In the middle of what is shown.
@@ -3816,7 +3825,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             }} />
                     }
                     if let Some((x, y, at)) = *quick {
-                        <QuickInsert {x} {y}
+                        <QuickInsert {x} {y} recent={(*recent).clone()}
                             on_pick={{
                                 let (add_at, quick, container) = (add_at.clone(), quick.clone(), container.clone());
                                 Callback::from(move |pick: Pick| {
