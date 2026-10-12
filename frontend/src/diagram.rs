@@ -9,6 +9,7 @@ use crate::dialog::ParameterDialog;
 use crate::find::{FindBlocks, Found};
 use crate::icons;
 use crate::palette::{BlockPalette, Pick, QuickInsert, PALETTE_DRAG};
+use crate::results::{ResultsContext, ShownRun};
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
@@ -977,6 +978,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let hover_line = use_state(|| None::<usize>);
     // Whether the model browser and library are shown beside the canvas.
     let side = use_state(|| true);
+    // The run shown in the simulation pane, if any, and whether its values
+    // label the diagram's lines.
+    let results = use_context::<ResultsContext>();
+    let show_values = use_state(|| true);
     // The outline of a block being resized.
     let resize_preview = use_state(|| None::<Rect>);
     // A wire being rerouted, as it would be drawn.
@@ -1136,6 +1141,39 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let system = props.model.system_at(&refs);
     // Edits address the shown system by block IDs, which survive renames.
     let system_ref: SystemRef = system_ids(&props.model, &path).unwrap_or_default();
+    // Recorded values at the shown run's chosen sample, by source port, and
+    // whether the diagram changed since that run.
+    let run = results.as_ref().and_then(|r| r.run.clone());
+    let stale = results
+        .as_ref()
+        .zip(run.as_ref())
+        .is_some_and(|(r, run)| r.dirty || run.version != r.shown_version);
+    // Which signals label which lines, found again only for another model,
+    // level or set of recorded signals: moving the shown sample keeps them.
+    let sources = {
+        let (model, run) = (props.model.clone(), run.clone());
+        use_memo(
+            (
+                Rc::as_ptr(&props.model) as usize,
+                (*path).clone(),
+                run.as_ref().map(|r| Rc::as_ptr(&r.signals) as usize),
+            ),
+            move |(_, path, _)| {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                match (model.system_at(&refs), run) {
+                    (Some(sys), Some(run)) => port_sources(&model, path, sys, &run),
+                    _ => Vec::new(),
+                }
+            },
+        )
+    };
+    let values: Vec<(Point, String)> = match &run {
+        Some(run) => sources
+            .iter()
+            .filter_map(|(p, indices)| Some((*p, value_label(run, indices)?)))
+            .collect(),
+        None => Vec::new(),
+    };
 
     let onmousedown = {
         let (drag, view, on_edit) = (drag.clone(), view.clone(), on_edit.clone());
@@ -2715,6 +2753,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 let points: Vec<String> = pts.iter().map(|p| format!("{},{}", p.x, p.y)).collect();
                 html! { <polyline class="route-preview" points={points.join(" ")} /> }
             });
+            // Port value labels, a constant size on screen.
+            let labels = (*show_values && !values.is_empty()).then(|| {
+                let size = 10.0 / view.scale;
+                html! {
+                    <g class={classes!("port-values", stale.then_some("stale"))} font-size={size.to_string()}>
+                        { for values.iter().map(|(p, text)| html! {
+                            <text x={p.x.to_string()} y={p.y.to_string()}>{ text }</text>
+                        }) }
+                    </g>
+                }
+            });
             // Guides overhang what they line up a little.
             let overhang = 12.0 / view.scale;
             let lined_up = guides.iter().map(|g| {
@@ -2744,6 +2793,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         { for selecting }
                         { for rerouting }
                         { for lined_up }
+                        { for labels }
                     </svg>
                 </>
             }
@@ -2863,6 +2913,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     title={if *theme == Theme::Dark { "Light canvas" } else { "Dark canvas" }}>
                     { if *theme == Theme::Dark { icons::sun() } else { icons::moon() } }
                 </button>
+                if let Some(run) = &run {
+                    <button class={classes!("tool", (*show_values).then_some("active"), stale.then_some("stale"))}
+                        aria-pressed={show_values.to_string()}
+                        title={format!("Label lines with their values from the v{} run{}", run.version,
+                            if stale { " (the diagram has changed since)" } else { "" })}
+                        onclick={{
+                            let show_values = show_values.clone();
+                            Callback::from(move |_: MouseEvent| show_values.set(!*show_values))
+                        }}>
+                        { icons::probe() }<span>{ "Values" }</span>
+                    </button>
+                }
                 <button class={classes!("tool", "icon", (*finding).then_some("active"))}
                     title="Find blocks (Ctrl+F)" onclick={{
                         let finding = finding.clone();
@@ -3003,7 +3065,16 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if let Some(line) = selected_line {
                     <LineInspector line={Rc::new(line.clone())} system={system_ref.clone()}
                         blocks={Rc::new(system.map(|s| s.blocks.clone()).unwrap_or_default())}
-                        on_edit={on_edit.clone()} />
+                        on_edit={on_edit.clone()}
+                        recorded={results.as_ref().zip(run.clone()).zip(line.src.as_ref()).and_then(|((r, run), src)| {
+                            let indices = run.signal_indices(&props.model, &path, src);
+                            (!indices.is_empty()).then(|| Rc::new(Recorded {
+                                run,
+                                indices,
+                                stale,
+                                on_plot: r.on_plot.clone(),
+                            }))
+                        })} />
                 }
                 if let Some((index, annotation)) = selected_annotation {
                     // Deleting it frees its index for the next annotation, so
@@ -3048,6 +3119,64 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             { for problem_list }
         </div>
     }
+}
+
+/// A recorded value as port value labels show it: four significant digits,
+/// exponent form outside [1e-3, 1e5).
+fn short_value(v: f64) -> String {
+    if !v.is_finite() {
+        return format!("{v}");
+    }
+    let a = v.abs();
+    if a != 0.0 && !(1e-3..1e5).contains(&a) {
+        return format!("{v:.3e}");
+    }
+    let s = format!("{v:.4}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0" } else { s }.to_string()
+}
+
+/// The values of recorded signals `indices` at the run's chosen sample, as
+/// one label: a scalar, or the first few components of a vector.
+fn value_label(run: &ShownRun, indices: &[usize]) -> Option<String> {
+    let at = |i: usize| {
+        run.signals
+            .get(i)?
+            .values
+            .get(run.sample_index)
+            .copied()
+            .map(short_value)
+    };
+    match indices {
+        [] => None,
+        [i] => at(*i),
+        _ => {
+            let shown: Vec<String> = indices.iter().take(3).filter_map(|&i| at(i)).collect();
+            let more = if indices.len() > 3 { ", …" } else { "" };
+            Some(format!("[{}{more}]", shown.join(", ")))
+        }
+    }
+}
+
+/// Where the shown system's lines get port value labels, and the recorded
+/// signals each shows: by its source port. This depends on the run's
+/// signals, not on which sample is shown.
+fn port_sources(
+    model: &Model,
+    path: &[String],
+    sys: &System,
+    run: &ShownRun,
+) -> Vec<(Point, Vec<usize>)> {
+    sys.lines
+        .iter()
+        .filter_map(|line| {
+            let src = line.src.as_ref()?;
+            let block = sys.block(&src.block)?;
+            let indices = run.signal_indices(model, path, src);
+            let p = geometry::port_anchor(block, src.port);
+            (!indices.is_empty()).then(|| (Point::new(p.x + 3.0, p.y - 4.0), indices))
+        })
+        .collect()
 }
 
 #[derive(Properties, PartialEq)]
@@ -3345,6 +3474,137 @@ struct LineInspectorProps {
     /// Blocks of that system, to name the line's ends.
     blocks: Rc<Vec<Block>>,
     on_edit: Option<Callback<Edit>>,
+    /// What the shown run recorded for the line's signal.
+    #[prop_or_default]
+    recorded: Option<Rc<Recorded>>,
+}
+
+/// A line's signal as the shown run recorded it.
+struct Recorded {
+    run: Rc<ShownRun>,
+    /// The run's signals carrying the line's value, one per component.
+    indices: Vec<usize>,
+    /// The diagram changed since the run.
+    stale: bool,
+    /// Plots a recorded signal by ID in the simulation pane.
+    on_plot: Callback<String>,
+}
+
+/// By the run's identity rather than its samples, which are immutable and
+/// may be many (and NaN, never equal to itself).
+impl PartialEq for Recorded {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.run, &other.run)
+            && self.indices == other.indices
+            && self.stale == other.stale
+            && self.on_plot == other.on_plot
+    }
+}
+
+/// A sparkline of components `indices` of `run`, with the chosen sample
+/// marked.
+fn sparkline(run: &ShownRun, indices: &[usize]) -> Html {
+    const W: f64 = 220.0;
+    const H: f64 = 44.0;
+    // Points drawn at most per component.
+    const MAX_POINTS: usize = 300;
+    let time = &run.time;
+    let (Some(&t0), Some(&t1)) = (time.first(), time.last()) else {
+        return html! {};
+    };
+    let series: Vec<&Vec<f64>> = indices
+        .iter()
+        .take(3)
+        .filter_map(|&i| Some(&*run.signals.get(i)?.values))
+        .collect();
+    let finite = series
+        .iter()
+        .flat_map(|s| s.iter())
+        .filter(|v| v.is_finite());
+    let (lo, hi) = finite.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+        (lo.min(v), hi.max(v))
+    });
+    if !lo.is_finite() {
+        return html! {};
+    }
+    // In units of the largest magnitude, so the span stays finite near
+    // ±f64::MAX and nonzero for the tiniest values.
+    let scale = match lo.abs().max(hi.abs()) {
+        m if m > 0.0 => m,
+        _ => 1.0,
+    };
+    let (low, high) = (lo / scale, hi / scale);
+    let span = if high > low { high - low } else { 1.0 };
+    let x = |t: f64| {
+        if t1 > t0 {
+            (t - t0) / (t1 - t0) * W
+        } else {
+            0.0
+        }
+    };
+    let y = |v: f64| H - 2.0 - (v / scale - low) / span * (H - 4.0);
+    let colors = ["#7aa2f7", "#9ece6a", "#e0af68"];
+    let lines = series.iter().zip(colors).flat_map(|(s, color)| {
+        sparkline_runs(time, s, MAX_POINTS)
+            .into_iter()
+            .map(move |run| {
+                let points: Vec<String> = run
+                    .iter()
+                    .map(|&(t, v)| format!("{:.1},{:.1}", x(t), y(v)))
+                    .collect();
+                html! { <polyline points={points.join(" ")} stroke={color} fill="none" stroke-width="1.25" /> }
+            })
+            .collect::<Vec<_>>()
+    });
+    let marker = time.get(run.sample_index).map(|&t| {
+        html! { <line class="sample-mark" x1={x(t).to_string()} x2={x(t).to_string()} y1="0" y2={H.to_string()} /> }
+    });
+    let label = format!(
+        "Recorded from t = {} to {} s, between {} and {}",
+        short_value(t0),
+        short_value(t1),
+        short_value(lo),
+        short_value(hi)
+    );
+    html! {
+        <svg class="sparkline" viewBox={format!("0 0 {W} {H}")} width={W.to_string()} height={H.to_string()}
+            role="img" aria-label={label}>
+            { for lines }
+            { for marker }
+        </svg>
+    }
+}
+
+/// The samples of `values` over `time` a sparkline draws: at most about
+/// `max` of them, evenly picked and always including the last, split into
+/// runs at missing or non-finite values so gaps are not drawn across.
+fn sparkline_runs(time: &[f64], values: &[f64], max: usize) -> Vec<Vec<(f64, f64)>> {
+    let n = time.len().min(values.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    let step = n.div_ceil(max.max(1)).max(1);
+    let mut runs = vec![Vec::new()];
+    // A gap anywhere since the last drawn sample, picked or not, breaks
+    // the line there.
+    let mut gap = false;
+    for i in 0..n {
+        let (t, v) = (time[i], values[i]);
+        if !(t.is_finite() && v.is_finite()) {
+            gap = true;
+            continue;
+        }
+        if i % step != 0 && i != n - 1 {
+            continue;
+        }
+        if gap && !runs.last().unwrap().is_empty() {
+            runs.push(Vec::new());
+        }
+        gap = false;
+        runs.last_mut().unwrap().push((t, v));
+    }
+    runs.retain(|r| !r.is_empty());
+    runs
 }
 
 /// The selected line: where it runs, and its signal name (editable).
@@ -3403,6 +3663,31 @@ fn line_inspector(props: &LineInspectorProps) -> Html {
                 <tr><th>{ "From" }</th><td>{ line.src.as_ref().map(describe).unwrap_or_else(|| "(none)".into()) }</td></tr>
                 { for ends.iter().map(|ep| html! { <tr><th>{ "To" }</th><td>{ describe(ep) }</td></tr> }) }
             </table>
+            if let Some(r) = &props.recorded {
+                <section class="recorded">
+                    <h4>{ format!("Recorded in the v{} run", r.run.version) }</h4>
+                    if r.stale {
+                        <p class="muted">{ "The diagram has changed since this run." }</p>
+                    }
+                    { sparkline(&r.run, &r.indices) }
+                    <table>
+                        { for r.indices.iter().filter_map(|&i| {
+                            let s = r.run.signals.get(i)?;
+                            let t = r.run.time.get(r.run.sample_index).copied().unwrap_or_default();
+                            let v = s.values.get(r.run.sample_index).copied();
+                            let id = s.id.clone();
+                            let on_plot = r.on_plot.reform(move |_: MouseEvent| id.clone());
+                            Some(html! {
+                                <tr>
+                                    <td class="mono">{ v.map(short_value).unwrap_or_default() }</td>
+                                    <td class="muted">{ format!("at t = {}", short_value(t)) }</td>
+                                    <td><button class="tool" onclick={on_plot} title={format!("Plot {} in the simulation pane", s.name)}>{ "Plot" }</button></td>
+                                </tr>
+                            })
+                        }) }
+                    </table>
+                </section>
+            }
         </aside>
     }
 }
@@ -3746,6 +4031,63 @@ mod tests {
         assert_eq!(name, long);
         let inner = render(&model, &["Sub", &name], &opts).unwrap();
         assert!(inner.contains("Inner"));
+    }
+
+    #[test]
+    fn sparklines_keep_the_last_sample_and_break_at_gaps() {
+        let time: Vec<f64> = (0..1001).map(f64::from).collect();
+        let values: Vec<f64> = time.clone();
+        let runs = sparkline_runs(&time, &values, 300);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].len() <= 301, "{}", runs[0].len());
+        assert_eq!(runs[0].last(), Some(&(1000.0, 1000.0)));
+        let gappy = [1.0, f64::NAN, 3.0, 4.0];
+        let runs = sparkline_runs(&[0.0, 1.0, 2.0, 3.0], &gappy, 300);
+        assert_eq!(runs, vec![vec![(0.0, 1.0)], vec![(2.0, 3.0), (3.0, 4.0)]]);
+        // A gap between drawn samples breaks the line too.
+        let time: Vec<f64> = (0..600).map(f64::from).collect();
+        let mut ones = vec![1.0; 600];
+        ones[1] = f64::NAN;
+        let runs = sparkline_runs(&time, &ones, 300);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0], vec![(0.0, 1.0)]);
+        assert!(sparkline_runs(&[], &[], 300).is_empty());
+    }
+
+    #[test]
+    fn values_are_labelled_briefly() {
+        assert_eq!(short_value(2.0), "2");
+        assert_eq!(short_value(-0.5), "-0.5");
+        assert_eq!(short_value(1.0 / 3.0), "0.3333");
+        assert_eq!(short_value(-0.00001), "-1.000e-5");
+        assert_eq!(short_value(123456.0), "1.235e5");
+        assert_eq!(short_value(-0.0), "0");
+        assert_eq!(short_value(f64::NAN), "NaN");
+    }
+
+    #[test]
+    fn lines_are_labelled_with_recorded_values() {
+        use crate::results::ShownSignal;
+        let mdl = "Model {\n Name m\n System {\n Name m\n Block {\n BlockType Constant\n Name c\n SID 1\n Ports [0,1]\n Value [1 2]\n Position [0, 0, 30, 30]\n }\n Block {\n BlockType Demux\n Name d\n SID 2\n Ports [1,2]\n Outputs 2\n Position [100, 0, 105, 30]\n }\n Line {\n SrcBlock c\n SrcPort 1\n DstBlock d\n DstPort 1\n }\n }\n}";
+        let model = unlinked_import::import_mdl("m.mdl", mdl).unwrap();
+        let signal = |id: &str, v: f64| ShownSignal {
+            id: id.into(),
+            name: id.into(),
+            values: Rc::new(vec![0.0, v]),
+        };
+        let run = ShownRun {
+            run_id: uuid::Uuid::nil(),
+            version: 1,
+            time: Rc::new(vec![0.0, 1.0]),
+            signals: Rc::new(vec![signal("1[1]", 1.0), signal("1[2]", 2.5)]),
+            sample_index: 1,
+        };
+        let sources = port_sources(&model, &[], &model.root, &run);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            value_label(&run, &sources[0].1).as_deref(),
+            Some("[1, 2.5]")
+        );
     }
 
     #[test]
