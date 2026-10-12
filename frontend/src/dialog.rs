@@ -2,6 +2,7 @@
 //! sections, with typed controls, showing only the fields the block's
 //! current settings use. Hidden fields keep their stored values.
 
+use crate::select::Select;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use unlinked_model::catalog::{self, ParameterDescriptor, ParameterKind};
@@ -81,7 +82,7 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
                 set(e.target_unchecked_into::<HtmlSelectElement>().value())
             });
             html! {
-                <select id={id.clone()} aria-invalid={invalid.then_some("true")} aria-describedby={described_by.clone()} {onchange} disabled={readonly}>
+                <Select value={current.clone()} id={id.clone()} aria_invalid={invalid.then_some("true")} aria_describedby={described_by.clone()} {onchange} disabled={readonly}>
                     if !known {
                         <option value={current.clone()} selected=true>
                             { format!("{} (kept as is)", if current.is_empty() { "Not set" } else { &current }) }
@@ -90,7 +91,7 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
                     { for values.iter().map(|v| html! {
                         <option value={v.to_string()} selected={*v == current}>{ p.label_for(v) }</option>
                     }) }
-                </select>
+                </Select>
             }
         };
         let control = match p.kind {

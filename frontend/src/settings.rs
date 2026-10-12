@@ -2,6 +2,7 @@
 //! and what the simulator supports. Values are written back verbatim: an
 //! unrecognized solver or an expression is kept as it is, never replaced.
 
+use crate::select::Select;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use unlinked_model::config::{solver_descriptor, validate_config, SolverKind, SOLVERS};
 use unlinked_model::edit::Edit;
@@ -126,7 +127,7 @@ pub fn model_settings(props: &SettingsProps) -> Html {
     let solver = html! {
         <div class="setting">
             <label for={solver_id.clone()}>{ "Solver" }</label>
-            <select id={solver_id} onchange={on_solver} disabled={readonly} aria-invalid={solver_invalid.then_some("true")} aria-describedby={solver_issues_id.clone()}>
+            <Select value={descriptor.map(|d| d.value).or(stored).unwrap_or_default().to_string()} id={solver_id} onchange={on_solver} disabled={readonly} aria_invalid={solver_invalid.then_some("true")} aria_describedby={solver_issues_id.clone()}>
                 if stored.is_none() {
                     <option value="" selected=true disabled=true>{ "Not set" }</option>
                 }
@@ -135,7 +136,7 @@ pub fn model_settings(props: &SettingsProps) -> Html {
                 }
                 { group(SolverKind::FixedStep, "Fixed step") }
                 { group(SolverKind::VariableStep, "Variable step") }
-            </select>
+            </Select>
             <div id={solver_issues_id} aria-live="polite">{ messages(&solver_issues) }</div>
         </div>
     };

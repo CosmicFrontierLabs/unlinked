@@ -13,6 +13,7 @@ mod pages;
 mod palette;
 mod plot;
 mod results;
+mod select;
 mod settings;
 mod sim;
 mod transpiler;
