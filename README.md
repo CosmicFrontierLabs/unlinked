@@ -7,6 +7,7 @@ The application follows [single-binary-rust-website](https://github.com/meawoppl
 ## Current capabilities
 
 - Import ZIP/XML `.slx` and legacy textual `.mdl` models, retaining unknown blocks and parameters. Render root diagrams and nested subsystems as SVG; inspect blocks in the browser.
+- Edit models in the browser with Simulink's gestures: quick insert, ports that snap, lines that follow and branch, smart guides, in-place renaming, alignment and find. Saves are new file versions that keep everything the editor does not model. Run a simulation from the diagram and see its recorded values on the lines.
 - Organization and project permissions, Google/GitHub OAuth, immutable file versions, and audit events. Viewers can read models and run simulations; editors can change files.
 - Simulation jobs pinned to an immutable file version, with authenticated HTTP results and a typed WebSocket stream. Euler, RK4, and adaptive Dormand–Prince RK45 solvers are available.
 - A retained Diagram/Simulate workspace with guarded navigation, searchable signals, sample cursors and interval measurements, reference-run overlays, CSV export, and recorded run settings that can be explicitly reused. Project folders have shareable URLs, filtering, and pagination.

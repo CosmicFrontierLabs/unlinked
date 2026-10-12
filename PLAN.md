@@ -98,16 +98,29 @@ CI. Per-model import, render and simulation coverage is tracked in
     source (and physical connections) are routed afresh instead; rotating
     or flipping a block reroutes its lines.
   - Annotations: add, move, edit plain or TeX-source text, and delete.
-  - Selection by box, Shift-click and Ctrl+A; group move, rotate and delete;
-    cut/copy/paste and duplicate (from the context menu, or Ctrl-drag to copy
-    to where the blocks are dropped) of native blocks with the lines between
-    them, copies
-    numbered as Simulink numbers them, pasting into whichever level is
-    shown (another level keeps the names and positions where free);
-    Ctrl-click a block to connect the
-    selected block to it; undo/redo by action. Arrow keys nudge the
-    selection by a grid step (Shift for one unit); a toolbar and a
+  - Selection by box, Shift-click, Ctrl+A and Tab; group move, rotate and
+    delete; cut/copy/paste and duplicate (from the context menu, or Ctrl-drag
+    to copy to where the blocks are dropped) of native blocks with the lines
+    between them, copies numbered as Simulink numbers them, pasting into
+    whichever level is shown (another level keeps the names and positions
+    where free); Ctrl-click a block to connect the selected block to it;
+    align and space selected blocks evenly; undo/redo by action, named in
+    their tooltips and in the default version message. Arrow keys nudge the
+    selection by a grid step (Shift for one unit); a toolstrip and a
     right-click menu offer the same actions as the shortcuts.
+  - Canvas: editors edit in place (no edit mode; Ctrl+S saves). Double-click
+    empty canvas for a quick insert search; the library has a search,
+    thumbnails and recently used blocks. Ctrl+F finds blocks anywhere in the
+    model. Dragged connections snap to ports within reach (Ctrl-drag a line
+    to branch it); lines follow dragged blocks as they will be routed, and
+    smart guides line blocks and ports up. Block names and plain annotations
+    are edited where they show; hovering a block shows what it is, and a
+    hovered line lights up with its branches. With a run shown, lines are
+    labelled with its recorded values and a line's inspector shows the
+    signal; the diagram can run and stop the simulation (Ctrl+Enter).
+    Ctrl+D checks the model compiles and Ctrl+E opens its settings. Levels
+    keep their pan and zoom, the shown level exports as SVG, and touch
+    screens pan and pinch-zoom, with panels laid over narrow screens.
   - Model settings: solver, start/stop time, step sizes and tolerances,
     written verbatim to the active configuration set's solver component
     (with `SolverName`/`SolverType` kept in step). Unrecognized solvers and
