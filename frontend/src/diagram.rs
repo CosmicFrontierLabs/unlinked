@@ -3661,9 +3661,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
 
-    // The menu offers Delete and reconnect only where it can be done.
-    let reconnectable = match (selection.blocks(), system) {
-        ([id], Some(sys)) => reconnect_edits(sys, &system_ref, &BlockId(id.clone())).is_some(),
+    // The open menu offers Delete and reconnect only where it can be done;
+    // worked out only while it is open, not on every render.
+    let reconnectable = match (selection.blocks(), system, menu.is_some()) {
+        ([id], Some(sys), true) => {
+            reconnect_edits(sys, &system_ref, &BlockId(id.clone())).is_some()
+        }
         _ => false,
     };
     let enabled = |a: Action| {
@@ -5810,17 +5813,23 @@ mod tests {
         }
         let group = reconnect_edits(&model.root, &vec![], &"2".into()).unwrap();
         unlinked_model::edit::apply_batch(&mut model, &group).unwrap();
-        assert!(model.root.block(&"2".into()).is_none());
-        let mut pairs: Vec<(String, String)> = model
-            .root
-            .connections()
-            .iter()
-            .map(|c| (c.src.block.0.clone(), c.dst.block.0.clone()))
-            .collect();
-        pairs.sort();
-        assert_eq!(pairs, [("1".into(), "3".into()), ("1".into(), "4".into())]);
-        let from_a = model.root.lines.iter().find(|l| l.src.is_some()).unwrap();
-        assert_eq!(from_a.name.as_deref(), Some("u"));
+        // As edited, and as saved to the file and read back.
+        let bytes = unlinked_import::patch::apply_edits("m.mdl", mdl.as_bytes(), &group).unwrap();
+        let saved =
+            unlinked_import::import_mdl("m.mdl", std::str::from_utf8(&bytes).unwrap()).unwrap();
+        for model in [&model, &saved] {
+            assert!(model.root.block(&"2".into()).is_none());
+            let mut pairs: Vec<(String, String)> = model
+                .root
+                .connections()
+                .iter()
+                .map(|c| (c.src.block.0.clone(), c.dst.block.0.clone()))
+                .collect();
+            pairs.sort();
+            assert_eq!(pairs, [("1".into(), "3".into()), ("1".into(), "4".into())]);
+            let from_a = model.root.lines.iter().find(|l| l.src.is_some()).unwrap();
+            assert_eq!(from_a.name.as_deref(), Some("u"));
+        }
     }
 
     #[test]
