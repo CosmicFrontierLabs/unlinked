@@ -1,6 +1,7 @@
 //! Adding blocks: the library palette beside the diagram and the quick
 //! insert search that opens on the canvas, both over the native catalog.
 
+use crate::diagram::{pref, set_pref};
 use crate::icons;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -45,6 +46,30 @@ pub fn search(query: &str) -> Vec<&'static BlockDescriptor> {
         .collect();
     ranked.sort_by_key(|(rank, i, _)| (*rank, *i));
     ranked.into_iter().map(|(.., b)| b).collect()
+}
+
+/// Blocks remembered as recently used, at most.
+const RECENT: usize = 8;
+
+/// The blocks added most recently, newest first, as kept between visits.
+pub fn recent_blocks() -> Vec<&'static str> {
+    pref("recent")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|key| catalog::find(key).filter(|b| b.creatable))
+        .map(|b| b.type_key)
+        .take(RECENT)
+        .collect()
+}
+
+/// Remember that a block of `type_key` was just added; the new list.
+pub fn remember_block(type_key: &'static str) -> Vec<&'static str> {
+    let mut recent = recent_blocks();
+    recent.retain(|k| *k != type_key);
+    recent.insert(0, type_key);
+    recent.truncate(RECENT);
+    set_pref("recent", &recent.join(","));
+    recent
 }
 
 /// The diagram of one block of `type_key` alone, without its name, as an
@@ -108,6 +133,8 @@ fn tile_image(thumbs: &HashMap<&'static str, String>, type_key: &str) -> Html {
 pub struct PaletteProps {
     /// Adds a block of the given type where the diagram is shown.
     pub on_add: Callback<&'static str>,
+    /// Blocks added recently, newest first, shown before the categories.
+    pub recent: Rc<Vec<&'static str>>,
 }
 
 /// Native blocks by category, filtered by a search box. Blocks are dragged
@@ -140,7 +167,15 @@ pub fn block_palette(props: &PaletteProps) -> Html {
         })
     };
     let body = if query.trim().is_empty() {
-        catalog::PALETTE_CATEGORIES
+        let recent = (!props.recent.is_empty()).then(|| {
+            html! {
+                <details class="palette-group" open=true>
+                    <summary>{ "Recently used" }</summary>
+                    <ul>{ for props.recent.iter().filter_map(|k| catalog::find(k)).map(tile) }</ul>
+                </details>
+            }
+        });
+        let categories = catalog::PALETTE_CATEGORIES
             .iter()
             .map(|category| {
                 html! {
@@ -150,7 +185,8 @@ pub fn block_palette(props: &PaletteProps) -> Html {
                     </details>
                 }
             })
-            .collect::<Html>()
+            .collect::<Html>();
+        html! { <>{ for recent }{ categories }</> }
     } else {
         let found = search(&query);
         if found.is_empty() {
@@ -184,19 +220,25 @@ pub struct QuickInsertProps {
     pub y: f64,
     pub on_pick: Callback<Pick>,
     pub on_close: Callback<()>,
+    /// Blocks added recently, offered first before anything is typed.
+    pub recent: Rc<Vec<&'static str>>,
 }
 
 /// What the quick insert offers for `query`: the best matching blocks, then
 /// an annotation when nothing is typed yet or the query names one.
-fn quick_picks(query: &str) -> Vec<Pick> {
+fn quick_picks(query: &str, recent: &[&'static str]) -> Vec<Pick> {
     let q = query.trim().to_lowercase();
     let annotation = ["annotation", "text", "note", "comment"]
         .iter()
         .any(|word| word.starts_with(&q));
-    search(query)
-        .into_iter()
+    // Before anything is typed, the recently used come first.
+    let first: &[&'static str] = if q.is_empty() { recent } else { &[] };
+    let found = search(query).into_iter().map(|b| b.type_key);
+    let mut keys: Vec<&'static str> = first.to_vec();
+    keys.extend(found.filter(|k| !first.contains(k)));
+    keys.into_iter()
         .take(MAX_MATCHES)
-        .map(|b| Pick::Block(b.type_key))
+        .map(Pick::Block)
         .chain(annotation.then_some(Pick::Annotation))
         .collect()
 }
@@ -218,7 +260,7 @@ pub fn quick_insert(props: &QuickInsertProps) -> Html {
             }
         });
     }
-    let picks = quick_picks(&query);
+    let picks = quick_picks(&query, &props.recent);
     let current = (*chosen).min(picks.len().saturating_sub(1));
     // Keep the chosen row in view as the arrows move through a long list.
     {
@@ -341,11 +383,23 @@ mod tests {
 
     #[test]
     fn annotation_is_offered_only_when_asked_for() {
-        assert_eq!(quick_picks("").last(), Some(&Pick::Annotation));
-        assert_eq!(quick_picks("ann"), vec![Pick::Annotation]);
-        assert!(quick_picks("text").contains(&Pick::Annotation));
-        assert!(!quick_picks("gain").contains(&Pick::Annotation));
-        assert!(quick_picks("zzzz").is_empty());
+        assert_eq!(quick_picks("", &[]).last(), Some(&Pick::Annotation));
+        assert_eq!(quick_picks("ann", &[]), vec![Pick::Annotation]);
+        assert!(quick_picks("text", &[]).contains(&Pick::Annotation));
+        assert!(!quick_picks("gain", &[]).contains(&Pick::Annotation));
+        assert!(quick_picks("zzzz", &[]).is_empty());
+    }
+
+    #[test]
+    fn recent_blocks_come_first_until_something_is_typed() {
+        let recent = ["Saturate", "Gain"];
+        let picks = quick_picks("", &recent);
+        assert_eq!(&picks[..2], &[Pick::Block("Saturate"), Pick::Block("Gain")]);
+        assert_eq!(
+            picks.iter().filter(|p| **p == Pick::Block("Gain")).count(),
+            1
+        );
+        assert_ne!(quick_picks("con", &recent)[0], Pick::Block("Saturate"));
     }
 
     #[test]
