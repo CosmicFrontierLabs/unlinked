@@ -18,7 +18,7 @@ use crate::api;
 use crate::diagram::fmt_num;
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
 use crate::plot::{self, PlotSession};
-use crate::results::{ShownRun, ShownSignal};
+use crate::results::{ShownRun, ShownSignal, SimulationControls};
 use futures_util::future::{AbortHandle, Abortable};
 use rizzma::wasm::WasmFigure;
 use shared::{
@@ -49,6 +49,8 @@ pub struct SimProps {
     pub active: bool,
     #[prop_or_default]
     pub on_running_change: Callback<bool>,
+    #[prop_or_default]
+    pub on_controls: Callback<SimulationControls>,
     #[prop_or_default]
     pub on_result: Callback<Option<Rc<ShownRun>>>,
     #[prop_or_default]
@@ -748,7 +750,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         let inputs = inputs.clone();
         let init_script = init_script.clone();
         let progress = progress.clone();
-        Callback::from(move |_: MouseEvent| {
+        Callback::from(move |_: ()| {
             if state.active() {
                 return;
             }
@@ -829,7 +831,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let cancel = {
         let (ctl, state, rebind, reload) =
             (ctl.clone(), state.clone(), rebind.clone(), reload.clone());
-        Callback::from(move |_: MouseEvent| {
+        Callback::from(move |_: ()| {
             if !state.active() || matches!(&*state, RunState::Stopping) {
                 return;
             }
@@ -1144,6 +1146,91 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let o = &*options;
     let validation = o.validate();
     let errors = validation.as_ref().err();
+    let run_unavailable = if running {
+        Some("A simulation is already running.".into())
+    } else if matches!(&*state, RunState::Loading) {
+        Some("Wait for the results to finish loading.".into())
+    } else if validation.is_err() {
+        Some("Check the run settings in the Simulate tab.".into())
+    } else if let Err(error) = parse_workspace(&workspace) {
+        Some(error)
+    } else {
+        props
+            .inputs
+            .iter()
+            .find(|(id, _)| inputs.get(id).is_none_or(|v| v.trim().is_empty()))
+            .map(|(_, name)| format!("Set a constant value for input {name} in the Simulate tab."))
+    };
+    let can_stop = running && !matches!(&*state, RunState::Stopping);
+    let run_error = match &*state {
+        RunState::Error(error) => Some(error.clone()),
+        RunState::Finished(SimulationStatus::Failed, error) => {
+            Some(error.clone().unwrap_or_else(|| "Simulation failed.".into()))
+        }
+        _ => None,
+    };
+    // Stable indirection avoids both stale form captures and a feedback loop
+    // when publishing callbacks causes the parent context to render again.
+    let current_actions =
+        use_mut_ref(|| (Callback::<()>::noop(), Callback::<()>::noop(), false, false));
+    *current_actions.borrow_mut() = (
+        run.clone(),
+        cancel.clone(),
+        run_unavailable.is_none(),
+        can_stop,
+    );
+    let external_run = {
+        let actions = current_actions.clone();
+        use_callback((), move |(), _| {
+            let (callback, enabled) = {
+                let a = actions.borrow();
+                (a.0.clone(), a.2)
+            };
+            if enabled {
+                callback.emit(());
+            }
+        })
+    };
+    let external_stop = {
+        let actions = current_actions.clone();
+        use_callback((), move |(), _| {
+            let (callback, enabled) = {
+                let a = actions.borrow();
+                (a.1.clone(), a.3)
+            };
+            if enabled {
+                callback.emit(());
+            }
+        })
+    };
+    {
+        let publish = props.on_controls.clone();
+        use_effect_with(
+            (publish, run_unavailable, running, can_stop, run_error),
+            move |(publish, reason, running, can_stop, error)| {
+                publish.emit(SimulationControls {
+                    on_run: reason.is_none().then_some(external_run),
+                    on_stop: (*can_stop).then_some(external_stop),
+                    running: *running,
+                    unavailable_reason: reason.clone(),
+                    error: error.clone(),
+                });
+            },
+        );
+    }
+    {
+        let publish = props.on_controls.clone();
+        let actions = current_actions.clone();
+        use_effect_with((), move |_| {
+            move || {
+                let mut actions = actions.borrow_mut();
+                actions.2 = false;
+                actions.3 = false;
+                drop(actions);
+                publish.emit(SimulationControls::default());
+            }
+        });
+    }
     let number_field = |name: &'static str,
                         title: &'static str,
                         value: &str,
@@ -1176,9 +1263,9 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 <div class="sim-heading"><strong>{ "Simulation" }</strong><span class="version-badge">{ format!("Saved v{}", props.version) }</span></div>
                 <div class="sim-actions">
                     if running {
-                        <button class="stop-button" onclick={cancel} disabled={matches!(&*state, RunState::Stopping)}>{ "■ Stop" }</button>
+                        <button class="stop-button" onclick={cancel.reform(|_: MouseEvent| ())} disabled={matches!(&*state, RunState::Stopping)}>{ "■ Stop" }</button>
                     } else {
-                        <button class="primary run-button" onclick={run} disabled={validation.is_err()}>{ "▶ Run" }</button>
+                        <button class="primary run-button" onclick={run.reform(|_: MouseEvent| ())} disabled={validation.is_err()}>{ "▶ Run" }</button>
                     }
                     <span class="sim-status" role="status" aria-live="polite">{ status }</span>
                     <button onclick={export_csv} disabled={samples == 0 || running} title="Download all recorded signals from the current run">{ "Export CSV" }</button>

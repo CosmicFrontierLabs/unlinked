@@ -38,6 +38,17 @@ impl PartialEq for ShownRun {
     }
 }
 
+/// Commands published by the mounted simulation workspace. Callbacks use its
+/// latest form values and remain stable while availability stays unchanged.
+#[derive(Clone, Default, PartialEq)]
+pub struct SimulationControls {
+    pub on_run: Option<Callback<()>>,
+    pub on_stop: Option<Callback<()>>,
+    pub running: bool,
+    pub unavailable_reason: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct ResultsContext {
     pub run: Option<Rc<ShownRun>>,
@@ -45,6 +56,11 @@ pub struct ResultsContext {
     pub dirty: bool,
     /// Select this recorded signal ID and show the simulation pane.
     pub on_plot: Callback<String>,
+    pub on_run: Option<Callback<()>>,
+    pub on_stop: Option<Callback<()>>,
+    pub running: bool,
+    pub run_unavailable: Option<String>,
+    pub run_error: Option<String>,
 }
 
 impl ShownRun {
