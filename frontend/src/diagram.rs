@@ -9,7 +9,7 @@ use crate::dialog::ParameterDialog;
 use crate::find::{FindBlocks, Found};
 use crate::icons;
 use crate::palette::{
-    recent_blocks, remember_block, BlockPalette, Pick, QuickInsert, PALETTE_DRAG,
+    has_port, recent_blocks, remember_block, BlockPalette, Pick, QuickInsert, PALETTE_DRAG,
 };
 use crate::results::{ResultsContext, ShownRun};
 use gloo_events::{EventListener, EventListenerOptions};
@@ -3139,38 +3139,45 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     let Edit::AddBlock { id, .. } = &edit else {
                         return;
                     };
-                    *select_created.borrow_mut() = Some(id.clone());
-                    // To its first input or from its first output, if it
-                    // has one with its default parameters.
-                    let connect = wire.and_then(|end| {
-                        let descriptor = catalog::find(type_key)?;
-                        let catalog::PortResolution::Known(counts) =
-                            descriptor.resolve_ports(&descriptor.creation_parameters())
-                        else {
-                            return None;
-                        };
-                        let port = |kind, index| Endpoint {
-                            block: id.clone(),
-                            port: PortRef { kind, index },
-                        };
-                        let (src, dst) = if is_source(end.port.kind) {
-                            (counts.inputs > 0).then(|| (end, port(PortKind::In, 1)))?
-                        } else {
-                            (counts.outputs > 0).then(|| (port(PortKind::Out, 1), end))?
-                        };
-                        Some(Edit::Connect {
-                            system: system_ref.clone(),
-                            src,
-                            dst,
-                        })
-                    });
-                    match connect {
-                        Some(connect) => on_edits.emit(vec![edit, connect]),
-                        None => on_edit.emit(edit),
+                    match wire {
+                        // To its first input or from its first output; the
+                        // quick insert offers only blocks that have it.
+                        Some(end) => {
+                            let kind = if is_source(end.port.kind) {
+                                PortKind::In
+                            } else {
+                                PortKind::Out
+                            };
+                            if !has_port(type_key, kind) {
+                                return;
+                            }
+                            let new = Endpoint {
+                                block: id.clone(),
+                                port: PortRef { kind, index: 1 },
+                            };
+                            let (src, dst) = if kind == PortKind::In {
+                                (end, new)
+                            } else {
+                                (new, end)
+                            };
+                            *select_created.borrow_mut() = Some(id.clone());
+                            on_edits.emit(vec![
+                                edit,
+                                Edit::Connect {
+                                    system: system_ref.clone(),
+                                    src,
+                                    dst,
+                                },
+                            ]);
+                        }
+                        None => {
+                            *select_created.borrow_mut() = Some(id.clone());
+                            on_edit.emit(edit);
+                        }
                     }
                     recent.set(Rc::new(remember_block(type_key)));
                 }
-                Pick::Annotation => {
+                Pick::Annotation if wire.is_none() => {
                     let Some(sid) = unlinked_model::edit::next_sid(&model) else {
                         return;
                     };
@@ -3192,6 +3199,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     };
                     selection.set(Selection::Annotation(annotation_count, added));
                 }
+                Pick::Annotation => {}
             }
         })
     };
@@ -4202,6 +4210,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     }
                     if let Some((x, y, at, wire)) = (*quick).clone() {
                         <QuickInsert {x} {y} recent={(*recent).clone()}
+                            needs={wire.as_ref().map(|end| if is_source(end.port.kind) { PortKind::In } else { PortKind::Out })}
                             on_pick={{
                                 let (add_at, quick, container) = (add_at.clone(), quick.clone(), container.clone());
                                 Callback::from(move |pick: Pick| {
