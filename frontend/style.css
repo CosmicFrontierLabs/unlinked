@@ -503,6 +503,52 @@ kbd {
     flex: 1;
     display: flex;
     min-height: 0;
+    position: relative;
+}
+
+.viewer-body .inspector-close {
+    position: absolute;
+    top: 0.4rem;
+    right: 0.4rem;
+    z-index: 8;
+}
+
+/* Room for the close button beside the inspector's heading. */
+.viewer-body .inspector > :first-child {
+    margin-right: 1.8rem;
+}
+
+/* Narrow screens: the side panel and inspector lie over the canvas */
+@media (max-width: 760px) {
+    .viewer-body .tree {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 7;
+        width: min(85vw, 280px);
+        box-shadow: 4px 0 18px rgba(0, 0, 0, 0.45);
+    }
+
+    .viewer-body .inspector {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        right: 0;
+        z-index: 7;
+        width: min(90vw, 320px);
+        box-shadow: -4px 0 18px rgba(0, 0, 0, 0.45);
+    }
+
+    /* Tools keep their icons; names show in their tooltips. */
+    .toolbar button.tool > span:not(.count) {
+        display: none;
+    }
+
+    .toolbar .save-group .change-message,
+    .toolbar .save-group .changes {
+        display: none;
+    }
 }
 
 .tree {
