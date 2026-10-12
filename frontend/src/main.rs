@@ -8,6 +8,7 @@ mod fetch;
 mod icons;
 mod local_viewer;
 mod pages;
+mod palette;
 mod plot;
 mod settings;
 mod sim;

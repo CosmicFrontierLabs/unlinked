@@ -93,6 +93,14 @@ pub fn close() -> Html {
     icon(html! { <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" /> })
 }
 
+pub fn search() -> Html {
+    icon(html! { <><circle cx="7" cy="7" r="5" /><path d="m14.5 14.5-4-4" /></> })
+}
+
+pub fn annotation() -> Html {
+    icon(html! { <path d="M3 3.5h10M8 3.5v10M6 13.5h4" /> })
+}
+
 pub fn help() -> Html {
     icon(
         html! { <><circle cx="8" cy="8" r="6.5" /><path d="M6 6.25a2 2 0 1 1 2.75 1.85c-.5.2-.75.6-.75 1.15v.5" /><path d="M8 11.75v.25" /></> },
