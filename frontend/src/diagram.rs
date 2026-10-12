@@ -868,12 +868,13 @@ fn splice_edits(sys: &System, system: &SystemRef, add: &Edit, dst: &Endpoint) ->
     if ports.inputs == 0 || ports.outputs == 0 {
         return None;
     }
-    let src = unlinked_model::edit::line_into(sys, dst)?.src.clone()?;
+    let line = unlinked_model::edit::line_into(sys, dst)?;
+    let src = line.src.clone()?;
     let port = |kind| Endpoint {
         block: id.clone(),
         port: PortRef { kind, index: 1 },
     };
-    Some(vec![
+    let mut edits = vec![
         add.clone(),
         Edit::Disconnect {
             system: system.clone(),
@@ -881,7 +882,7 @@ fn splice_edits(sys: &System, system: &SystemRef, add: &Edit, dst: &Endpoint) ->
         },
         Edit::Connect {
             system: system.clone(),
-            src,
+            src: src.clone(),
             dst: port(PortKind::In),
         },
         Edit::Connect {
@@ -889,7 +890,18 @@ fn splice_edits(sys: &System, system: &SystemRef, add: &Edit, dst: &Endpoint) ->
             src: port(PortKind::Out),
             dst: dst.clone(),
         },
-    ])
+    ];
+    // A line going only to `dst` goes away with it; its signal name stays
+    // with the source, on the line now into the new block. (A branched
+    // line keeps its name, and gains the new block as a branch.)
+    if let (Some(name), true) = (&line.name, line.branches.is_empty()) {
+        edits.push(Edit::SetSignalName {
+            system: system.clone(),
+            src,
+            name: name.clone(),
+        });
+    }
+    Some(edits)
 }
 
 /// An orthogonal path from `a` to `b` turning halfway across, as a new
@@ -5108,6 +5120,18 @@ mod tests {
             .collect();
         pairs.sort();
         assert_eq!(pairs, [("1".into(), "3".into()), ("3".into(), "2".into())]);
+        // A named line keeps its name on the source's side.
+        let mut named = unlinked_import::import_mdl("m.mdl", mdl).unwrap();
+        named.root.lines[0].name = Some("speed".into());
+        let group = splice_edits(&named.root, &vec![], &add("Saturate"), &dst).unwrap();
+        unlinked_model::edit::apply_batch(&mut named, &group).unwrap();
+        let from_a = named
+            .root
+            .lines
+            .iter()
+            .find(|l| l.src.as_ref().is_some_and(|s| s.block.0 == "1"))
+            .unwrap();
+        assert_eq!(from_a.name.as_deref(), Some("speed"));
     }
 
     #[test]
