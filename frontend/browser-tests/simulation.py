@@ -21,7 +21,6 @@ with sync_playwright() as p:
     file_id = args.model.split('/files/')[1].split('/')[0]
     run_id = str(uuid.uuid4())
     page.on('pageerror', lambda error: errors.append(str(error)))
-    page.add_init_script("window.closedSimulationSockets = 0; const WS = window.WebSocket; window.WebSocket = class extends WS { constructor(...args) { super(...args); this.addEventListener('close', () => window.closedSimulationSockets++); } };")
     def socket_handler(socket):
         sockets.append(socket)
         def receive(message):
@@ -45,6 +44,7 @@ with sync_playwright() as p:
     page.route_web_socket('**/ws/simulations', socket_handler)
     page.goto(args.url + '/api/auth/dev-login')
     page.goto(args.url + args.model)
+    page.evaluate("() => { window.closedSimulationSockets = 0; const close = WebSocket.prototype.close; WebSocket.prototype.close = function(...args) { window.closedSimulationSockets++; return close.apply(this, args); }; }")
     page.get_by_role('button', name='Simulate', exact=True).click()
     sim = page.get_by_role('region', name='Simulation', exact=True)
     run = sim.get_by_role('button', name='▶ Run', exact=True)
