@@ -193,6 +193,12 @@ enum Arrange {
     Across,
     /// Equal gaps between neighbours, top to bottom.
     Down,
+    /// The first selected block's width, keeping each block's left edge.
+    Width,
+    /// The first selected block's height, keeping each block's top edge.
+    Height,
+    /// The first selected block's width and height.
+    Size,
 }
 
 impl Arrange {
@@ -206,8 +212,9 @@ impl Arrange {
 }
 
 /// Where `blocks` go when arranged `how`: lined up on the first of them in
-/// the relevant direction (the leftmost for Left, ...), or spread between
-/// the outermost two keeping their sizes. Blocks that stay put are left out.
+/// the relevant direction (the leftmost for Left, ...), spread between the
+/// outermost two keeping their sizes, or sized as the first. Blocks that
+/// stay put are left out.
 fn arranged(blocks: &[(BlockId, Rect)], how: Arrange) -> Vec<(BlockId, Rect)> {
     let shift =
         |r: Rect, dx: f64, dy: f64| Rect::new(r.left + dx, r.top + dy, r.right + dx, r.bottom + dy);
@@ -298,6 +305,26 @@ fn arranged(blocks: &[(BlockId, Rect)], how: Arrange) -> Vec<(BlockId, Rect)> {
                 })
                 .collect()
         }
+        Arrange::Width | Arrange::Height | Arrange::Size => {
+            let Some((_, first)) = blocks.first() else {
+                return Vec::new();
+            };
+            let (w, h) = (first.width(), first.height());
+            blocks
+                .iter()
+                .map(|(id, r)| {
+                    let right = match how {
+                        Arrange::Height => r.right,
+                        _ => r.left + w,
+                    };
+                    let bottom = match how {
+                        Arrange::Width => r.bottom,
+                        _ => r.top + h,
+                    };
+                    (id.clone(), Rect::new(r.left, r.top, right, bottom))
+                })
+                .collect()
+        }
     };
     // On whole diagram units, as everything else places blocks.
     moved
@@ -317,7 +344,7 @@ const TOOLBAR: [&[Action]; 3] = [
     &[Action::Rotate, Action::Flip],
     &[Action::Group, Action::Expand],
 ];
-const MENU: [Action; 20] = [
+const MENU: [Action; 21] = [
     Action::Cut,
     Action::Copy,
     Action::Paste,
@@ -337,6 +364,7 @@ const MENU: [Action; 20] = [
     Action::Arrange(Arrange::Bottom),
     Action::Arrange(Arrange::Across),
     Action::Arrange(Arrange::Down),
+    Action::Arrange(Arrange::Size),
     Action::SelectAll,
 ];
 
@@ -455,6 +483,9 @@ impl Action {
                     Arrange::Bottom => "Align bottom edges",
                     Arrange::Across => "Space evenly across",
                     Arrange::Down => "Space evenly down",
+                    Arrange::Width => "Match width",
+                    Arrange::Height => "Match height",
+                    Arrange::Size => "Match size",
                 },
                 "",
             ),
@@ -1200,6 +1231,26 @@ impl Reducible for Glide {
             on,
             jumps: self.jumps.wrapping_add(on as u32),
         })
+    }
+}
+
+/// The view centring `r` (diagram units, in an SVG whose `viewBox` starts
+/// at `vx`, `vy`) in `container` with a margin, zoomed in to at most
+/// 150%, as a fit of the whole diagram is.
+fn fit_rect(container: &HtmlElement, r: Rect, vx: f64, vy: f64) -> View {
+    const MARGIN: f64 = 40.0;
+    let (cw, ch) = (
+        container.client_width() as f64,
+        container.client_height() as f64,
+    );
+    let scale = ((cw - 2.0 * MARGIN) / r.width().max(1.0))
+        .min((ch - 2.0 * MARGIN) / r.height().max(1.0))
+        .clamp(0.02, 1.5);
+    let (cx, cy) = ((r.left + r.right) / 2.0 - vx, (r.top + r.bottom) / 2.0 - vy);
+    View {
+        scale,
+        x: cw / 2.0 - cx * scale,
+        y: ch / 2.0 - cy * scale,
     }
 }
 
@@ -3324,6 +3375,33 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
         })
     };
+    // Fit the selected blocks to the view, as Simulink's Fit selection.
+    let fit_selection = {
+        let (view, container, rendered) = (view.clone(), container.clone(), rendered.clone());
+        let (glide, selection) = (glide.clone(), selection.clone());
+        let blocks = level.0.clone();
+        Callback::from(move |()| {
+            let around = selection
+                .blocks()
+                .iter()
+                .filter_map(|id| blocks.iter().find(|b| b.id.0 == *id))
+                .map(|b| b.position)
+                .reduce(|a, b| {
+                    Rect::new(
+                        a.left.min(b.left),
+                        a.top.min(b.top),
+                        a.right.max(b.right),
+                        a.bottom.max(b.bottom),
+                    )
+                });
+            let el = container.cast::<HtmlElement>();
+            let vb = (*rendered).as_ref().ok().and_then(|svg| view_box(svg));
+            if let (Some(r), Some(el), Some([vx, vy, ..])) = (around, el, vb) {
+                glide.dispatch(true);
+                view.dispatch(ViewAction::Set(fit_rect(&el, r, vx, vy)));
+            }
+        })
+    };
     // Bring block `id` of the shown system into view, at the current zoom,
     // when it is not wholly in view already.
     let reveal = {
@@ -3696,6 +3774,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // are editing actions.
     let onkeydown = {
         let (fit_view, zoom_by, help) = (fit_view.clone(), zoom_by.clone(), help.clone());
+        let fit_selection = fit_selection.clone();
         let (finding, reveal) = (finding.clone(), reveal.clone());
         let (on_compile, on_settings, show_problems) = (
             props.on_compile.clone(),
@@ -3732,6 +3811,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
             let command = e.ctrl_key() || e.meta_key();
             match e.key().as_str() {
+                " " if !command && e.shift_key() && !selection.blocks().is_empty() => {
+                    fit_selection.emit(())
+                }
                 " " if !command => fit_view.emit(()),
                 "=" | "+" if command => zoom_by.emit(1.25),
                 "0" if command => zoom_by.emit(1.0 / scale),
@@ -4243,12 +4325,19 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                 .take(12).collect::<Vec<_>>().join(", ") }
                             if selection.blocks().len() > 12 { { "…" } }
                         </p>
+                        <div class="selection-actions">
+                            <button title="Shift+Space" onclick={
+                                let fit_selection = fit_selection.clone();
+                                Callback::from(move |_: MouseEvent| fit_selection.emit(()))
+                            }>{ "Fit to view" }</button>
+                        </div>
                         if props.on_edit.is_some() {
                             <div class="selection-actions">
                                 { for [Action::Arrange(Arrange::Left), Action::Arrange(Arrange::Center),
                                     Action::Arrange(Arrange::Top), Action::Arrange(Arrange::Middle),
                                     Action::Arrange(Arrange::Across), Action::Arrange(Arrange::Down),
-                                    Action::Group, Action::Delete]
+                                    Action::Arrange(Arrange::Width), Action::Arrange(Arrange::Height),
+                                    Action::Arrange(Arrange::Size), Action::Group, Action::Delete]
                                     .into_iter().filter(|&a| enabled(a)).map(|a| {
                                         let act = act.clone();
                                         html! {
@@ -4476,6 +4565,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Scroll", "Zoom about the pointer"),
         ("Drag, or middle-drag", "Pan (middle-drag while editing)"),
         ("Space", "Fit to view"),
+        ("Shift+Space", "Fit the selected blocks to view"),
         ("Ctrl+= / Ctrl+- / Ctrl+0", "Zoom in / out / to 100%"),
         ("Double-click a subsystem, or Enter", "Open it"),
         ("Ctrl+F", "Find blocks anywhere in the model"),
@@ -5334,6 +5424,20 @@ mod tests {
             vec![("2".to_string(), Rect::new(100.0, 13.0, 130.0, 33.0))]
         );
         assert!(arranged(&three[..1], Arrange::Left).is_empty());
+        // Sized as the first (30 x 20), each keeping its top-left corner.
+        assert_eq!(
+            moved(Arrange::Width),
+            vec![("3".to_string(), Rect::new(200.0, 40.0, 230.0, 60.0))]
+        );
+        assert!(moved(Arrange::Height).is_empty());
+        let tall = [
+            b("1", 0.0, 0.0, 30.0),
+            (BlockId::from("2"), Rect::new(5.0, 5.0, 9.0, 99.0)),
+        ];
+        assert_eq!(
+            arranged(&tall, Arrange::Size),
+            vec![(BlockId::from("2"), Rect::new(5.0, 5.0, 35.0, 25.0))]
+        );
     }
 
     #[test]
