@@ -7,6 +7,7 @@ use crate::api::{self, ApiError};
 use crate::diagram::DiagramView;
 use crate::editor::{Base, ModelEditor};
 use crate::fetch::{use_fetch, use_reload, view, Fetch, Reload};
+use crate::select::Select;
 use crate::sim::SimulationPanel;
 use crate::transpiler::Transpiler;
 use crate::Route;
@@ -75,9 +76,34 @@ where
     });
 }
 
+/// Keep role changes visible and serialized until the server answers.
+fn mutate_role<Fut>(
+    fut: Fut,
+    user: Uuid,
+    pending: UseStateHandle<Option<Uuid>>,
+    reload: UseReducerHandle<Reload>,
+    error: UseStateHandle<Option<ApiError>>,
+) where
+    Fut: std::future::Future<Output = Result<(), ApiError>> + 'static,
+{
+    if pending.is_some() {
+        return;
+    }
+    pending.set(Some(user));
+    mutate(
+        async move {
+            let result = fut.await;
+            pending.set(None);
+            result
+        },
+        reload,
+        error,
+    );
+}
+
 fn error_line(error: &Option<ApiError>) -> Html {
     match error {
-        Some(e) => html! { <p class="error">{ e.to_string() }</p> },
+        Some(e) => html! { <p class="error" role="alert">{ e.to_string() }</p> },
         None => html! {},
     }
 }
@@ -180,6 +206,7 @@ pub fn org_page(props: &OrgProps) -> Html {
     let id = props.org_id;
     let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
+    let role_pending = use_state(|| None::<Uuid>);
     let org = use_fetch((id, reload.0), move |(id, _)| api::org(id));
     let members = use_fetch((id, reload.0), move |(id, _)| api::org_members(id));
     let projects = use_fetch((id, reload.0), move |(id, _)| api::org_projects(id));
@@ -242,6 +269,7 @@ pub fn org_page(props: &OrgProps) -> Html {
     };
 
     let member_rows = {
+        let role_pending = role_pending.clone();
         let (reload, error) = (reload.clone(), error.clone());
         move |members: &Vec<shared::OrgMember>| -> Html {
             html! {
@@ -250,10 +278,11 @@ pub fn org_page(props: &OrgProps) -> Html {
                     { for members.iter().map(|m| {
                         let user = m.user.id;
                         let on_role = {
+                            let role_pending = role_pending.clone();
                             let (reload, error) = (reload.clone(), error.clone());
                             Callback::from(move |e: Event| {
                                 if let Some(r) = OrgRole::parse(&select_value(e)) {
-                                    mutate(api::update_org_member(id, user, r), reload.clone(), error.clone());
+                                    mutate_role(api::update_org_member(id, user, r), user, role_pending.clone(), reload.clone(), error.clone());
                                 }
                             })
                         };
@@ -268,17 +297,18 @@ pub fn org_page(props: &OrgProps) -> Html {
                                 <td>{ who(&Some(m.user.clone())) }<div class="muted">{ &m.user.email }</div></td>
                                 <td>
                                     if admin {
-                                        <select onchange={on_role} aria-label={format!("Organization role for {}", m.user.email)}>
+                                        <Select value={m.role.as_str()} disabled={role_pending.is_some()} onchange={on_role} aria_label={format!("Organization role for {}", m.user.email)}>
                                             { for ORG_ROLES.iter().map(|r| html! {
                                                 <option value={r.as_str()} selected={*r == m.role}>{ r.as_str() }</option>
                                             }) }
-                                        </select>
+                                        </Select>
+                                        if *role_pending == Some(user) { <span class="muted" role="status">{ " Updating role…" }</span> }
                                     } else {
                                         { m.role.as_str() }
                                     }
                                 </td>
                                 <td class="muted">{ when(&m.joined_at) }</td>
-                                <td>if admin { <button onclick={on_remove}>{ "Remove" }</button> }</td>
+                                <td>if admin { <button onclick={on_remove} disabled={role_pending.is_some()}>{ "Remove" }</button> }</td>
                             </tr>
                         }
                     }) }
@@ -335,11 +365,11 @@ pub fn org_page(props: &OrgProps) -> Html {
                 { text_input(&project_name, "Project name") }
                 { text_input(&project_desc, "Description") }
                 <label class="muted">{ "Org members get " }</label>
-                <select onchange={set_default} aria-label="Default project access for organization members">
+                <Select value={project_default.as_str()} onchange={set_default} aria_label="Default project access for organization members">
                     { for DEFAULT_ROLES.iter().map(|r| html! {
                         <option value={r.as_str()} selected={*r == *project_default}>{ r.as_str() }</option>
                     }) }
-                </select>
+                </Select>
                 <button class="primary" type="submit">{ "Create project" }</button>
             </form>
 
@@ -348,11 +378,11 @@ pub fn org_page(props: &OrgProps) -> Html {
             if admin {
                 <form class="inline-form" onsubmit={add_member}>
                     { text_input(&email, "email@example.com") }
-                    <select onchange={set_role} aria-label="New organization member role">
+                    <Select value={role.as_str()} onchange={set_role} aria_label="New organization member role">
                         { for ORG_ROLES.iter().map(|r| html! {
                             <option value={r.as_str()} selected={*r == *role}>{ r.as_str() }</option>
                         }) }
-                    </select>
+                    </Select>
                     <button type="submit">{ "Add member" }</button>
                 </form>
                 <p class="muted">{ "People must sign in once before they can be added." }</p>
@@ -395,6 +425,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
     let id = props.project_id;
     let reload = use_reload();
     let error = use_state(|| None::<ApiError>);
+    let role_pending = use_state(|| None::<Uuid>);
     let project = use_fetch((id, reload.0), move |(id, _)| api::project(id));
     let files = use_fetch((id, reload.0), move |(id, _)| api::files(id));
     let members = use_fetch((id, reload.0), move |(id, _)| api::project_members(id));
@@ -520,6 +551,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
         })
     };
     let member_rows = {
+        let role_pending = role_pending.clone();
         let (reload, error) = (reload.clone(), error.clone());
         move |members: &Vec<shared::ProjectMember>| -> Html {
             html! {
@@ -527,10 +559,11 @@ pub fn project_page(props: &ProjectProps) -> Html {
                     { for members.iter().map(|m| {
                         let user = m.user.id;
                         let on_role = {
+                            let role_pending = role_pending.clone();
                             let (reload, error) = (reload.clone(), error.clone());
                             Callback::from(move |e: Event| {
                                 if let Some(r) = ProjectRole::parse(&select_value(e)) {
-                                    mutate(api::update_project_member(id, user, r), reload.clone(), error.clone());
+                                    mutate_role(api::update_project_member(id, user, r), user, role_pending.clone(), reload.clone(), error.clone());
                                 }
                             })
                         };
@@ -545,16 +578,17 @@ pub fn project_page(props: &ProjectProps) -> Html {
                                 <td>{ who(&Some(m.user.clone())) }<div class="muted">{ &m.user.email }</div></td>
                                 <td>
                                     if owner {
-                                        <select onchange={on_role} aria-label={format!("Project role for {}", m.user.email)}>
+                                        <Select value={m.role.as_str()} disabled={role_pending.is_some()} onchange={on_role} aria_label={format!("Project role for {}", m.user.email)}>
                                             { for PROJECT_ROLES.iter().map(|r| html! {
                                                 <option value={r.as_str()} selected={*r == m.role}>{ r.as_str() }</option>
                                             }) }
-                                        </select>
+                                        </Select>
+                                        if *role_pending == Some(user) { <span class="muted" role="status">{ " Updating role…" }</span> }
                                     } else {
                                         { m.role.as_str() }
                                     }
                                 </td>
-                                <td>if owner { <button onclick={on_remove}>{ "Remove" }</button> }</td>
+                                <td>if owner { <button onclick={on_remove} disabled={role_pending.is_some()}>{ "Remove" }</button> }</td>
                             </tr>
                         }
                     }) }
@@ -593,11 +627,11 @@ pub fn project_page(props: &ProjectProps) -> Html {
             if owner {
                 <form class="inline-form" onsubmit={add_member}>
                     { text_input(&email, "email@example.com") }
-                    <select onchange={set_new_role} aria-label="New project member role">
+                    <Select value={new_role.as_str()} onchange={set_new_role} aria_label="New project member role">
                         { for PROJECT_ROLES.iter().map(|r| html! {
                             <option value={r.as_str()} selected={*r == *new_role}>{ r.as_str() }</option>
                         }) }
-                    </select>
+                    </Select>
                     <button type="submit">{ "Add member" }</button>
                 </form>
             }
