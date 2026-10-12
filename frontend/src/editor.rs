@@ -387,11 +387,23 @@ pub fn model_editor(props: &EditorProps) -> Html {
         let on_dirty_change = props.on_dirty_change.clone();
         use_effect_with(count > 0, move |dirty| on_dirty_change.emit(*dirty));
     }
+    // A save asked for from the keyboard, made once the render after the
+    // request has the edits it should include.
+    let save_requested = use_state(|| false);
+    {
+        let (save, save_requested) = (save.clone(), save_requested.clone());
+        use_effect_with(*save_requested, move |requested| {
+            if *requested {
+                save_requested.set(false);
+                save.emit(());
+            }
+        });
+    }
     // Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes and Ctrl/Cmd+S
     // saves, unless typing in a field. Re-registered each render so it acts
     // on the current state.
     {
-        let (undo, redo, save) = (undo.clone(), redo.clone(), save.clone());
+        let (undo, redo, save_requested) = (undo.clone(), redo.clone(), save_requested.clone());
         let active = props.active && editing && !*busy;
         use_effect(move || {
             // Not passive, so the browser's own shortcut can be suppressed.
@@ -404,19 +416,27 @@ pub fn model_editor(props: &EditorProps) -> Html {
                         let Some(e) = e.dyn_ref::<KeyboardEvent>() else {
                             return;
                         };
-                        let typing = e
+                        let field = e
                             .target()
-                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                            .is_some_and(|t| {
+                            .and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok())
+                            .filter(|t| {
                                 matches!(t.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
                             });
                         if !(e.ctrl_key() || e.meta_key()) {
                             return;
                         }
                         match (e.key().to_ascii_lowercase().as_str(), e.shift_key()) {
-                            // Saving from a field (the change message) too.
-                            ("s", false) => save.emit(()),
-                            _ if typing => return,
+                            // Saving from a field too. Parameter and setting
+                            // fields commit their value when they lose focus,
+                            // so leave the field first and save after the
+                            // edit it makes.
+                            ("s", false) => {
+                                if let Some(field) = &field {
+                                    let _ = field.blur();
+                                }
+                                save_requested.set(true);
+                            }
+                            _ if field.is_some() => return,
                             ("z", false) => undo.emit(()),
                             ("z", true) | ("y", _) => redo.emit(()),
                             _ => return,
