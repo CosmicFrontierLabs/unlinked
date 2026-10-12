@@ -16,6 +16,8 @@ pub struct SelectProps {
     #[prop_or_default]
     pub aria_invalid: Option<AttrValue>,
     #[prop_or_default]
+    pub aria_label: Option<AttrValue>,
+    #[prop_or_default]
     pub aria_describedby: Option<AttrValue>,
 }
 
@@ -49,7 +51,7 @@ pub fn select(props: &SelectProps) -> Html {
     };
     html! {
         <select ref={node} id={props.id.clone()} disabled={props.disabled}
-            {onchange} aria-invalid={props.aria_invalid.clone()}
+            {onchange} aria-label={props.aria_label.clone()} aria-invalid={props.aria_invalid.clone()}
             aria-describedby={props.aria_describedby.clone()}>
             {props.children.clone()}
         </select>
