@@ -5,6 +5,7 @@ No simulation jobs are created and no models are changed.
 import argparse
 import json
 import uuid
+import time
 from playwright.sync_api import sync_playwright, expect
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -95,8 +96,10 @@ with sync_playwright() as p:
     # A Running status can precede Started. Stop must remain sticky through both.
     run.click()
     expect(sim.get_by_role('status')).to_contain_text('Connecting')
-    while len(requests) < 3:
+    deadline = time.monotonic() + 5
+    while len(requests) < 3 and time.monotonic() < deadline:
         page.wait_for_timeout(20)
+    assert len(requests) == 3, "Third simulation request was not sent"
     delayed = {'type':'SimulationStatus', 'run':{
         'id':run_id, 'file_id':file_id, 'file_version_id':str(uuid.uuid4()),
         'file_version':requests[-1]['version'], 'requested_by':None,
