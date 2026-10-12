@@ -202,7 +202,10 @@ pub async fn begin(
     validate(&request)?;
     let reservation = sim_worker::reserve(user.id).map_err(ApiError::Conflict)?;
     request.options.max_internal_steps = request.options.max_internal_steps.min(10_000);
-    request.options.max_samples = request.options.max_samples.min(25_001);
+    request.options.max_samples = request
+        .options
+        .max_samples
+        .min(shared::MAX_SIMULATION_SAMPLES);
     let worker_request = request.clone();
     let actor = user.id;
     let (record,path,bytes,init_script)=state.db(move |conn| {

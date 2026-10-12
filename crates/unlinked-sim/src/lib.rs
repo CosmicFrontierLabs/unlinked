@@ -574,7 +574,7 @@ pub fn simulate_with_observer(
 }
 
 /// Validate explicit options without evaluating any model or advancing time.
-fn sample_count(o: &Options) -> Result<usize, Error> {
+pub fn sample_count(o: &Options) -> Result<usize, Error> {
     if !o.start.is_finite()
         || !o.stop.is_finite()
         || !o.step.is_finite()

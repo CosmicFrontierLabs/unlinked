@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 pub use unlinked_sim::{Options as SimulationOptions, Solver, Trace as SimulationTrace};
 use uuid::Uuid;
 
+/// Maximum output samples accepted by the hosted simulation worker.
+pub const MAX_SIMULATION_SAMPLES: usize = 25_001;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SimulationInitScript {

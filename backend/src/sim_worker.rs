@@ -1,5 +1,6 @@
 //! Bounded simulation workers. HTTP/WS callers must authorize the immutable
 //! input revision before entering this module.
+use shared::MAX_SIMULATION_SAMPLES as MAX_SAMPLES;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, OnceLock,
@@ -8,7 +9,6 @@ use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use unlinked_sim::{Options, Trace};
 
 const MAX_CONCURRENT: usize = 4;
-const MAX_SAMPLES: usize = 25_001;
 const MAX_VALUES: usize = 1_000_000;
 const CHUNK_SAMPLES: usize = 128;
 
