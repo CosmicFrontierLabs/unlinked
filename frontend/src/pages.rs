@@ -651,6 +651,44 @@ pub fn file_page(props: &FileProps) -> Html {
     let history_open = use_state(|| false);
     let simulation_seen = use_state(|| false);
     let simulation_running = use_state(|| false);
+    let shown_run = use_state(|| None::<Rc<crate::results::ShownRun>>);
+    let requested_signal = use_state(|| None::<(u64, String)>);
+    let on_result = {
+        let (shown_run, requested_signal) = (shown_run.clone(), requested_signal.clone());
+        Callback::from(move |run: Option<Rc<crate::results::ShownRun>>| {
+            if run.is_none() {
+                requested_signal.set(None);
+            }
+            shown_run.set(run);
+        })
+    };
+    let on_cursor = {
+        let shown_run = shown_run.clone();
+        Callback::from(move |index: usize| {
+            if let Some(run) = &*shown_run {
+                if index < run.time.len() && index != run.sample_index {
+                    let mut updated = (**run).clone();
+                    updated.sample_index = index;
+                    shown_run.set(Some(Rc::new(updated)));
+                }
+            }
+        })
+    };
+    let on_plot = {
+        let (requested_signal, simulation_seen, tab) = (
+            requested_signal.clone(),
+            simulation_seen.clone(),
+            tab.clone(),
+        );
+        Callback::from(move |id: String| {
+            let serial = requested_signal
+                .as_ref()
+                .map_or(0, |(serial, _)| serial.wrapping_add(1));
+            requested_signal.set(Some((serial, id)));
+            simulation_seen.set(true);
+            tab.set(Tab::Simulate);
+        })
+    };
     let on_running_change = {
         let simulation_running = simulation_running.clone();
         Callback::from(move |running: bool| simulation_running.set(running))
@@ -675,13 +713,19 @@ pub fn file_page(props: &FileProps) -> Html {
     // only after a save or an explicit version switch.
     let content_reload = use_reload();
     {
-        let (diagram_dirty, simulation_running) =
-            (diagram_dirty.clone(), simulation_running.clone());
+        let (diagram_dirty, simulation_running, shown_run, requested_signal) = (
+            diagram_dirty.clone(),
+            simulation_running.clone(),
+            shown_run.clone(),
+            requested_signal.clone(),
+        );
         use_effect_with(
             (project_id, file_id, version_id, content_reload.0),
             move |_| {
                 diagram_dirty.set(false);
                 simulation_running.set(false);
+                shown_run.set(None);
+                requested_signal.set(None);
             },
         );
     }
@@ -878,7 +922,9 @@ pub fn file_page(props: &FileProps) -> Html {
         // Keyed by model identity so a new version remounts the viewer with
         // fresh navigation state instead of keeping a stale subsystem path.
         Content::Model(m, base) => html! {
-            <>
+            <ContextProvider<crate::results::ResultsContext> context={crate::results::ResultsContext {
+                run: (*shown_run).clone(), shown_version: base.version, dirty: *diagram_dirty, on_plot: on_plot.clone(),
+            }}>
                 <div class="tabs" role="group" aria-label="Model workspace">
                     { tab_button(Tab::Diagram, "Diagram") }
                     { tab_button(Tab::Simulate, "Simulate") }
@@ -900,13 +946,14 @@ pub fn file_page(props: &FileProps) -> Html {
                     if *simulation_seen {
                     <SimulationPanel key={format!("{file_id}:{}", base.version)} {project_id} {file_id}
                         on_running_change={on_running_change.clone()}
+                        on_result={on_result.clone()} on_cursor={on_cursor.clone()} requested_signal={(*requested_signal).clone()}
                         version={base.version} active={*tab == Tab::Simulate} config={m.config.clone()}
                         has_random_sources={m.walk().iter().any(|(_, sys)| sys.blocks.iter().any(|b| matches!(b.block_type.as_str(), "RandomNumber" | "UniformRandomNumber")))}
                         inputs={m.root.blocks.iter().filter(|b| b.block_type == "Inport").map(|b| (b.id.0.clone(), b.name.clone())).collect::<Vec<_>>()}
                         outports={m.root.blocks.iter().filter(|b| b.block_type == "Outport").map(|b| b.name.clone()).collect::<Vec<_>>()} />
                     }
                 </section>
-            </>
+            </ContextProvider<crate::results::ResultsContext>>
         },
         Content::Text(t, _, _) if matlab_file => html! {
             <>

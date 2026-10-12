@@ -30,6 +30,7 @@ pub struct ResultsContext {
     pub on_plot: Callback<String>,
 }
 
+#[allow(dead_code)]
 impl ShownRun {
     /// Resolve a displayed output to recorded scalar components. Numeric
     /// Simulink SIDs have an unambiguous lowering vocabulary: virtual scopes
@@ -92,6 +93,7 @@ impl ShownRun {
     }
 }
 
+#[allow(dead_code)]
 fn numeric_ids(system: &System) -> bool {
     system.blocks.iter().all(|b| {
         !b.id.0.is_empty()
@@ -99,6 +101,7 @@ fn numeric_ids(system: &System) -> bool {
             && b.subsystem.as_ref().is_none_or(|s| numeric_ids(s))
     })
 }
+#[allow(dead_code)]
 fn component_suffix(suffix: &str) -> bool {
     let Some(indices) = suffix.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
         return false;
