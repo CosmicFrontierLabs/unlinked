@@ -183,6 +183,7 @@ struct Controller {
     sender: Option<Sender<SimulationSocket>>,
     /// Server id of the live run, once known.
     run_id: Option<Uuid>,
+    stopping: bool,
     /// Aborts the live run's socket task, dropping its receiver at once.
     task: Option<AbortHandle>,
     last_refresh: f64,
@@ -203,6 +204,7 @@ impl Controller {
         self.session = None;
         self.sender = None;
         self.run_id = None;
+        self.stopping = false;
         self.requested_options = None;
         self.last_refresh = 0.0;
         self.generation
@@ -413,7 +415,9 @@ async fn stream(
             Ok(SimulationServerMsg::SimulationStatus { run }) => match run.status {
                 SimulationStatus::Running => {
                     ctl.borrow_mut().run_id = Some(run.id);
-                    state.set(RunState::Running(Some(run.id)));
+                    if !ctl.borrow().stopping {
+                        state.set(RunState::Running(Some(run.id)));
+                    }
                 }
                 done => {
                     ctl.borrow().refresh_plot();
@@ -431,7 +435,9 @@ async fn stream(
                     c.run_id = Some(run_id);
                 }
                 rebind.dispatch(());
-                state.set(RunState::Running(Some(run_id)));
+                if !ctl.borrow().stopping {
+                    state.set(RunState::Running(Some(run_id)));
+                }
             }
             Ok(SimulationServerMsg::SimulationSamples { time, values, .. }) => {
                 let mut c = ctl.borrow_mut();
@@ -658,6 +664,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                 reload.dispatch(());
                 return;
             };
+            ctl.borrow_mut().stopping = true;
             state.set(RunState::Stopping);
             let (ctl, state) = (ctl.clone(), state.clone());
             spawn_local(async move {
@@ -923,7 +930,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                             <small>{ "One NAME = expression per line. Overrides take precedence over the script." }</small>
                         </label>
                     </div>
-                    <button class="reset-run-settings" onclick={reset_options} disabled={running}>{ "Reset solver settings" }</button>
+                    <button class="reset-run-settings" onclick={reset_options} disabled={running}>{ "Reset run settings" }</button>
                 </details>
                 if !props.inputs.is_empty() {
                     <fieldset class="sim-inputs">

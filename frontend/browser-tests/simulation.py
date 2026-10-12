@@ -16,7 +16,7 @@ args = parser.parse_args()
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, **({'executable_path': args.browser} if args.browser else {}))
     page = browser.new_page(viewport={'width': 1440, 'height': 1000})
-    errors, requests, cancelled, closed = [], [], [], []
+    errors, requests, cancelled = [], [], []
     sockets = []
     file_id = args.model.split('/files/')[1].split('/')[0]
     run_id = str(uuid.uuid4())
@@ -34,6 +34,8 @@ with sync_playwright() as p:
                     socket.send(json.dumps({'type':'SimulationSamples', 'run_id':run_id, 'time':[0,0.5,1], 'values':[[0,0],[0.5,1],[1,2]]}))
             elif message['type'] == 'CancelSimulation':
                 cancelled.append(message['run_id'])
+                if len(requests) == 3:
+                    return
                 socket.send(json.dumps({'type':'SimulationStatus', 'run':{
                     'id':run_id, 'file_id':file_id, 'file_version_id':str(uuid.uuid4()),
                     'file_version':requests[-1]['version'], 'requested_by':None,
@@ -70,6 +72,7 @@ with sync_playwright() as p:
     expect(sim.get_by_role('progressbar')).to_have_attribute('value', '10')
     expect(stop_time).to_be_disabled()
     assert requests[0]['options']['stop'] == 10
+    assert not page.evaluate("window.dispatchEvent(new Event('beforeunload', {cancelable:true}))")
     page.get_by_role('button', name='Diagram', exact=True).click()
     page.wait_for_timeout(150)
     assert not cancelled and page.evaluate('window.closedSimulationSockets') == 0, 'Tab switch canceled the simulation'
@@ -79,11 +82,38 @@ with sync_playwright() as p:
     expect(sim.get_by_role('status')).to_contain_text('Stopped · 3 samples')
     assert cancelled == [run_id]
     expect(sim.get_by_role('link', name='Export CSV')).to_be_visible()
+    assert page.evaluate("window.dispatchEvent(new Event('beforeunload', {cancelable:true}))")
+    page.wait_for_function('window.closedSimulationSockets >= 1')
+    closed_before = page.evaluate('window.closedSimulationSockets')
     # The second mock connection never sends a run ID. Stop must still work.
     run.click()
     expect(sim.get_by_role('status')).to_contain_text('Connecting')
     sim.get_by_role('button', name='■ Stop', exact=True).click()
     expect(sim.get_by_role('status')).to_contain_text('Stopped · 0 samples')
+    expect(run).to_be_enabled()
+    page.wait_for_function('window.closedSimulationSockets > ' + str(closed_before))
+    # A Running status can precede Started. Stop must remain sticky through both.
+    run.click()
+    expect(sim.get_by_role('status')).to_contain_text('Connecting')
+    while len(requests) < 3:
+        page.wait_for_timeout(20)
+    delayed = {'type':'SimulationStatus', 'run':{
+        'id':run_id, 'file_id':file_id, 'file_version_id':str(uuid.uuid4()),
+        'file_version':requests[-1]['version'], 'requested_by':None,
+        'status':'running', 'request':requests[-1], 'error':None,
+        'created_at':'2026-10-12T00:00:00Z', 'finished_at':None}}
+    sockets[-1].send(json.dumps(delayed))
+    expect(sim.get_by_role('status')).to_contain_text('Running')
+    sim.get_by_role('button', name='■ Stop', exact=True).click()
+    expect(sim.get_by_role('status')).to_contain_text('Stopping')
+    sockets[-1].send(json.dumps({'type':'SimulationStarted', 'run_id':run_id, 'signals':[]}))
+    sockets[-1].send(json.dumps(delayed))
+    page.wait_for_timeout(100)
+    expect(sim.get_by_role('status')).to_contain_text('Stopping')
+    expect(sim.get_by_role('button', name='■ Stop', exact=True)).to_be_disabled()
+    delayed['run']['status'] = 'cancelled'
+    sockets[-1].send(json.dumps(delayed))
+    expect(sim.get_by_role('status')).to_contain_text('Stopped')
     expect(run).to_be_enabled()
     assert not errors, errors
     page.screenshot(path='/tmp/unlinked-simulation-controls.png')
