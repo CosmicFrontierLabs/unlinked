@@ -49,12 +49,22 @@ pub fn use_plot_width(host: yew::NodeRef) -> u32 {
     {
         let width = width.clone();
         use_effect_with(host, move |host| {
+            let pending = std::rc::Rc::new(std::cell::RefCell::new(
+                None::<gloo_timers::callback::Timeout>,
+            ));
+            let schedule = pending.clone();
             let callback =
                 Closure::<dyn FnMut(js_sys::Array)>::new(move |entries: js_sys::Array| {
                     if let Some(entry) = entries.get(0).dyn_ref::<web_sys::ResizeObserverEntry>() {
                         let measured = entry.content_rect().width().round() as u32;
                         if measured > 0 {
-                            width.set(measured);
+                            // A window drag can report every frame. Rebuild once
+                            // the pane settles, retaining CSS scaling meanwhile.
+                            let width = width.clone();
+                            *schedule.borrow_mut() =
+                                Some(gloo_timers::callback::Timeout::new(80, move || {
+                                    width.set(measured)
+                                }));
                         }
                     }
                 });
@@ -66,6 +76,7 @@ pub fn use_plot_width(host: yew::NodeRef) -> u32 {
                 if let Some(observer) = observer {
                     observer.disconnect();
                 }
+                pending.borrow_mut().take();
                 drop(callback);
             }
         });

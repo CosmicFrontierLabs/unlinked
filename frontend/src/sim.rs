@@ -284,11 +284,11 @@ impl Controller {
         }
         out.push('\n');
         for (row, t) in self.time.iter().enumerate() {
-            out.push_str(&t.to_string());
+            out.push_str(&format!("{t:?}"));
             for col in &self.columns {
                 out.push(',');
                 if let Some(v) = col.get(row) {
-                    out.push_str(&v.to_string());
+                    out.push_str(&format!("{v:?}"));
                 }
             }
             out.push('\n');
@@ -1168,6 +1168,33 @@ pub fn simulation_panel(props: &SimProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_uses_compact_round_trip_numbers_and_quotes_names() {
+        let c = Controller {
+            time: vec![1e300],
+            columns: vec![vec![1e-300]],
+            signals: vec![SimulationSignal {
+                id: "1".into(),
+                name: "model/y,\"value\"".into(),
+            }],
+            ..Default::default()
+        };
+        let csv = c.csv();
+        assert!(csv.starts_with("time,\"model/y,\"\"value\"\"\"\n"), "{csv}");
+        assert!(
+            csv.len() < 80,
+            "exponents must not expand into hundreds of zeros"
+        );
+        let values: Vec<f64> = csv
+            .lines()
+            .last()
+            .unwrap()
+            .split(',')
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert_eq!(values, [1e300, 1e-300]);
+    }
 
     fn config(entries: &[(&str, &str)]) -> SimConfig {
         let raw: BTreeMap<String, String> = entries

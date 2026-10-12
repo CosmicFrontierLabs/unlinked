@@ -3,6 +3,8 @@
 No simulation jobs are created and no models are changed.
 """
 import argparse
+import csv as csv_module
+import io
 import json
 import uuid
 import time
@@ -89,7 +91,9 @@ with sync_playwright() as p:
     with page.expect_download() as exported:
         sim.get_by_role('button', name='Export CSV').click()
     csv = open(exported.value.path()).read()
-    assert csv == 'time,model/output:1,model/control:1\n0,0,0\n0.5,0.5,1\n1,1,2\n', csv
+    rows = list(csv_module.reader(io.StringIO(csv)))
+    assert rows[0] == ['time', 'model/output:1', 'model/control:1']
+    assert [[float(v) for v in row] for row in rows[1:]] == [[0,0,0],[0.5,0.5,1],[1,1,2]]
     # Signal filters preserve selection, and measurements use recorded samples.
     sim.get_by_role('button', name='▸ Measurements').click()
     table = sim.locator('.measurement-table')
