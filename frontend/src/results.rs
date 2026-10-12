@@ -49,6 +49,14 @@ pub struct SimulationControls {
     pub error: Option<String>,
 }
 
+/// An explicit request to add signals to the plot or open a scope's set.
+#[derive(Clone, PartialEq)]
+pub struct PlotRequest {
+    pub serial: u64,
+    pub ids: Vec<String>,
+    pub replace: bool,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct ResultsContext {
     pub run: Option<Rc<ShownRun>>,
@@ -56,6 +64,8 @@ pub struct ResultsContext {
     pub dirty: bool,
     /// Select this recorded signal ID and show the simulation pane.
     pub on_plot: Callback<String>,
+    /// Show exactly these recorded signal IDs, in their requested order.
+    pub on_show_signals: Callback<Vec<String>>,
     pub on_run: Option<Callback<()>>,
     pub on_stop: Option<Callback<()>>,
     pub running: bool,
