@@ -6,13 +6,14 @@ parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--url',required=True)
 parser.add_argument('--model',required=True)
 parser.add_argument('--browser')
+parser.add_argument('--engine', choices=['chromium', 'firefox', 'webkit'], default='chromium')
 args=parser.parse_args()
 with sync_playwright() as p:
-    browser=p.chromium.launch(headless=True,**({'executable_path':args.browser} if args.browser else {}))
+    browser=getattr(p, args.engine).launch(headless=True,**({'executable_path':args.browser} if args.browser else {}))
     page=browser.new_page(viewport={'width':390,'height':844})
     errors=[]
     page.on('pageerror',lambda error:errors.append(str(error)))
-    page.goto(args.url+'/api/auth/dev-login')
+    page.request.get(args.url+'/api/auth/dev-login')
     page.goto(args.url+args.model)
     page.get_by_role('button',name='Simulate',exact=True).click()
     sim=page.get_by_role('region',name='Simulation',exact=True)
@@ -28,6 +29,10 @@ with sync_playwright() as p:
     expect(panel).to_be_visible()
     assert toggle.get_attribute('aria-controls')==panel.get_attribute('id')
     toggle.press('Tab')
+    # Firefox includes scroll containers in sequential keyboard navigation.
+    for _ in range(2):
+        if page.evaluate("document.activeElement.matches('.sim-body, .signal-list')"):
+            page.keyboard.press('Tab')
     expect(sim.get_by_role('searchbox',name='Search signals')).to_be_focused()
     panel.locator('.run-history-item').first.click()
     expect(sim.locator('.sim-status')).to_contain_text('samples')

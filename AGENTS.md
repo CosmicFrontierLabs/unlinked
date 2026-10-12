@@ -101,7 +101,9 @@ Note: memory-serve 2.x requires axum 0.8+. For axum 0.7, use memory-serve 0.6.0 
   Reference runs keep independent time grids and match signals by recorded ID.
   Cursor measurements use recorded samples, not interpolated values.
 - `frontend/browser-tests/` contains Playwright checks against a dev server.
-  Use `--url`, `--model /projects/<id>/files/<id>`, and optional `--browser`
+  Use `--url`, `--model /projects/<id>/files/<id>`, and optional
+  `--browser` executable path. Select a browser with
+  `--engine chromium|firefox|webkit` (default Chromium)
   (the project-browser check instead takes `--project /projects/<id>`).
   Seed a model with a completed simulation first; the parameter check expects
   a Step block first, as in `digital_pi_first_order`. These checks mock writes

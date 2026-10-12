@@ -16,18 +16,21 @@ from playwright.sync_api import sync_playwright, expect
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--url', required=True)
 parser.add_argument('--model', required=True)
-parser.add_argument('--browser', help='Optional Chromium executable path')
+parser.add_argument('--browser', help='Optional browser executable path')
+parser.add_argument('--engine', choices=['chromium', 'firefox', 'webkit'], default='chromium')
 args = parser.parse_args()
 
 with sync_playwright() as p:
     launch = {'headless': True}
     if args.browser:
         launch['executable_path'] = args.browser
-    browser = p.chromium.launch(**launch)
+    browser = getattr(p, args.engine).launch(**launch)
     page = browser.new_page(viewport={'width': 1440, 'height': 1000})
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
-    page.goto(args.url + '/api/auth/dev-login')
+    page.request.get(args.url + '/api/auth/dev-login')
+    page.goto(args.url + '/')
+    expect(page.get_by_role('button', name='Sign out', exact=True)).to_be_visible()
     # Create an in-app history entry so Back can exercise the leave guard.
     page.evaluate("path => { history.pushState(null, '', path); window.dispatchEvent(new PopStateEvent('popstate')); }", args.model)
     diagram = page.get_by_role('region', name='Diagram', exact=True)
