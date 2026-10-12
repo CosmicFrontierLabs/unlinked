@@ -101,6 +101,26 @@ fn mutate_role<Fut>(
     );
 }
 
+/// Close a nonmodal side panel and return focus to its disclosure button.
+fn close_panel(open: UseStateHandle<bool>, button: NodeRef) -> Callback<()> {
+    Callback::from(move |()| {
+        open.set(false);
+        if let Some(button) = button.cast::<web_sys::HtmlElement>() {
+            let _ = button.focus();
+        }
+    })
+}
+
+fn panel_escape(close: Callback<()>) -> Callback<KeyboardEvent> {
+    Callback::from(move |event: KeyboardEvent| {
+        if event.key() == "Escape" {
+            event.prevent_default();
+            event.stop_propagation();
+            close.emit(());
+        }
+    })
+}
+
 fn error_line(error: &Option<ApiError>) -> Html {
     match error {
         Some(e) => html! { <p class="error" role="alert">{ e.to_string() }</p> },
@@ -686,6 +706,9 @@ pub fn file_page(props: &FileProps) -> Html {
     let error = use_state(|| None::<ApiError>);
     let tab = use_state(|| Tab::Diagram);
     let history_open = use_state(|| false);
+    let history_button = use_node_ref();
+    let close_history = close_panel(history_open.clone(), history_button.clone());
+    let history_keys = panel_escape(close_history.clone());
     let simulation_running = use_state(|| false);
     let shown_run = use_state(|| None::<Rc<crate::results::ShownRun>>);
     let requested_signals = use_state(|| None::<crate::results::PlotRequest>);
@@ -1071,7 +1094,7 @@ pub fn file_page(props: &FileProps) -> Html {
                 if newer_available { <button onclick={show_latest}>{ "Open newer version" }</button> }
                 <span class="spacer" />
                 { error_line(&error) }
-                <button onclick={toggle_history} aria-expanded={history_open.to_string()} aria-controls="file-history">
+                <button ref={history_button} onclick={toggle_history} aria-expanded={history_open.to_string()} aria-controls="file-history">
                     { if *history_open { "Hide history" } else { "History" } }
                 </button>
                 <a class="button" download="" href={match loaded_version_id {
@@ -1088,8 +1111,11 @@ pub fn file_page(props: &FileProps) -> Html {
             </div>
             <div class="file-body">
                 <div class="file-main">{ body }</div>
-                <aside id="file-history" class="history" hidden={!*history_open} aria-label="Version history">
-                    <h4>{ "Version history" }</h4>
+                <aside id="file-history" class="history" hidden={!*history_open} aria-label="Version history" onkeydown={history_keys}>
+                    <div class="history-heading">
+                        <h4>{ "Version history" }</h4>
+                        <button aria-label="Close version history" onclick={close_history.reform(|_: MouseEvent| ())}>{ "×" }</button>
+                    </div>
                     { view(&versions, version_list) }
                 </aside>
             </div>
@@ -1174,6 +1200,21 @@ fn change_label(change: &BlockChange) -> (&'static str, String) {
 #[function_component(ComparePage)]
 pub fn compare_page(props: &CompareProps) -> Html {
     let (project_id, file_id, old, new) = (props.project_id, props.file_id, props.old, props.new);
+    let changes_open = use_state(|| {
+        gloo_utils::window()
+            .inner_width()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1024.0)
+            > 760.0
+    });
+    let changes_button = use_node_ref();
+    let close_changes = close_panel(changes_open.clone(), changes_button.clone());
+    let changes_keys = panel_escape(close_changes.clone());
+    let toggle_changes = {
+        let open = changes_open.clone();
+        Callback::from(move |_: MouseEvent| open.set(!*open))
+    };
     let comparison = use_fetch(
         (project_id, file_id, old, new),
         move |(p, f, old, new)| async move {
@@ -1213,6 +1254,9 @@ pub fn compare_page(props: &CompareProps) -> Html {
                     <strong>{ &c.path }</strong>
                     <span class="muted">{ format!("v{} → v{}", c.old_version, c.new_version) }</span>
                     <span class="spacer" />
+                    <button ref={changes_button.clone()} onclick={toggle_changes.clone()} aria-expanded={changes_open.to_string()} aria-controls="comparison-changes">
+                        { if *changes_open { "Hide changes" } else { "Changes" } }
+                    </button>
                     <span class="legend added">{ "added" }</span>
                     <span class="legend modified">{ "modified" }</span>
                     <span class="legend moved">{ "moved" }</span>
@@ -1222,8 +1266,11 @@ pub fn compare_page(props: &CompareProps) -> Html {
                     <div class="file-main">
                         <DiagramView key={format!("{old}-{new}")} model={c.model.clone()} diff={Some(c.diff.clone())} />
                     </div>
-                    <aside class="history changes">
-                        <h4>{ "Changes" }</h4>
+                    <aside id="comparison-changes" class="history changes" hidden={!*changes_open} aria-label="Model changes" onkeydown={changes_keys.clone()}>
+                        <div class="history-heading">
+                            <h4>{ "Changes" }</h4>
+                            <button aria-label="Close model changes" onclick={close_changes.reform(|_: MouseEvent| ())}>{ "×" }</button>
+                        </div>
                         if d.is_empty() {
                             <p class="muted">{ "No structural changes." }</p>
                         }
