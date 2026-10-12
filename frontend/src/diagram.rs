@@ -972,6 +972,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // The block under a resting pointer and where its card shows, in
     // container pixels.
     let hover = use_state(|| None::<(String, f64, f64)>);
+    // The line under a resting pointer, by index, highlighted as a whole.
+    let hover_line = use_state(|| None::<usize>);
     // Whether the model browser and library are shown beside the canvas.
     let side = use_state(|| true);
     // The outline of a block being resized.
@@ -1342,17 +1344,37 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let (model, shown) = (props.model.clone(), (*path).clone());
         let (drag_lines, guides, theme) = (drag_lines.clone(), guides.clone(), *theme);
-        let hover = hover.clone();
+        let (hover, hover_line) = (hover.clone(), hover_line.clone());
         Callback::from(move |e: MouseEvent| {
             let (cx, cy) = (e.client_x() as f64, e.client_y() as f64);
             // The hover card follows the block under a resting pointer, and
-            // goes while dragging.
-            let over = drag
+            // goes while dragging; so does the highlight of a line's tree.
+            let resting = drag
                 .borrow()
                 .as_ref()
-                .is_none_or(|d| matches!(d, Drag::Ended { .. }))
+                .is_none_or(|d| matches!(d, Drag::Ended { .. }));
+            let over = resting
                 .then(|| block_group(e.target())?.get_attribute("data-sid"))
                 .flatten();
+            let line = resting
+                .then(|| {
+                    let hit = closest(e.target(), "polyline.wire-hit, polyline.trunk-hit")?;
+                    let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+                    let sys = model.system_at(&refs)?;
+                    match endpoint_of(&hit, "src-") {
+                        Some(src) => sys.lines.iter().position(|l| l.src.as_ref() == Some(&src)),
+                        None => {
+                            let dst = endpoint_of(&hit, "dst-")?;
+                            sys.lines
+                                .iter()
+                                .position(|l| unlinked_model::edit::drives(l, &dst))
+                        }
+                    }
+                })
+                .flatten();
+            if line != *hover_line {
+                hover_line.set(line);
+            }
             if over.as_ref() != hover.as_ref().map(|(id, ..)| id) {
                 let r = container
                     .cast::<HtmlElement>()
@@ -2456,6 +2478,13 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             .map(|(i, _)| format!(".diagram .annotation[data-annotation=\"{i}\"] {{ fill: #ff9e64; }}"))
             .unwrap_or_default(),
     };
+    // A hovered line lights up with all its branches.
+    let highlight = match *hover_line {
+        Some(i) => format!(
+            ".diagram g[data-line=\"{i}\"] polyline {{ stroke: #7dcfff; stroke-width: 2.5px; }}\n.diagram g[data-line=\"{i}\"] polygon {{ fill: #7dcfff; }}\n"
+        ) + &highlight,
+        None => highlight,
+    };
     // Lines being previewed moved are hidden where they were.
     let highlight = match &*drag_lines {
         Some((touched, _)) => {
@@ -2778,8 +2807,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"))}
                     ref={container.clone()} tabindex="0"
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={{
-                        let (hover, end_drag) = (hover.clone(), end_drag.clone());
-                        Callback::from(move |e: MouseEvent| { hover.set(None); end_drag.emit(e) })
+                        let (hover, hover_line, end_drag) = (hover.clone(), hover_line.clone(), end_drag.clone());
+                        Callback::from(move |e: MouseEvent| {
+                            hover.set(None);
+                            hover_line.set(None);
+                            end_drag.emit(e)
+                        })
                     }}
                     {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop} {oncontextmenu}>
                     <style>{ highlight }</style>
