@@ -36,6 +36,12 @@ with sync_playwright() as p:
         confirmations.append(d.type)
         d.accept() if accepted else d.dismiss()
     page.on('dialog', dialog)
+    skip = page.get_by_role('link', name='Skip to content', exact=True)
+    skip.focus()
+    skip.press('Enter')
+    expect(page.locator('main')).to_be_focused()
+    assert page.url == args.url + args.model and not confirmations
+    expect(page.get_by_role('navigation', name='Main navigation').get_by_role('link', name='Projects', exact=True)).to_have_attribute('aria-current', 'page')
     page.get_by_role('button', name='Sign out', exact=True).click()
     assert confirmations == ['confirm'] and not calls
     expect(diagram).to_be_visible()

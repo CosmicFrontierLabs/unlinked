@@ -1516,7 +1516,6 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .plot-actions { display: flex; align-items: center; gap: .75rem; padding: .5rem .75rem 0; font-size: .8rem; }
 .plot-actions span { color: #a9b1d6; }
 .plot-actions button { font-size: .8rem; }
-<<<<<<< HEAD
 /* Project browser: folders, global search, and bounded file lists. */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .project-files { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 1rem 0 2rem; }
@@ -1557,14 +1556,12 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .comparison-error { margin: .75rem; }
 .runs .compare-run { margin-top: .3rem; padding: .2rem .5rem; font-size: .75rem; }
 @media (max-width: 650px) { .comparison-banner { flex-direction: column; } }
-=======
 
 /* Application navigation: stable two-row layout on phones. */
 .topbar { position: relative; }
 .topbar nav { align-self: stretch; align-items: stretch; gap: .25rem; min-width: 0; }
-.topbar nav > span { display: flex; align-items: stretch; }
 .topbar nav a { display: flex; align-items: center; padding: 0 .65rem; white-space: nowrap; border-bottom: 2px solid transparent; }
-.topbar nav .current a { color: var(--fg); border-bottom-color: var(--blue); background: rgba(122,162,247,.07); }
+.topbar nav a.current { color: var(--fg); border-bottom-color: var(--blue); background: rgba(122,162,247,.07); }
 .topbar .brand, .topbar .user button { white-space: nowrap; flex-shrink: 0; }
 .topbar .user { min-width: 0; }
 .user-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1582,4 +1579,3 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
     .topbar .user-name { max-width: 120px; }
     .topbar .avatar { display: none; }
 }
->>>>>>> 9db2fa0 (Keep app navigation readable and guard sign-out before logout)
