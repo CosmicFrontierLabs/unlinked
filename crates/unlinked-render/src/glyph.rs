@@ -34,10 +34,11 @@ pub fn appearance(block: &Block) -> Appearance {
     let shape = Shape::Rect;
     let icon = match block.block_type.as_str() {
         "Gain" => {
-            let g = p("Gain");
+            // A triangle leaves about half its box for text.
+            let g = shown_value(block, non_empty(p("Gain"), "1"), 0.5, "-K-");
             return Appearance {
                 shape: Shape::Triangle,
-                icon: text(if g.is_empty() { "1" } else { &g }),
+                icon: text(&g),
             };
         }
         "Sum" => {
@@ -68,7 +69,7 @@ pub fn appearance(block: &Block) -> Appearance {
                 icon: Icon::None,
             };
         }
-        "Constant" => text(&non_empty(p("Value"), "1")),
+        "Constant" => text(&shown_value(block, non_empty(p("Value"), "1"), 0.85, "-C-")),
         "Product" => {
             let inputs = p("Inputs");
             if inputs.contains('/') {
@@ -335,6 +336,23 @@ fn first_string_literal(s: &str) -> Option<String> {
         out.push(c);
     }
     None
+}
+
+/// Smallest font a parameter value shown on a block is drawn at; a value
+/// needing less shows Simulink's placeholder instead.
+const LEGIBLE: f64 = 7.0;
+
+/// `value` as a block shows it: itself if it fits the block legibly
+/// (within `fill` of its width and height), else `placeholder`, as Simulink
+/// shows "-K-" for a gain too long to draw.
+fn shown_value(block: &Block, value: String, fill: f64, placeholder: &str) -> String {
+    let r = block.position;
+    let lines: Vec<&str> = value.lines().collect();
+    if fit_font(&lines, r.width() * fill, r.height() * fill, f64::MAX) < LEGIBLE {
+        placeholder.to_string()
+    } else {
+        value
+    }
 }
 
 fn non_empty(s: String, default: &str) -> String {
@@ -664,6 +682,39 @@ pub fn draw_icon(svg: &mut Svg, icon: &Icon, inner: Rect, fg: &str, max_font: f6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_values_show_placeholders() {
+        let block = |ty: &str, key: &str, value: &str| Block {
+            id: "1".into(),
+            block_type: ty.into(),
+            name: "b".into(),
+            position: Rect::new(0.0, 0.0, 40.0, 30.0),
+            orientation: Default::default(),
+            mirrored: false,
+            ports: Default::default(),
+            parameters: [(key.to_string(), value.to_string())].into(),
+            mask: None,
+            library_source: None,
+            subsystem: None,
+            style: Default::default(),
+            interface: None,
+        };
+        let shown = |b: &Block| match appearance(b).icon {
+            Icon::Text(lines) => lines.join("\n"),
+            _ => String::new(),
+        };
+        assert_eq!(shown(&block("Gain", "Gain", "20")), "20");
+        assert_eq!(
+            shown(&block("Gain", "Gain", "[0 1 0 0; 0 -0.18 2.67 0]")),
+            "-K-"
+        );
+        assert_eq!(shown(&block("Constant", "Value", "3.5")), "3.5");
+        assert_eq!(
+            shown(&block("Constant", "Value", "[1 2 3 4 5 6 7 8 9 10]")),
+            "-C-"
+        );
+    }
 
     #[test]
     fn polynomials() {
