@@ -1175,18 +1175,16 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     // Bulk actions apply to the rows shown; search exposes any other signal.
     let visible_signals: Vec<usize> = matching_signals.iter().take(200).copied().collect();
     let select_visible = |selected: bool| {
-        let (ctl, rebind, visible) = (
-            ctl.clone(),
-            rebind.clone(),
-            visible_signals.iter().copied().collect::<HashSet<_>>(),
-        );
+        let (ctl, rebind, visible) = (ctl.clone(), rebind.clone(), visible_signals.clone());
         Callback::from(move |_: MouseEvent| {
             let mut c = ctl.borrow_mut();
             if selected {
-                c.plotted.extend(&visible);
-                c.plotted.sort_unstable();
-                c.plotted.dedup();
+                // Retain Scope/click order, then append in displayed order.
+                let mut existing: HashSet<_> = c.plotted.iter().copied().collect();
+                c.plotted
+                    .extend(visible.iter().copied().filter(|i| existing.insert(*i)));
             } else {
+                let visible: HashSet<_> = visible.iter().copied().collect();
                 c.plotted.retain(|i| !visible.contains(i));
             }
             drop(c);
