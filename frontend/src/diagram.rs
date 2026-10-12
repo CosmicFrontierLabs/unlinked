@@ -851,6 +851,47 @@ fn align(
     (adjusted, guides)
 }
 
+/// The edits adding block `add` (an `AddBlock`) spliced into the line
+/// driving `dst` of `sys`: the line's source then feeds the new block's
+/// first input and its first output feeds `dst`. `None` unless the line is
+/// there and the block, as created, has an input and an output.
+fn splice_edits(sys: &System, system: &SystemRef, add: &Edit, dst: &Endpoint) -> Option<Vec<Edit>> {
+    let Edit::AddBlock { id, block_type, .. } = add else {
+        return None;
+    };
+    let descriptor = catalog::find(block_type)?;
+    let catalog::PortResolution::Known(ports) =
+        descriptor.resolve_ports(&descriptor.creation_parameters())
+    else {
+        return None;
+    };
+    if ports.inputs == 0 || ports.outputs == 0 {
+        return None;
+    }
+    let src = unlinked_model::edit::line_into(sys, dst)?.src.clone()?;
+    let port = |kind| Endpoint {
+        block: id.clone(),
+        port: PortRef { kind, index: 1 },
+    };
+    Some(vec![
+        add.clone(),
+        Edit::Disconnect {
+            system: system.clone(),
+            dst: dst.clone(),
+        },
+        Edit::Connect {
+            system: system.clone(),
+            src,
+            dst: port(PortKind::In),
+        },
+        Edit::Connect {
+            system: system.clone(),
+            src: port(PortKind::Out),
+            dst: dst.clone(),
+        },
+    ])
+}
+
 /// An orthogonal path from `a` to `b` turning halfway across, as a new
 /// connection is previewed.
 fn elbow(a: Point, b: Point) -> Vec<Point> {
@@ -2834,6 +2875,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         );
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         let recent = recent.clone();
+        let (on_edits, shown) = (props.on_edit.clone(), (*path).clone());
         Callback::from(move |e: DragEvent| {
             let Some(on_edit) = &on_edit else {
                 return;
@@ -2854,7 +2896,18 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 if let Edit::AddBlock { id, .. } = &edit {
                     *select_created.borrow_mut() = Some(id.clone());
                 }
-                on_edit.emit(edit);
+                // Dropped on a line, a block with an input and an output is
+                // spliced into it, as in Simulink.
+                let onto =
+                    closest(e.target(), "polyline.wire-hit").and_then(|w| endpoint_of(&w, "dst-"));
+                let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+                let splice = onto
+                    .zip(model.system_at(&refs))
+                    .and_then(|(dst, sys)| splice_edits(sys, &system_ref, &edit, &dst));
+                match (splice, &on_edits) {
+                    (Some(group), Some(on_edits)) => on_edits.emit(group),
+                    _ => on_edit.emit(edit),
+                }
                 if let Some(d) = catalog::find(&type_key) {
                     recent.set(Rc::new(remember_block(d.type_key)));
                 }
@@ -5023,6 +5076,38 @@ mod tests {
         let (offset, guides) = align(&model.root, &moving, (0.0, -18.0), 0.5);
         assert_eq!(offset, (0.0, -18.0));
         assert!(guides.is_empty());
+    }
+
+    #[test]
+    fn blocks_dropped_on_lines_are_spliced_in() {
+        let mdl = "Model {\n Name m\n System {\n Name m\n Block {\n BlockType Gain\n Name a\n SID 1\n Ports [1, 1]\n Position [0, 0, 30, 30]\n }\n Block {\n BlockType Gain\n Name b\n SID 2\n Ports [1, 1]\n Position [200, 0, 230, 30]\n }\n Line {\n SrcBlock a\n SrcPort 1\n DstBlock b\n DstPort 1\n }\n }\n}\n";
+        let mut model = unlinked_import::import_mdl("m.mdl", mdl).unwrap();
+        let add = |ty: &str| Edit::AddBlock {
+            system: vec![],
+            id: "3".into(),
+            block_type: ty.into(),
+            name: "s".into(),
+            position: Rect::new(100.0, 0.0, 130.0, 30.0),
+        };
+        let dst = Endpoint {
+            block: "2".into(),
+            port: PortRef {
+                kind: PortKind::In,
+                index: 1,
+            },
+        };
+        // A sink has no output to splice with.
+        assert!(splice_edits(&model.root, &vec![], &add("Terminator"), &dst).is_none());
+        let group = splice_edits(&model.root, &vec![], &add("Saturate"), &dst).unwrap();
+        unlinked_model::edit::apply_batch(&mut model, &group).unwrap();
+        let mut pairs: Vec<(String, String)> = model
+            .root
+            .connections()
+            .iter()
+            .map(|c| (c.src.block.0.clone(), c.dst.block.0.clone()))
+            .collect();
+        pairs.sort();
+        assert_eq!(pairs, [("1".into(), "3".into()), ("3".into(), "2".into())]);
     }
 
     #[test]
