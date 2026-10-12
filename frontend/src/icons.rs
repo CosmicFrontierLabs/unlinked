@@ -99,6 +99,10 @@ pub fn close() -> Html {
     icon(html! { <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" /> })
 }
 
+pub fn probe() -> Html {
+    icon(html! { <><path d="M1.5 11h4l2-6 2 8 1.5-4h3.5" /></> })
+}
+
 pub fn sidebar() -> Html {
     icon(
         html! { <><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" /><path d="M6 2.5v11M3 5.5h1.5M3 8h1.5" /></> },

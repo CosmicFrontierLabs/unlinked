@@ -1097,6 +1097,55 @@ button.active {
     stroke-dasharray: none;
 }
 
+/* Port value labels: recorded values at each line's source */
+.overlay .port-values text {
+    fill: #9ece6a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    paint-order: stroke;
+    stroke: var(--bg);
+    stroke-width: 3px;
+    stroke-linejoin: round;
+}
+
+.diagram.light .overlay .port-values text {
+    fill: #2d6a00;
+    stroke: #ffffff;
+}
+
+.overlay .port-values.stale text {
+    fill: var(--muted);
+    font-style: italic;
+}
+
+button.tool.stale {
+    color: var(--muted);
+}
+
+.inspector .recorded {
+    margin-top: 0.8rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border);
+}
+
+.inspector .recorded h4 {
+    margin: 0 0 0.3rem;
+    font-size: 0.85rem;
+}
+
+svg.sparkline {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin: 0.2rem 0 0.4rem;
+    background: var(--bg-alt);
+    border-radius: 4px;
+}
+
+svg.sparkline .sample-mark {
+    stroke: var(--orange);
+    stroke-dasharray: 2 2;
+}
+
 .overlay line.guide {
     stroke: var(--teal);
     stroke-width: 1;
