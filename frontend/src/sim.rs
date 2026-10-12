@@ -1035,7 +1035,6 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     c.plotted.remove(pos);
                 } else {
                     c.plotted.push(i);
-                    c.plotted.sort_unstable();
                 }
             }
             rebind.dispatch(());
@@ -1138,7 +1137,12 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         });
     }
     {
-        let (ctl, rebind) = (ctl.clone(), rebind.clone());
+        let (ctl, rebind, query, generated) = (
+            ctl.clone(),
+            rebind.clone(),
+            signal_query.clone(),
+            show_generated.clone(),
+        );
         use_effect_with(
             (props.requested_signals.clone(), signal_revision),
             move |(requested, _)| {
@@ -1146,6 +1150,12 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     let mut c = ctl.borrow_mut();
                     let chosen = requested_indices(&c.signals, request);
                     if !chosen.is_empty() {
+                        // Explicit diagram navigation should reveal the signals
+                        // it selected even after an unrelated inspector filter.
+                        query.set(String::new());
+                        if chosen.iter().any(|&i| is_generated(&c.signals[i])) {
+                            generated.set(true);
+                        }
                         let next = if request.replace {
                             chosen
                         } else {
