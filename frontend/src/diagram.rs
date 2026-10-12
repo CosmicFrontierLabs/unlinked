@@ -2005,8 +2005,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .cast::<HtmlElement>()
                     .map(|el| el.get_bounding_client_rect());
                 line_tip.set(line.zip(r).map(|(i, r)| {
-                    let x = (cx - r.left() + 14.0).min(r.width() - 220.0).max(0.0);
-                    let y = (cy - r.top() + 18.0).min(r.height() - 60.0).max(0.0);
+                    // At the card's largest: 18rem wide, four lines.
+                    let x = (cx - r.left() + 14.0).min(r.width() - 300.0).max(0.0);
+                    let y = (cy - r.top() + 18.0).min(r.height() - 110.0).max(0.0);
                     (i, x, y)
                 }));
             }
@@ -3876,9 +3877,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         <div class="hover-card line-tip" style={format!("left: {x}px; top: {y}px;")}>
                             <div class="hover-name">{ name }</div>
                             <div class="mono">{ value }</div>
-                            <div class="muted">{ format!("at t = {}", run.as_ref()
-                                .and_then(|r| r.time.get(r.sample_index).copied())
-                                .map(short_value).unwrap_or_default()) }</div>
+                            <div class="muted">{ run.as_ref().map(|r| format!("at t = {} in the v{} run",
+                                r.time.get(r.sample_index).copied().map(short_value).unwrap_or_default(),
+                                r.version)).unwrap_or_default() }</div>
+                            if stale {
+                                <div class="muted">{ "The diagram has changed since this run." }</div>
+                            }
                         </div>
                     }
                     if let Some((id, x, y)) = &*hover {
