@@ -26,7 +26,7 @@ use axum::{middleware, Router};
 use clap::Parser;
 use diesel::PgConnection;
 use handlers::{auth, files, orgs, projects};
-use memory_serve::{load_assets, CacheControl, MemoryServe};
+use memory_serve::CacheControl;
 use std::sync::Arc;
 use tower_cookies::CookieManagerLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -75,62 +75,62 @@ async fn api_not_found() -> error::ApiError {
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/auth/providers", get(auth::providers))
-        .route("/api/auth/login/:provider", get(auth::login))
-        .route("/api/auth/callback/:provider", get(auth::callback))
+        .route("/api/auth/login/{provider}", get(auth::login))
+        .route("/api/auth/callback/{provider}", get(auth::callback))
         .route("/api/auth/dev-login", get(auth::dev_login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
         .route("/api/orgs", get(orgs::list).post(orgs::create))
         .route(
-            "/api/orgs/:org_id",
+            "/api/orgs/{org_id}",
             get(orgs::get).patch(orgs::update).delete(orgs::delete),
         )
         .route(
-            "/api/orgs/:org_id/members",
+            "/api/orgs/{org_id}/members",
             get(orgs::members).post(orgs::add_member),
         )
         .route(
-            "/api/orgs/:org_id/members/:user_id",
+            "/api/orgs/{org_id}/members/{user_id}",
             axum::routing::patch(orgs::update_member).delete(orgs::remove_member),
         )
-        .route("/api/orgs/:org_id/audit", get(orgs::audit_log))
+        .route("/api/orgs/{org_id}/audit", get(orgs::audit_log))
         .route(
-            "/api/orgs/:org_id/projects",
+            "/api/orgs/{org_id}/projects",
             get(projects::list_in_org).post(projects::create),
         )
         .route("/api/projects", get(projects::list_all))
         .route(
-            "/api/projects/:project_id",
+            "/api/projects/{project_id}",
             get(projects::get)
                 .patch(projects::update)
                 .delete(projects::delete),
         )
         .route(
-            "/api/projects/:project_id/members",
+            "/api/projects/{project_id}/members",
             get(projects::members).post(projects::add_member),
         )
         .route(
-            "/api/projects/:project_id/members/:user_id",
+            "/api/projects/{project_id}/members/{user_id}",
             axum::routing::patch(projects::update_member).delete(projects::remove_member),
         )
         .route(
-            "/api/projects/:project_id/files",
+            "/api/projects/{project_id}/files",
             get(files::list).post(files::upload),
         )
         .route(
-            "/api/projects/:project_id/files/:file_id",
+            "/api/projects/{project_id}/files/{file_id}",
             get(files::get).patch(files::rename).delete(files::delete),
         )
         .route(
-            "/api/projects/:project_id/files/:file_id/content",
+            "/api/projects/{project_id}/files/{file_id}/content",
             get(files::latest_content),
         )
         .route(
-            "/api/projects/:project_id/files/:file_id/versions",
+            "/api/projects/{project_id}/files/{file_id}/versions",
             get(files::versions),
         )
         .route(
-            "/api/projects/:project_id/files/:file_id/versions/:version_id/content",
+            "/api/projects/{project_id}/files/{file_id}/versions/{version_id}/content",
             get(files::version_content),
         )
 }
@@ -146,7 +146,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     // Pre-compressed (brotli/gzip), content-negotiated frontend assets with
     // ETag/304 and an SPA fallback to index.html. Assets are embedded at build
     // time in release builds and read from disk in debug builds.
-    let frontend = MemoryServe::new(load_assets!("../frontend/dist"))
+    let frontend = memory_serve::load!()
         .index_file(Some("/index.html"))
         .fallback(Some("/index.html"))
         .fallback_status(StatusCode::OK)
@@ -170,7 +170,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         )
         // Unknown API paths are errors, not client-side routes.
         .route("/api", any(api_not_found))
-        .route("/api/*rest", any(api_not_found))
+        .route("/api/{*rest}", any(api_not_found))
         .with_state(state.clone())
         .route(
             shared::AppSocket::PATH,

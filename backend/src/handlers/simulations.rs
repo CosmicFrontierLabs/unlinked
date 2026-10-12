@@ -142,8 +142,8 @@ pub fn start_maintenance(state: Arc<AppState>) {
 }
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/files/:file_id/simulations", post(run).get(list))
-        .route("/api/simulations/:run_id", get(detail))
+        .route("/api/files/{file_id}/simulations", post(run).get(list))
+        .route("/api/simulations/{run_id}", get(detail))
 }
 
 fn validate(request: &SimulationRequest) -> ApiResult<()> {

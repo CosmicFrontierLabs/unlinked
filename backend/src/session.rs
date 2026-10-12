@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use axum::async_trait;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header;
 use axum::http::request::Parts;
@@ -105,7 +104,6 @@ pub fn clear_session_cookie(cookies: &Cookies, state: &AppState) {
 /// The signed-in user. Rejects with 401 when there is no valid session.
 pub struct CurrentUser(pub User);
 
-#[async_trait]
 impl FromRequestParts<Arc<AppState>> for CurrentUser {
     type Rejection = ApiError;
 
@@ -137,7 +135,6 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
 /// with [`crate::access::resolve_project_access`].
 pub struct WsUser(pub User);
 
-#[async_trait]
 impl FromRequestParts<Arc<AppState>> for WsUser {
     type Rejection = ApiError;
 

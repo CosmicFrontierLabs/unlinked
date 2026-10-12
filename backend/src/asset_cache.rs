@@ -45,7 +45,7 @@ mod tests {
     #[tokio::test]
     async fn stable_worker_assets_revalidate_but_other_assets_keep_cache_policy() {
         let app = Router::new()
-            .route("/*asset", get(asset))
+            .route("/{*asset}", get(asset))
             .layer(middleware::from_fn(revalidate_worker));
         for name in [
             "unlinked-diagnostics-worker_loader.js",
