@@ -66,7 +66,7 @@ fn switch(route: Route) -> Html {
         Route::LocalView => html! { <LocalViewer /> },
         Route::Org { org_id } => html! { <RequireLogin><OrgPage {org_id} /></RequireLogin> },
         Route::Project { project_id } => {
-            html! { <RequireLogin><ProjectPage {project_id} /></RequireLogin> }
+            html! { <RequireLogin><ProjectPage key={project_id.to_string()} {project_id} /></RequireLogin> }
         }
         Route::File {
             project_id,

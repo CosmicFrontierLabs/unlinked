@@ -1,5 +1,8 @@
 //! Organization, project and file pages backed by the server API.
 
+mod file_browser;
+use file_browser::FileBrowser;
+
 use crate::api::{self, ApiError};
 use crate::diagram::DiagramView;
 use crate::editor::{Base, ModelEditor};
@@ -380,6 +383,12 @@ pub struct ProjectProps {
     pub project_id: Uuid,
 }
 
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct FolderQuery {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    folder: String,
+}
+
 #[function_component(ProjectPage)]
 pub fn project_page(props: &ProjectProps) -> Html {
     let id = props.project_id;
@@ -395,7 +404,16 @@ pub fn project_page(props: &ProjectProps) -> Html {
     let editor = role.is_some_and(|r| r >= ProjectRole::Editor);
     let owner = role == Some(ProjectRole::Owner);
 
-    let folder = use_state(String::new);
+    let location = use_location().expect("router location");
+    let navigator = use_navigator().expect("router navigator");
+    let browsed_folder = location.query::<FolderQuery>().unwrap_or_default().folder;
+    // Browsing chooses the upload destination, but typing a new destination
+    // does not move the browser into a folder that does not exist yet.
+    let folder = use_state(|| browsed_folder.clone());
+    {
+        let folder = folder.clone();
+        use_effect_with(browsed_folder.clone(), move |path| folder.set(path.clone()));
+    }
     let message = use_state(String::new);
     let uploading = use_state(|| false);
     let on_upload = {
@@ -446,45 +464,29 @@ pub fn project_page(props: &ProjectProps) -> Html {
         })
     };
 
-    let file_rows = {
+    let delete_file = {
         let (reload, error) = (reload.clone(), error.clone());
-        move |files: &Vec<FileInfo>| -> Html {
-            if files.is_empty() {
-                return html! { <p class="muted">{ "No files yet." }</p> };
+        Callback::from(move |(file_id, path): (Uuid, String)| {
+            if gloo_utils::window()
+                .confirm_with_message(&format!("Delete {path} from this project?"))
+                .unwrap_or(false)
+            {
+                mutate(api::delete_file(id, file_id), reload.clone(), error.clone());
             }
-            let mut sorted: Vec<&FileInfo> = files.iter().collect();
-            sorted.sort_by(|a, b| a.path.cmp(&b.path));
-            html! {
-                <table>
-                    <tr><th>{ "Path" }</th><th>{ "Version" }</th><th>{ "Size" }</th><th>{ "Updated by" }</th><th>{ "Updated" }</th><th /></tr>
-                    { for sorted.into_iter().map(|f| {
-                        let file_id = f.id;
-                        let on_delete = {
-                            let (reload, error) = (reload.clone(), error.clone());
-                            let path = f.path.clone();
-                            Callback::from(move |_: MouseEvent| {
-                                if gloo_utils::window().confirm_with_message(&format!("Delete {path}?")).unwrap_or(false) {
-                                    mutate(api::delete_file(id, file_id), reload.clone(), error.clone());
-                                }
-                            })
-                        };
-                        html! {
-                            <tr>
-                                <td><Link<Route> to={Route::File { project_id: id, file_id }}>{ &f.path }</Link<Route>></td>
-                                <td>{ format!("v{}", f.latest.version) }</td>
-                                <td class="muted">{ size(f.latest.size_bytes) }</td>
-                                <td>{ who(&f.latest.author) }</td>
-                                <td class="muted">{ when(&f.latest.created_at) }</td>
-                                <td>
-                                    <a class="button" href={format!("/api/projects/{id}/files/{file_id}/content")}>{ "Download" }</a>
-                                    if editor { <button onclick={on_delete}>{ "Delete" }</button> }
-                                </td>
-                            </tr>
-                        }
-                    }) }
-                </table>
+        })
+    };
+    let browse_folder = {
+        let error = error.clone();
+        Callback::from(move |folder: String| {
+            if let Err(e) = navigator
+                .push_with_query(&Route::Project { project_id: id }, &FolderQuery { folder })
+            {
+                error.set(Some(ApiError {
+                    status: 0,
+                    message: format!("Cannot open folder: {e}"),
+                }));
             }
-        }
+        })
     };
 
     let email = use_state(String::new);
@@ -575,15 +577,15 @@ pub fn project_page(props: &ProjectProps) -> Html {
             <h2>{ "Files" }</h2>
             if editor {
                 <div class="inline-form">
-                    { text_input(&folder, "Folder (optional)") }
+                    { text_input(&folder, "Upload folder (optional)") }
                     { text_input(&message, "Change message") }
                     <label class="button primary">
                         { if *uploading { "Uploading…" } else { "Upload files…" } }
-                        <input type="file" multiple=true hidden=true onchange={on_upload} />
+                        <input type="file" multiple=true hidden=true onchange={on_upload} disabled={*uploading} />
                     </label>
                 </div>
             }
-            { view(&files, file_rows) }
+            { view(&files, |files: &Vec<FileInfo>| html! { <FileBrowser files={files.clone()} folder={browsed_folder.clone()} on_folder={browse_folder.clone()} can_delete={editor} on_delete={delete_file.clone()} /> }) }
             <h2>{ "Members" }</h2>
             <p class="muted">{ "Explicit project members. Organization members also get the project's default access." }</p>
             { view(&members, member_rows) }
