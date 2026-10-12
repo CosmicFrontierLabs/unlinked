@@ -10,6 +10,7 @@
 use crate::api;
 use crate::diagnostics_worker::{DiagnosticOutcome, DiagnosticsWorker};
 use crate::diagram::DiagramView;
+use crate::icons;
 use crate::settings::ModelSettings;
 use crate::sim::initial_options;
 use gloo_events::{EventListener, EventListenerOptions};
@@ -91,7 +92,8 @@ async fn latest_base(project_id: Uuid, file_id: Uuid) -> Result<Base, String> {
 
 #[function_component(ModelEditor)]
 pub fn model_editor(props: &EditorProps) -> Html {
-    let editing = use_state(|| false);
+    // Editors edit in place, as in Simulink: there is no separate edit mode.
+    let editing = props.can_edit;
     let base = use_state(|| props.base.clone());
     // Edits by user action, so undo and redo move whole actions.
     let pending = use_state(Vec::<Vec<Edit>>::new);
@@ -161,13 +163,8 @@ pub fn model_editor(props: &EditorProps) -> Html {
         })
     };
 
-    let start = {
-        let editing = editing.clone();
-        Callback::from(move |_: MouseEvent| editing.set(true))
-    };
     let discard = {
-        let (editing, pending, redo_stack, working, error, stale, base) = (
-            editing.clone(),
+        let (pending, redo_stack, working, error, stale, base) = (
             pending.clone(),
             redo_stack.clone(),
             working.clone(),
@@ -176,7 +173,6 @@ pub fn model_editor(props: &EditorProps) -> Html {
             base.clone(),
         );
         Callback::from(move |_: MouseEvent| {
-            editing.set(false);
             pending.set(Vec::new());
             redo_stack.set(Vec::new());
             working.set(base.model.clone());
@@ -236,61 +232,22 @@ pub fn model_editor(props: &EditorProps) -> Html {
             }
         })
     };
-    // Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes, unless typing in
-    // a field. Re-registered each render so it acts on the current state.
-    {
-        let (undo, redo, active) = (
-            undo.clone(),
-            redo.clone(),
-            props.active && *editing && !*busy,
-        );
-        use_effect(move || {
-            // Not passive, so the browser's own shortcut can be suppressed.
-            let listener = active.then(|| {
-                EventListener::new_with_options(
-                    &gloo_utils::document(),
-                    "keydown",
-                    EventListenerOptions::enable_prevent_default(),
-                    move |e| {
-                        let Some(e) = e.dyn_ref::<KeyboardEvent>() else {
-                            return;
-                        };
-                        let typing = e
-                            .target()
-                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
-                            .is_some_and(|t| {
-                                matches!(t.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
-                            });
-                        if typing || !(e.ctrl_key() || e.meta_key()) {
-                            return;
-                        }
-                        match (e.key().to_ascii_lowercase().as_str(), e.shift_key()) {
-                            ("z", false) => undo.emit(()),
-                            ("z", true) | ("y", _) => redo.emit(()),
-                            _ => return,
-                        }
-                        e.prevent_default();
-                    },
-                )
-            });
-            move || drop(listener)
-        });
-    }
     let save = {
-        let (mounted, pending, message, busy, error, stale, editing, working, base) = (
+        let (mounted, pending, message, busy, error, stale, base) = (
             mounted.clone(),
             pending.clone(),
             message.clone(),
             busy.clone(),
             error.clone(),
             stale.clone(),
-            editing.clone(),
-            working.clone(),
             base.clone(),
         );
         let (project_id, on_saved) = (props.project_id, props.on_saved.clone());
         let redo_stack = redo_stack.clone();
-        Callback::from(move |_: MouseEvent| {
+        Callback::from(move |()| {
+            if *busy || stale.is_some() {
+                return;
+            }
             let edits = pending.concat();
             if edits.is_empty() {
                 return;
@@ -313,14 +270,12 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 message.trim().to_string()
             };
             busy.set(true);
-            let (mounted, busy, error, stale, editing, pending, working, on_saved, message) = (
+            let (mounted, busy, error, stale, pending, on_saved, message) = (
                 mounted.clone(),
                 busy.clone(),
                 error.clone(),
                 stale.clone(),
-                editing.clone(),
                 pending.clone(),
-                working.clone(),
                 on_saved.clone(),
                 message.clone(),
             );
@@ -340,11 +295,11 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 }
                 busy.set(false);
                 match result {
+                    // The edited model stays shown until the saved version
+                    // replaces this editor.
                     Ok(_) => {
-                        editing.set(false);
                         pending.set(Vec::new());
                         redo_stack.set(Vec::new());
-                        working.set(base.model.clone());
                         message.set(String::new());
                         error.set(None);
                         on_saved.emit(());
@@ -432,44 +387,106 @@ pub fn model_editor(props: &EditorProps) -> Html {
         let on_dirty_change = props.on_dirty_change.clone();
         use_effect_with(count > 0, move |dirty| on_dirty_change.emit(*dirty));
     }
+    // Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z or Ctrl+Y redoes and Ctrl/Cmd+S
+    // saves, unless typing in a field. Re-registered each render so it acts
+    // on the current state.
+    {
+        let (undo, redo, save) = (undo.clone(), redo.clone(), save.clone());
+        let active = props.active && editing && !*busy;
+        use_effect(move || {
+            // Not passive, so the browser's own shortcut can be suppressed.
+            let listener = active.then(|| {
+                EventListener::new_with_options(
+                    &gloo_utils::document(),
+                    "keydown",
+                    EventListenerOptions::enable_prevent_default(),
+                    move |e| {
+                        let Some(e) = e.dyn_ref::<KeyboardEvent>() else {
+                            return;
+                        };
+                        let typing = e
+                            .target()
+                            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                            .is_some_and(|t| {
+                                matches!(t.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+                            });
+                        if !(e.ctrl_key() || e.meta_key()) {
+                            return;
+                        }
+                        match (e.key().to_ascii_lowercase().as_str(), e.shift_key()) {
+                            // Saving from a field (the change message) too.
+                            ("s", false) => save.emit(()),
+                            _ if typing => return,
+                            ("z", false) => undo.emit(()),
+                            ("z", true) | ("y", _) => redo.emit(()),
+                            _ => return,
+                        }
+                        e.prevent_default();
+                    },
+                )
+            });
+            move || drop(listener)
+        });
+    }
+    // Leaving the page with unsaved edits asks first.
+    use_effect_with(count > 0, move |dirty| {
+        let listener = dirty.then(|| {
+            EventListener::new_with_options(
+                &gloo_utils::window(),
+                "beforeunload",
+                EventListenerOptions::enable_prevent_default(),
+                |e| e.prevent_default(),
+            )
+        });
+        move || drop(listener)
+    });
+
     let settings_button = {
         let settings = settings.clone();
         html! {
-            <button class={classes!((*settings).then_some("active"))}
+            <button class={classes!("tool", (*settings).then_some("active"))}
+                title="Solver, start and stop time, step sizes and tolerances"
                 onclick={Callback::from(move |_: MouseEvent| settings.set(!*settings))}>
-                { "Model settings" }
+                { icons::settings() }<span>{ "Settings" }</span>
             </button>
         }
     };
-    let toolbar = if !*editing {
+    // Shown at the start of the diagram's toolstrip.
+    let leading = editing.then(|| {
         html! {
-            <div class="edit-bar">
-                { settings_button }
-                if props.can_edit {
-                    <button onclick={start}>{ "Edit" }</button>
-                }
-            </div>
+            <span class="tool-group">
+                <button class="tool icon" onclick={undo.reform(|_: MouseEvent| ())}
+                    disabled={count == 0 || *busy} title="Undo (Ctrl+Z)">{ icons::undo() }</button>
+                <button class="tool icon" onclick={redo.reform(|_: MouseEvent| ())}
+                    disabled={redo_stack.is_empty() || *busy} title="Redo (Ctrl+Shift+Z)">{ icons::redo() }</button>
+            </span>
         }
-    } else {
-        html! {
-            <div class="edit-bar editing">
-                <strong>{ format!("Editing v{}", base.version) }</strong>
-                <span class="muted">{ "Drag on empty space or Shift-click to select; Ctrl+C/Ctrl+V copies, Ctrl+G groups into a subsystem (Ctrl+Shift+G expands), Ctrl+R rotates, Ctrl+I flips, Delete removes; middle-drag pans." }</span>
-                <span class="spacer" />
-                { settings_button }
-                <span>{ format!("{count} change{}", if count == 1 { "" } else { "s" }) }</span>
-                <button onclick={undo.reform(|_: MouseEvent| ())} disabled={count == 0 || *busy} title="Ctrl+Z">{ "Undo" }</button>
-                <button onclick={redo.reform(|_: MouseEvent| ())} disabled={redo_stack.is_empty() || *busy} title="Ctrl+Shift+Z">{ "Redo" }</button>
-                <button onclick={discard} disabled={*busy}>{ "Discard" }</button>
-                <input placeholder="Change message" value={(*message).clone()} oninput={set_message} disabled={*busy} />
-                <button class="primary" onclick={save} disabled={count == 0 || *busy || stale.is_some()}>
-                    { if *busy { "Working…" } else { "Save as new version" } }
-                </button>
-            </div>
-        }
+    });
+    // Shown at the end: settings, then the save controls once there is
+    // something to save.
+    let trailing = html! {
+        <>
+            { settings_button }
+            if editing && count > 0 {
+                <span class="tool-group save-group">
+                    <span class="changes" title={format!("Unsaved changes to v{}", base.version)}>
+                        { format!("{count} unsaved change{}", if count == 1 { "" } else { "s" }) }
+                    </span>
+                    <button class="tool" onclick={discard} disabled={*busy}
+                        title="Drop every unsaved change">{ "Revert" }</button>
+                    <input class="change-message" placeholder="Describe the change"
+                        value={(*message).clone()} oninput={set_message} disabled={*busy} />
+                    <button class="tool primary" onclick={save.reform(|_: MouseEvent| ())}
+                        disabled={*busy || stale.is_some()}
+                        title={format!("Save as v{} (Ctrl+S)", base.version + 1)}>
+                        { if *busy { "Saving…".to_string() } else { format!("Save v{}", base.version + 1) } }
+                    </button>
+                </span>
+            }
+        </>
     };
 
-    let model = if *editing {
+    let model = if editing {
         (*working).clone()
     } else {
         base.model.clone()
@@ -573,7 +590,6 @@ pub fn model_editor(props: &EditorProps) -> Html {
     let compile_running = matches!(current_compile, Compile::Running);
     html! {
         <>
-            { toolbar }
             if let Some(reason) = &*stale {
                 <div class="edit-bar error">
                     { reason }
@@ -581,20 +597,28 @@ pub fn model_editor(props: &EditorProps) -> Html {
                 </div>
             }
             if let Some(e) = &*error {
-                <div class="edit-bar error">{ e }</div>
+                <div class="edit-bar error">
+                    <span>{ e }</span>
+                    <span class="spacer" />
+                    <button class="tool icon" title="Dismiss" onclick={{
+                        let error = error.clone();
+                        Callback::from(move |_: MouseEvent| error.set(None))
+                    }}>{ icons::close() }</button>
+                </div>
             }
             if *settings {
                 <ModelSettings config={model.config.clone()}
-                    on_edit={(*editing && !*busy).then(|| on_edit.clone())} />
+                    on_edit={(editing && !*busy).then(|| on_edit.clone())} />
             }
             <DiagramView {model} fit_key={props.fit_key.clone()} active={props.active} {problems} {problems_truncated}
+                leading={leading.unwrap_or_default()} {trailing}
                 on_compile={(!compile_running).then_some(check_compile)}
                 {compile_status}
                 on_settings={Callback::from({
                     let settings = settings.clone();
                     move |()| settings.set(true)
                 })}
-                on_edit={(*editing && !*busy).then(|| on_edit.clone())}
+                on_edit={(editing && !*busy).then(|| on_edit.clone())}
                 on_error={Callback::from({
                     let error = error.clone();
                     move |message: String| error.set(Some(message))
