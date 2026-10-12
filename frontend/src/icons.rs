@@ -55,6 +55,12 @@ pub fn paste() -> Html {
     )
 }
 
+pub fn cut() -> Html {
+    icon(
+        html! { <><circle cx="4" cy="12" r="2" /><circle cx="12" cy="12" r="2" /><path d="M5.5 10.5 12 2M10.5 10.5 4 2" /></> },
+    )
+}
+
 pub fn delete() -> Html {
     icon(
         html! { <><path d="M2.5 4h11M6 4V2.5h4V4" /><path d="M3.75 4l.75 10h7l.75-10" /><path d="M6.5 7v4.5M9.5 7v4.5" /></> },

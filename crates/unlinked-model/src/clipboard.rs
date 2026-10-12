@@ -4,6 +4,7 @@
 //! the originals do not change what pastes; the copies get SIDs and names
 //! that are free in the model being pasted into.
 
+use crate::duplicate::copy_name;
 use crate::edit::{duplicate, next_sid, system_names, Edit, EditError, SystemRef};
 use crate::{BlockId, Model, Point};
 use std::collections::HashSet;
@@ -33,17 +34,8 @@ pub fn paste(
     for edit in &mut edits {
         if let Edit::AddBlock { name, .. } = edit {
             if !taken.insert(name.clone()) {
-                // Taken since the copy: take the next free "… copyN".
-                let base = match name.rsplit_once(" copy") {
-                    Some((base, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
-                        base.to_string()
-                    }
-                    _ => name.clone(),
-                };
-                *name = (1..)
-                    .map(|i| format!("{base} copy{i}"))
-                    .find(|n| taken.insert(n.clone()))
-                    .expect("some suffix is free");
+                // Taken since the copy: take the next free number.
+                *name = copy_name(name, |n| taken.insert(n.to_string()));
             }
         }
     }
@@ -145,20 +137,10 @@ mod tests {
         .unwrap();
         let edits = paste(&copied, &vec![], &ids, 0, &now).unwrap();
         apply_batch(&mut now, &edits).unwrap();
-        let gain = now
-            .root
-            .blocks
-            .iter()
-            .find(|b| b.name == "g copy1")
-            .unwrap();
+        let gain = now.root.blocks.iter().find(|b| b.name == "g1").unwrap();
         assert_eq!(gain.param("Gain"), Some("2"));
         // The internal line was copied even though the original is gone.
-        let constant = now
-            .root
-            .blocks
-            .iter()
-            .find(|b| b.name == "c copy1")
-            .unwrap();
+        let constant = now.root.blocks.iter().find(|b| b.name == "c1").unwrap();
         assert!(now
             .root
             .connections()
@@ -180,9 +162,9 @@ mod tests {
         assert_eq!(
             seen,
             [
-                ("3".to_string(), "g copy1".to_string()),
-                ("4".to_string(), "g copy2".to_string()),
-                ("5".to_string(), "g copy3".to_string()),
+                ("3".to_string(), "g1".to_string()),
+                ("4".to_string(), "g2".to_string()),
+                ("5".to_string(), "g3".to_string()),
             ]
         );
         // Each paste lands one step further.
@@ -195,7 +177,7 @@ mod tests {
                 .position
                 .left
         };
-        assert_eq!(left("g copy3") - left("g copy1"), 2.0 * PASTE_STEP);
+        assert_eq!(left("g3") - left("g1"), 2.0 * PASTE_STEP);
     }
 
     #[test]
