@@ -26,6 +26,12 @@ with sync_playwright() as p:
     run['request']['inputs']={'deleted-port':'123'}
     script_id=str(uuid.uuid4())
     run['request']['init_script']={'file_id':script_id,'version':2}
+    project_id=args.model.split('/projects/')[1].split('/')[0]
+    files_url=args.url+'/api/projects/'+project_id+'/files'
+    files=page.request.get(files_url).json()
+    script=copy.deepcopy(files[0]);script.update(id=script_id,path='setup.m');script['latest']['version']=3
+    files.append(script)
+    page.route(files_url,lambda route:route.fulfill(content_type='application/json',body=json.dumps(files)))
     result={'run':run,'signals':[{'id':'1','name':'output:1'}],'trace':{'time':[2,3,4],'signals':{'1':[1,2,3]},'solver':'rk45'}}
     page.route(history_url,lambda route:route.fulfill(content_type='application/json',body=json.dumps([run])))
     page.route('**/api/simulations/*',lambda route:route.fulfill(content_type='application/json',body=json.dumps(result)))
@@ -52,6 +58,9 @@ with sync_playwright() as p:
     expect(sim.get_by_label('Relative tolerance',exact=True)).to_have_value('0.002')
     expect(sim.locator('textarea')).to_have_value('K = [1 2; 3 4]\ntau = 1e-6')
     expect(sim.locator('select option:checked').filter(has_text='recorded v2')).to_have_count(1)
+    picker=sim.locator('select').filter(has=page.locator('option[value="'+script_id+'@2"]'))
+    picker.select_option(script_id+'@3');expect(picker).to_have_value(script_id+'@3')
+    picker.select_option(script_id+'@2');expect(picker).to_have_value(script_id+'@2')
     expect(sim.locator('.setup-notice')).to_contain_text('Review it, then Run')
     assert not sockets,'Copying settings must not submit a simulation'
     # API-created multiline workspaces must not be silently rewritten.
@@ -62,6 +71,14 @@ with sync_playwright() as p:
     sim.get_by_text('Recorded setup',exact=True).click()
     details.get_by_role('button',name='Use recorded setup').click()
     expect(sim.locator('.setup-notice')).to_contain_text('cannot represent exactly')
+    expect(stop).to_have_value('17')
+    result['run']['request']['workspace']={'K':'2'}
+    result['run']['request']['init_script']['file_id']=str(uuid.uuid4())
+    sim.get_by_role('button',name=re.compile('^Load .*'+run['id'][:8])).click()
+    expect(sim.locator('.sim-status')).to_contain_text('3 samples')
+    sim.get_by_text('Recorded setup',exact=True).click()
+    details.get_by_role('button',name='Use recorded setup').click()
+    expect(sim.locator('.setup-notice')).to_contain_text('no longer available')
     expect(stop).to_have_value('17')
     page.screenshot(path='/tmp/unlinked-run-setup.png')
     assert not errors,errors

@@ -729,6 +729,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
             setup_notice.clone(),
         );
         let ports = props.inputs.clone();
+        let scripts = scripts.clone();
         let version = props.version;
         Callback::from(move |_: MouseEvent| {
             if state.active() || matches!(&*state, RunState::Loading) {
@@ -747,15 +748,23 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         notice.set(Some("This recorded script has no pinned version. Choose a script version before reusing its setup.".into()));
                         return;
                     }
+                    if let Some(script) = &request.init_script {
+                        match &*scripts {
+                            Fetch::Ready(files) if files.iter().any(|f| f.id == script.file_id) => {
+                            }
+                            Fetch::Ready(_) => {
+                                notice.set(Some("The recorded initialization script is no longer available in this project. The form was not changed.".into()));
+                                return;
+                            }
+                            _ => {
+                                notice.set(Some("Wait for initialization scripts to load before reusing this setup.".into()));
+                                return;
+                            }
+                        }
+                    }
                     options.set(RunForm::from(request.options));
                     workspace.set(text);
-                    inputs.set(
-                        request
-                            .inputs
-                            .into_iter()
-                            .filter(|(id, _)| ports.iter().any(|(port, _)| port == id))
-                            .collect(),
-                    );
+                    inputs.set(setup::reuse_inputs(&inputs, &request.inputs, &ports));
                     init_script.set(request.init_script.map(|s| (s.file_id, s.version.unwrap())));
                     notice.set(Some(format!("Recorded setup copied into the run form. Review it, then Run to simulate saved v{version}. Output and internal-step limits use this app’s defaults.")));
                 }
@@ -1049,30 +1058,42 @@ pub fn simulation_panel(props: &SimProps) -> Html {
         })
     };
     let set_init = {
-        let (init_script, scripts) = (init_script.clone(), scripts.clone());
+        let init_script = init_script.clone();
         Callback::from(move |e: Event| {
-            let id = e.target_unchecked_into::<HtmlSelectElement>().value();
-            let chosen = match &*scripts {
-                Fetch::Ready(files) => files
-                    .iter()
-                    .find(|f| f.id.to_string() == id)
-                    .map(|f| (f.id, f.latest.version)),
-                _ => None,
-            };
+            let value = e.target_unchecked_into::<HtmlSelectElement>().value();
+            let chosen = value.split_once('@').and_then(|(id, version)| {
+                Some((Uuid::parse_str(id).ok()?, version.parse::<i32>().ok()?))
+            });
             init_script.set(chosen);
         })
     };
     let init_picker = view(&scripts, |files: &Vec<FileInfo>| {
-        let selected = init_script.map(|(id, _)| id);
         let pinned = *init_script;
+        let recorded = ctl
+            .borrow()
+            .recorded_request
+            .as_ref()
+            .and_then(|r| r.init_script.as_ref())
+            .and_then(|s| Some((s.file_id, s.version?)));
+        let old_versions: Vec<_> = [pinned, recorded]
+            .into_iter()
+            .flatten()
+            .filter(|(id, version)| {
+                files
+                    .iter()
+                    .any(|f| f.id == *id && f.latest.version != *version)
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
         html! {
             <select onchange={set_init.clone()} disabled={state.active()}>
-                <option value="" selected={selected.is_none()}>{ "none" }</option>
-                if let Some((id, version)) = pinned.filter(|(id, version)| !files.iter().any(|f| f.id == *id && f.latest.version == *version)) {
-                    <option value={id.to_string()} selected={true}>{format!("{} (recorded v{version})", files.iter().find(|f| f.id == id).map(|f| f.path.clone()).unwrap_or_else(|| id.to_string()))}</option>
-                }
+                <option value="" selected={pinned.is_none()}>{ "none" }</option>
+                {for old_versions.into_iter().map(|(id, version)| html! {
+                    <option value={format!("{id}@{version}")} selected={pinned == Some((id, version))}>{format!("{} (recorded v{version})", files.iter().find(|f| f.id == id).map(|f| f.path.clone()).unwrap_or_default())}</option>
+                })}
                 { for files.iter().map(|f| html! {
-                    <option value={f.id.to_string()} selected={pinned == Some((f.id, f.latest.version))}>
+                    <option value={format!("{}@{}",f.id,f.latest.version)} selected={pinned == Some((f.id, f.latest.version))}>
                         { format!("{} (v{})", f.path, f.latest.version) }
                     </option>
                 }) }

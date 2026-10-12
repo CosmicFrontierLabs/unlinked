@@ -18,6 +18,22 @@ pub(super) fn workspace_text(values: &BTreeMap<String, String>) -> Result<String
     Ok(text)
 }
 
+pub(super) fn reuse_inputs(
+    current: &BTreeMap<String, String>,
+    recorded: &BTreeMap<String, String>,
+    ports: &[(String, String)],
+) -> BTreeMap<String, String> {
+    ports
+        .iter()
+        .filter_map(|(id, _)| {
+            recorded
+                .get(id)
+                .or_else(|| current.get(id))
+                .map(|value| (id.clone(), value.clone()))
+        })
+        .collect()
+}
+
 pub(super) fn view(
     request: &SimulationRequest,
     version: Option<i32>,
@@ -66,6 +82,19 @@ pub(super) fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reuse_keeps_new_inputs_and_replaces_only_matching_ports() {
+        let current = BTreeMap::from([("1".into(), "old".into()), ("2".into(), "keep".into())]);
+        let recorded = BTreeMap::from([
+            ("1".into(), "recorded".into()),
+            ("gone".into(), "skip".into()),
+        ]);
+        let ports = vec![("1".into(), "a".into()), ("2".into(), "b".into())];
+        assert_eq!(
+            reuse_inputs(&current, &recorded, &ports),
+            BTreeMap::from([("1".into(), "recorded".into()), ("2".into(), "keep".into())])
+        );
+    }
     #[test]
     fn reuse_preserves_expressions_or_refuses_before_changing_the_form() {
         let values = BTreeMap::from([
