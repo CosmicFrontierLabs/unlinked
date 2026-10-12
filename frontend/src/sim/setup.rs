@@ -38,6 +38,7 @@ pub(super) fn view(
     request: &SimulationRequest,
     version: Option<i32>,
     ports: &[(String, String)],
+    script_name: Option<&str>,
     disabled: bool,
     reuse: Callback<MouseEvent>,
 ) -> Html {
@@ -61,7 +62,7 @@ pub(super) fn view(
                 }
                 <dt>{"Sample limit"}</dt><dd>{o.max_samples}</dd>
                 if o.solver == Solver::Rk45 {<dt>{"Internal-step limit"}</dt><dd>{o.max_internal_steps}</dd>}
-                <dt>{"Initialization script"}</dt><dd>{request.init_script.as_ref().map(|s| format!("{} · {}", s.file_id, s.version.map(|v| format!("v{v}")).unwrap_or_else(|| "version not recorded".into()))).unwrap_or_else(|| "None".into())}</dd>
+                <dt>{"Initialization script"}</dt><dd>{request.init_script.as_ref().map(|s| format!("{} · {}", script_name.map(str::to_owned).unwrap_or_else(|| s.file_id.to_string()), s.version.map(|v| format!("v{v}")).unwrap_or_else(|| "version not recorded".into()))).unwrap_or_else(|| "None".into())}</dd>
             </dl>
             if !request.workspace.is_empty() {
                 <h5>{"Workspace expressions"}</h5>

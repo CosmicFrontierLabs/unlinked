@@ -1489,7 +1489,7 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         </div>
                     }
                     if let Some(request) = &c.recorded_request {
-                        {setup::view(request, c.run_version, &props.inputs, running || matches!(&*state, RunState::Loading), reuse_setup)}
+                        {setup::view(request, c.run_version, &props.inputs, match &*scripts { Fetch::Ready(files) => request.init_script.as_ref().and_then(|script| files.iter().find(|file| file.id == script.file_id)).map(|file| file.path.as_str()), _ => None }, running || matches!(&*state, RunState::Loading), reuse_setup)}
                     }
                 if let Some(reference) = &c.reference {
                     <section class="comparison-banner" aria-label="Run comparison">
