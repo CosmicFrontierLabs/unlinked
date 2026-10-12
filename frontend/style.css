@@ -1546,3 +1546,13 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 @media (max-width: 700px) { .file-browser-tools label { flex: 1; } .file-browser-tools select { flex: 1; min-width: 0; } .file-search-note { margin-left: .4rem; } }
 
 .file-browser-table td:nth-child(2), .file-browser-table td:nth-child(3), .file-browser-table td:nth-child(4) { white-space: nowrap; }
+
+/* Simulation comparison: one clearly identified reference over current traces. */
+.comparison-banner { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; margin: .75rem; padding: .7rem .8rem; border: 1px solid var(--border); border-left: 3px dashed var(--blue); border-radius: 5px; background: var(--bg-alt); font-size: .85rem; }
+.comparison-banner strong { font-weight: 600; }
+.comparison-banner p { margin: .4rem 0 0; color: #a9b1d6; line-height: 1.4; }
+.comparison-banner button { flex-shrink: 0; font-size: .8rem; }
+.comparison-loading { display: flex; align-items: center; gap: .7rem; margin: .75rem; font-size: .85rem; }
+.comparison-error { margin: .75rem; }
+.runs .compare-run { margin-top: .3rem; padding: .2rem .5rem; font-size: .75rem; }
+@media (max-width: 650px) { .comparison-banner { flex-direction: column; } }
