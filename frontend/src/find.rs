@@ -23,7 +23,9 @@ pub struct Found {
 
 /// Blocks of `model` whose name or type contains `query`, ignoring case:
 /// names starting with it first, then names containing it, then types,
-/// shallower levels before deeper ones. An empty query finds nothing.
+/// shallower levels before deeper ones. An empty query finds nothing. At
+/// most one more than [`MAX_FOUND`] is returned, telling that there are
+/// more.
 pub fn find_blocks(model: &Model, query: &str) -> Vec<Found> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -32,11 +34,11 @@ pub fn find_blocks(model: &Model, query: &str) -> Vec<Found> {
     let mut ranked: Vec<(u8, usize, usize, Found)> = Vec::new();
     let mut visited = 0usize;
     let mut pending: Vec<(&System, Vec<String>)> = vec![(&model.root, Vec::new())];
-    while let Some((sys, path)) = pending.pop() {
+    'levels: while let Some((sys, path)) = pending.pop() {
         for b in &sys.blocks {
             visited += 1;
             if visited > MAX_VISITED {
-                break;
+                break 'levels;
             }
             let name = b.name.replace('\n', " ");
             let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
@@ -73,7 +75,7 @@ pub fn find_blocks(model: &Model, query: &str) -> Vec<Found> {
     ranked.sort_by_key(|(rank, depth, order, _)| (*rank, *depth, *order));
     ranked
         .into_iter()
-        .take(MAX_FOUND)
+        .take(MAX_FOUND + 1)
         .map(|(.., f)| f)
         .collect()
 }
@@ -102,10 +104,17 @@ pub fn find_blocks_box(props: &FindProps) -> Html {
             }
         });
     }
+    // Searched again when the model changes too, such as by an undo while
+    // the box is open.
     let found = {
         let model = props.model.clone();
-        use_memo((*query).clone(), move |q| find_blocks(&model, q))
+        use_memo(
+            ((*query).clone(), Rc::as_ptr(&props.model) as usize),
+            move |(q, _)| find_blocks(&model, q),
+        )
     };
+    let more = found.len() > MAX_FOUND;
+    let found: Rc<Vec<Found>> = Rc::new(found.iter().take(MAX_FOUND).cloned().collect());
     let current = (*chosen).min(found.len().saturating_sub(1));
     {
         let list = list.clone();
@@ -187,6 +196,9 @@ pub fn find_blocks_box(props: &FindProps) -> Html {
                     { for rows }
                     if found.is_empty() {
                         <li class="quick-empty muted">{ "No block matches." }</li>
+                    }
+                    if more {
+                        <li class="quick-empty muted">{ format!("Showing the first {MAX_FOUND}; type more to narrow the search.") }</li>
                     }
                 </ul>
             }
