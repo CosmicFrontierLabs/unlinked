@@ -823,9 +823,21 @@ pub fn preview_moves(sys: &System, moves: &[(BlockId, Rect)]) -> (System, Vec<us
         blocks: sys
             .blocks
             .iter()
+            // Field by field, so a subsystem's contents are never cloned.
             .map(|b| Block {
+                id: b.id.clone(),
+                block_type: b.block_type.clone(),
+                name: b.name.clone(),
+                position: b.position,
+                orientation: b.orientation,
+                mirrored: b.mirrored,
+                ports: b.ports,
+                parameters: b.parameters.clone(),
+                mask: b.mask.clone(),
+                library_source: b.library_source.clone(),
                 subsystem: None,
-                ..b.clone()
+                style: b.style.clone(),
+                interface: b.interface.clone(),
             })
             .collect(),
         lines: sys.lines.clone(),
