@@ -595,6 +595,12 @@ pub fn simulation_panel(props: &SimProps) -> Html {
     let workspace = use_state(String::new);
     let inputs = use_state(BTreeMap::<String, String>::new);
     let state = use_state(|| RunState::Idle);
+    let mobile_signals = use_state(|| false);
+    let signal_panel_id = format!("sim-signals-{}", props.file_id);
+    let toggle_mobile_signals = {
+        let expanded = mobile_signals.clone();
+        Callback::from(move |_: MouseEvent| expanded.set(!*expanded))
+    };
     let ctl = use_mut_ref(Controller::default);
     let progress = use_force_update();
     let csv_download = use_mut_ref(|| None::<export::CsvDownload>);
@@ -1490,44 +1496,12 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                     if running { <span>{ progress_value.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "Preparing model…".into()) }</span> }
                 </div>
             }
+            <button class="mobile-signals-toggle" onclick={toggle_mobile_signals}
+                aria-expanded={mobile_signals.to_string()} aria-controls={signal_panel_id.clone()}>
+                { format!("{} Signals & runs · {} selected", if *mobile_signals { "▾" } else { "▸" }, c.plotted.len()) }
+            </button>
             <div class="sim-body">
-                <div class="results-main">
-                    if let Some(version) = c.run_version {
-                        <div class="results-identity"><strong>{ format!("Results · v{version}") }</strong>
-                            if version != props.version { <span>{ format!("Viewing an earlier model version; Run uses v{}.", props.version) }</span> }
-                            if let Some(id) = c.run_id { <span title={id.to_string()}>{ format!("Run {}", &id.to_string()[..8]) }</span> }
-                        </div>
-                    }
-                    if let Some(request) = &c.recorded_request {
-                        {setup::view(request, c.run_version, &props.inputs, match &*scripts { Fetch::Ready(files) => request.init_script.as_ref().and_then(|script| files.iter().find(|file| file.id == script.file_id)).map(|file| file.path.as_str()), _ => None }, running || matches!(&*state, RunState::Loading), reuse_setup)}
-                    }
-                if let Some(reference) = &c.reference {
-                    <section class="comparison-banner" aria-label="Run comparison">
-                        <div><strong>{format!("Reference v{} · run {}",reference.version,&reference.id.to_string()[..8])}</strong>
-                            <p>{"Solid: current run · Dashed: reference. Signals matched by recorded ID; each run keeps its own time grid."}</p>
-                            <p class="comparison-count">{format!("{} of {} selected signals matched", c.plotted.iter().filter(|&&i| reference.column(&c.signals[i].id).is_some()).count(),c.plotted.len())}</p>
-                            if Some(reference.id) == c.run_id { <p>{"The current and reference runs are the same."}</p> }
-                        </div>
-                        <button onclick={clear_reference.clone()}>{"Remove comparison"}</button>
-                    </section>
-                }
-                if *reference_loading { <div class="comparison-loading"><span role="status">{"Loading comparison…"}</span><button onclick={clear_reference.clone()}>{"Cancel comparison"}</button></div> }
-                if let Some(error) = &*reference_error { <p class="comparison-error error" role="alert">{error}</p> }
-                <div class="plot-actions"><button onclick={fit_plot} disabled={c.signals.is_empty()}>{ "Fit plot" }</button><span>{ "Scroll to zoom · drag to pan" }</span></div>
-                <div class="plot-host" ref={plot_host}>
-                    <canvas id={canvas_id.clone()} hidden={c.signals.is_empty()} onmousedown={pan_plot} onwheel={zoom_plot} />
-                    if c.signals.is_empty() {
-                        <div class="sim-empty">
-                            <span class="sim-empty-icon" aria-hidden="true">{ "∿" }</span>
-                            <h3>{ if running { "Preparing simulation" } else if matches!(&*state, RunState::Loading) { "Loading results" } else { "Inspect your model’s response" } }</h3>
-                            <p>{ "Run the saved model or open a previous run to plot its signals." }</p>
-                            <p class="muted">{ "Choose signals from the list. Scroll to zoom and drag to pan the plot." }</p>
-                        </div>
-                    }
-                </div>
-                    if samples > 0 { <Measurements key={c.generation.to_string()} controller={ctl.clone()} samples={samples} selected={c.plotted.clone()} on_cursor={set_cursor} /> }
-                </div>
-                <aside class="signal-list">
+                <aside id={signal_panel_id.clone()} class={classes!("signal-list", (*mobile_signals).then_some("mobile-expanded"))} aria-label="Signals and previous runs">
                     <h4>{ format!("Signals · {} selected", c.plotted.len()) }</h4>
                     <input class="signal-search" type="search" aria-label="Search signals" placeholder="Search signals…" value={(*signal_query).clone()} oninput={set_signal_query} />
                     <div class="signal-selection-actions">
@@ -1574,6 +1548,43 @@ pub fn simulation_panel(props: &SimProps) -> Html {
                         </ul>
                     }) }
                 </aside>
+                <div class="results-main">
+                    if let Some(version) = c.run_version {
+                        <div class="results-identity"><strong>{ format!("Results · v{version}") }</strong>
+                            if version != props.version { <span>{ format!("Viewing an earlier model version; Run uses v{}.", props.version) }</span> }
+                            if let Some(id) = c.run_id { <span title={id.to_string()}>{ format!("Run {}", &id.to_string()[..8]) }</span> }
+                        </div>
+                    }
+                    if let Some(request) = &c.recorded_request {
+                        {setup::view(request, c.run_version, &props.inputs, match &*scripts { Fetch::Ready(files) => request.init_script.as_ref().and_then(|script| files.iter().find(|file| file.id == script.file_id)).map(|file| file.path.as_str()), _ => None }, running || matches!(&*state, RunState::Loading), reuse_setup)}
+                    }
+                if let Some(reference) = &c.reference {
+                    <section class="comparison-banner" aria-label="Run comparison">
+                        <div><strong>{format!("Reference v{} · run {}",reference.version,&reference.id.to_string()[..8])}</strong>
+                            <p>{"Solid: current run · Dashed: reference. Signals matched by recorded ID; each run keeps its own time grid."}</p>
+                            <p class="comparison-count">{format!("{} of {} selected signals matched", c.plotted.iter().filter(|&&i| reference.column(&c.signals[i].id).is_some()).count(),c.plotted.len())}</p>
+                            if Some(reference.id) == c.run_id { <p>{"The current and reference runs are the same."}</p> }
+                        </div>
+                        <button onclick={clear_reference.clone()}>{"Remove comparison"}</button>
+                    </section>
+                }
+                if *reference_loading { <div class="comparison-loading"><span role="status">{"Loading comparison…"}</span><button onclick={clear_reference.clone()}>{"Cancel comparison"}</button></div> }
+                if let Some(error) = &*reference_error { <p class="comparison-error error" role="alert">{error}</p> }
+                <div class="plot-actions"><button onclick={fit_plot} disabled={c.signals.is_empty()}>{ "Fit plot" }</button><span>{ "Scroll to zoom · drag to pan" }</span></div>
+                <div class="plot-host" ref={plot_host}>
+                    <canvas id={canvas_id.clone()} hidden={c.signals.is_empty()} onmousedown={pan_plot} onwheel={zoom_plot} />
+                    if c.signals.is_empty() {
+                        <div class="sim-empty">
+                            <span class="sim-empty-icon" aria-hidden="true">{ "∿" }</span>
+                            <h3>{ if running { "Preparing simulation" } else if matches!(&*state, RunState::Loading) { "Loading results" } else { "Inspect your model’s response" } }</h3>
+                            <p>{ "Run the saved model or open a previous run to plot its signals." }</p>
+                            <p class="muted">{ "Choose signals from the list. Scroll to zoom and drag to pan the plot." }</p>
+                        </div>
+                    }
+                </div>
+                    if samples > 0 { <Measurements key={c.generation.to_string()} controller={ctl.clone()} samples={samples} selected={c.plotted.clone()} on_cursor={set_cursor} /> }
+                </div>
+
             </div>
         </div>
     }
