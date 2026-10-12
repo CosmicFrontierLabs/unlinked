@@ -34,6 +34,8 @@ with sync_playwright() as p:
         expect(select).to_have_value(original)
         select.select_option(changed)
         expect(select).to_have_value(original)
+        expect(select).to_be_disabled()
+        expect(page.get_by_role('status').filter(has_text='Updating role')).to_contain_text('Updating role')
         page.wait_for_timeout(100)
         assert len(requests)==1 and requests[0].request.method=='PATCH'
         assert requests[0].request.post_data_json=={'role':changed}
@@ -46,6 +48,8 @@ with sync_playwright() as p:
         member['role']=changed
         requests.pop().fulfill(status=204)
         expect(select).to_have_value(changed)
+        expect(select).to_be_enabled()
+        expect(page.get_by_role('status').filter(has_text='Updating role')).to_have_count(0)
         expect(page.get_by_role('alert')).to_have_count(0)
         # A subsequent failure also retains the newly committed role.
         select.select_option(original)
