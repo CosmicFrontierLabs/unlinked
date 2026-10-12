@@ -1148,24 +1148,31 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         .as_ref()
         .zip(run.as_ref())
         .is_some_and(|(r, run)| r.dirty || run.version != r.shown_version);
-    let values = {
+    // Which signals label which lines, found again only for another model,
+    // level or set of recorded signals: moving the shown sample keeps them.
+    let sources = {
         let (model, run) = (props.model.clone(), run.clone());
-        // By the run's identity: shown runs are immutable snapshots, and
-        // comparing their samples would cost more than labelling.
         use_memo(
             (
                 Rc::as_ptr(&props.model) as usize,
                 (*path).clone(),
-                run.as_ref().map(|r| Rc::as_ptr(r) as usize),
+                run.as_ref().map(|r| Rc::as_ptr(&r.signals) as usize),
             ),
             move |(_, path, _)| {
                 let refs: Vec<&str> = path.iter().map(String::as_str).collect();
                 match (model.system_at(&refs), run) {
-                    (Some(sys), Some(run)) => port_values(&model, path, sys, &run),
+                    (Some(sys), Some(run)) => port_sources(&model, path, sys, &run),
                     _ => Vec::new(),
                 }
             },
         )
+    };
+    let values: Vec<(Point, String)> = match &run {
+        Some(run) => sources
+            .iter()
+            .filter_map(|(p, indices)| Some((*p, value_label(run, indices)?)))
+            .collect(),
+        None => Vec::new(),
     };
 
     let onmousedown = {
@@ -2908,6 +2915,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 </button>
                 if let Some(run) = &run {
                     <button class={classes!("tool", (*show_values).then_some("active"), stale.then_some("stale"))}
+                        aria-pressed={show_values.to_string()}
                         title={format!("Label lines with their values from the v{} run{}", run.version,
                             if stale { " (the diagram has changed since)" } else { "" })}
                         onclick={{
@@ -3150,22 +3158,23 @@ fn value_label(run: &ShownRun, indices: &[usize]) -> Option<String> {
     }
 }
 
-/// Port value labels for the shown system: each line's recorded value at
-/// its source port.
-fn port_values(
+/// Where the shown system's lines get port value labels, and the recorded
+/// signals each shows: by its source port. This depends on the run's
+/// signals, not on which sample is shown.
+fn port_sources(
     model: &Model,
     path: &[String],
     sys: &System,
     run: &ShownRun,
-) -> Vec<(Point, String)> {
+) -> Vec<(Point, Vec<usize>)> {
     sys.lines
         .iter()
         .filter_map(|line| {
             let src = line.src.as_ref()?;
             let block = sys.block(&src.block)?;
-            let label = value_label(run, &run.signal_indices(model, path, src))?;
+            let indices = run.signal_indices(model, path, src);
             let p = geometry::port_anchor(block, src.port);
-            Some((Point::new(p.x + 3.0, p.y - 4.0), label))
+            (!indices.is_empty()).then(|| (Point::new(p.x + 3.0, p.y - 4.0), indices))
         })
         .collect()
 }
@@ -3518,7 +3527,8 @@ fn sparkline(run: &ShownRun, indices: &[usize]) -> Html {
     if !lo.is_finite() {
         return html! {};
     }
-    let span = if hi > lo { hi - lo } else { 1.0 };
+    // Halved, so the span of values near ±f64::MAX stays finite.
+    let span = if hi > lo { hi / 2.0 - lo / 2.0 } else { 1.0 };
     let x = |t: f64| {
         if t1 > t0 {
             (t - t0) / (t1 - t0) * W
@@ -3526,26 +3536,64 @@ fn sparkline(run: &ShownRun, indices: &[usize]) -> Html {
             0.0
         }
     };
-    let y = |v: f64| H - 2.0 - (v - lo) / span * (H - 4.0);
-    let step = (time.len() / MAX_POINTS).max(1);
+    let y = |v: f64| H - 2.0 - (v / 2.0 - lo / 2.0) / span * (H - 4.0);
     let colors = ["#7aa2f7", "#9ece6a", "#e0af68"];
-    let lines = series.iter().zip(colors).map(|(s, color)| {
-        let points: Vec<String> = (0..time.len().min(s.len()))
-            .step_by(step)
-            .filter(|&i| s[i].is_finite())
-            .map(|i| format!("{:.1},{:.1}", x(time[i]), y(s[i])))
-            .collect();
-        html! { <polyline points={points.join(" ")} stroke={color} fill="none" stroke-width="1.25" /> }
+    let lines = series.iter().zip(colors).flat_map(|(s, color)| {
+        sparkline_runs(time, s, MAX_POINTS)
+            .into_iter()
+            .map(move |run| {
+                let points: Vec<String> = run
+                    .iter()
+                    .map(|&(t, v)| format!("{:.1},{:.1}", x(t), y(v)))
+                    .collect();
+                html! { <polyline points={points.join(" ")} stroke={color} fill="none" stroke-width="1.25" /> }
+            })
+            .collect::<Vec<_>>()
     });
     let marker = time.get(run.sample_index).map(|&t| {
         html! { <line class="sample-mark" x1={x(t).to_string()} x2={x(t).to_string()} y1="0" y2={H.to_string()} /> }
     });
+    let label = format!(
+        "Recorded from t = {} to {} s, between {} and {}",
+        short_value(t0),
+        short_value(t1),
+        short_value(lo),
+        short_value(hi)
+    );
     html! {
-        <svg class="sparkline" viewBox={format!("0 0 {W} {H}")} width={W.to_string()} height={H.to_string()}>
+        <svg class="sparkline" viewBox={format!("0 0 {W} {H}")} width={W.to_string()} height={H.to_string()}
+            role="img" aria-label={label}>
             { for lines }
             { for marker }
         </svg>
     }
+}
+
+/// The samples of `values` over `time` a sparkline draws: at most about
+/// `max` of them, evenly picked and always including the last, split into
+/// runs at missing or non-finite values so gaps are not drawn across.
+fn sparkline_runs(time: &[f64], values: &[f64], max: usize) -> Vec<Vec<(f64, f64)>> {
+    let n = time.len().min(values.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    let step = n.div_ceil(max.max(1)).max(1);
+    let picked = (0..n)
+        .step_by(step)
+        .chain((!(n - 1).is_multiple_of(step)).then_some(n - 1));
+    let mut runs = vec![Vec::new()];
+    for i in picked {
+        match (time[i], values[i]) {
+            (t, v) if t.is_finite() && v.is_finite() => runs.last_mut().unwrap().push((t, v)),
+            _ => {
+                if !runs.last().unwrap().is_empty() {
+                    runs.push(Vec::new());
+                }
+            }
+        }
+    }
+    runs.retain(|r| !r.is_empty());
+    runs
 }
 
 /// The selected line: where it runs, and its signal name (editable).
@@ -3975,6 +4023,20 @@ mod tests {
     }
 
     #[test]
+    fn sparklines_keep_the_last_sample_and_break_at_gaps() {
+        let time: Vec<f64> = (0..1001).map(f64::from).collect();
+        let values: Vec<f64> = time.clone();
+        let runs = sparkline_runs(&time, &values, 300);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].len() <= 301, "{}", runs[0].len());
+        assert_eq!(runs[0].last(), Some(&(1000.0, 1000.0)));
+        let gappy = [1.0, f64::NAN, 3.0, 4.0];
+        let runs = sparkline_runs(&[0.0, 1.0, 2.0, 3.0], &gappy, 300);
+        assert_eq!(runs, vec![vec![(0.0, 1.0)], vec![(2.0, 3.0), (3.0, 4.0)]]);
+        assert!(sparkline_runs(&[], &[], 300).is_empty());
+    }
+
+    #[test]
     fn values_are_labelled_briefly() {
         assert_eq!(short_value(2.0), "2");
         assert_eq!(short_value(-0.5), "-0.5");
@@ -4002,9 +4064,12 @@ mod tests {
             signals: Rc::new(vec![signal("1[1]", 1.0), signal("1[2]", 2.5)]),
             sample_index: 1,
         };
-        let labels = port_values(&model, &[], &model.root, &run);
-        assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0].1, "[1, 2.5]");
+        let sources = port_sources(&model, &[], &model.root, &run);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            value_label(&run, &sources[0].1).as_deref(),
+            Some("[1, 2.5]")
+        );
     }
 
     #[test]
