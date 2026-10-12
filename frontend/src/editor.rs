@@ -685,6 +685,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     on_edit={(editing && !*busy).then(|| on_edit.clone())} />
             }
             <DiagramView {model} fit_key={props.fit_key.clone()} active={props.active} {problems} {problems_truncated}
+                document={AttrValue::from(props.file_id.to_string())}
                 leading={leading.unwrap_or_default()} {trailing}
                 on_compile={(!compile_running).then_some(check_compile)}
                 {compile_status}
