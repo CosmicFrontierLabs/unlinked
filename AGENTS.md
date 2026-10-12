@@ -108,3 +108,35 @@ Note: memory-serve 2.x requires axum 0.8+. For axum 0.7, use memory-serve 0.6.0 
   Seed a model with a completed simulation first; the parameter check expects
   a Step block first, as in `digital_pi_first_order`. These checks mock writes
   and simulation streams and leave model edits unsaved.
+
+## Frontend Patterns
+
+- **The diagram canvas** is `frontend/src/diagram.rs` (`DiagramView`); the
+  editor around it (`editor.rs`) passes its undo/redo and save tools in as
+  `leading`/`trailing` toolstrip content. Overlays (previews, guides, value
+  labels) are drawn in an `svg.overlay` in diagram units; raw SVG markup
+  must be inserted as a whole `<svg>`, since `Html::from_html_unchecked`
+  parses it as HTML.
+- **Run results reach the diagram** only through `results::ResultsContext`
+  (provided by `FilePage`; absent in the local viewer). Map lines to
+  recorded signals with `ShownRun::signal_indices`, never by guessing IDs.
+- **Shown runs and model snapshots are immutable `Rc`s:** memoise and
+  compare them by pointer (`Rc::as_ptr` / `Rc::ptr_eq`), not by contents;
+  derived `PartialEq` on sample data is slow and never equal under NaN.
+- **Long-lived listeners** (document keys, wheel, touch) capture handles at
+  registration: dispatch through a reducer, or read state from a
+  `use_mut_ref` refreshed every render, rather than a captured state value.
+- **Keyboard shortcuts** must leave typing to fields and controls over the
+  canvas, and avoid browser-reserved keys (Ctrl+N/T/W and their Shift
+  forms cannot be intercepted; runs use Ctrl+Enter, not Simulink's Ctrl+T).
+- **Copies of a level** for handlers and panels are made once per model and
+  level with `use_memo`, shallowly (`subsystem: None`); never clone blocks
+  with their subsystems on every render.
+- **Canvas preferences** (theme, side panel, value labels, recent blocks)
+  live in `localStorage` under `unlinked.canvas.*` via `diagram::pref`.
+- **web-sys features:** `cargo add -p frontend web-sys --features …` rejects
+  the existing `ResizeObserver*` features; add new ones to the same list.
+- **Browser checks:** drive a `--dev-mode` server with Playwright against
+  the system Chrome (`executable_path="/usr/bin/google-chrome"`), signing
+  in through `/api/auth/dev-login`; `scripts/seed-demo.py` loads the
+  examples.
