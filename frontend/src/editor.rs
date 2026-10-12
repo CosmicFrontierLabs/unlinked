@@ -118,35 +118,35 @@ fn describe(group: &[Edit]) -> String {
 /// discarded, by the version they apply to.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Draft {
-    version_id: String,
     pending: Vec<Vec<Edit>>,
 }
 
-fn draft_key(file_id: Uuid) -> String {
-    format!("unlinked.draft.{file_id}")
+/// Drafts are kept per version, so opening one version never touches the
+/// draft of another.
+fn draft_key(file_id: Uuid, version_id: Uuid) -> String {
+    format!("unlinked.draft.{file_id}.{version_id}")
 }
 
-/// The draft kept for `file_id`, if any can be read.
-fn load_draft(file_id: Uuid) -> Option<Draft> {
+/// The draft kept for a version of a file, if any can be read.
+fn load_draft(file_id: Uuid, version_id: Uuid) -> Option<Draft> {
     let storage = gloo_utils::window().local_storage().ok()??;
-    let json = storage.get_item(&draft_key(file_id)).ok()??;
+    let json = storage.get_item(&draft_key(file_id, version_id)).ok()??;
     serde_json::from_str(&json).ok()
 }
 
-/// Keep `pending` as the draft of `file_id` at `version_id`, or forget the
-/// draft when there is nothing pending. Storage being full or unavailable
-/// only loses the draft.
+/// Keep `pending` as the draft of a version of a file, or forget the draft
+/// when there is nothing pending. Storage being full or unavailable only
+/// loses the draft.
 fn store_draft(file_id: Uuid, version_id: Uuid, pending: &[Vec<Edit>]) {
     let Ok(Some(storage)) = gloo_utils::window().local_storage() else {
         return;
     };
-    let key = draft_key(file_id);
+    let key = draft_key(file_id, version_id);
     if pending.is_empty() {
         let _ = storage.remove_item(&key);
         return;
     }
     let draft = Draft {
-        version_id: version_id.to_string(),
         pending: pending.to_vec(),
     };
     if let Ok(json) = serde_json::to_string(&draft) {
@@ -490,14 +490,15 @@ pub fn model_editor(props: &EditorProps) -> Html {
     let draft = {
         let (file_id, version_id, editing) = (props.file_id, props.base.version_id, editing);
         use_state(move || {
-            load_draft(file_id).filter(|d| {
-                editing && d.version_id == version_id.to_string() && !d.pending.is_empty()
-            })
+            load_draft(file_id, version_id).filter(|d| editing && !d.pending.is_empty())
         })
     };
     {
-        // A view that cannot edit leaves any draft alone.
+        // A view that cannot edit leaves any draft alone, as does one with
+        // a draft on offer. Once the edits move to another version (saved,
+        // or reapplied on the latest), the old version's draft goes.
         let file_id = props.file_id;
+        let drafted = use_mut_ref(|| props.base.version_id);
         use_effect_with(
             (
                 (*pending).clone(),
@@ -507,6 +508,10 @@ pub fn model_editor(props: &EditorProps) -> Html {
             ),
             move |(pending, version_id, offered, editing)| {
                 if *editing && !offered {
+                    let before = std::mem::replace(&mut *drafted.borrow_mut(), *version_id);
+                    if before != *version_id {
+                        store_draft(file_id, before, &[]);
+                    }
                     store_draft(file_id, *version_id, pending);
                 }
             },
@@ -525,16 +530,19 @@ pub fn model_editor(props: &EditorProps) -> Html {
             let Some(d) = (*draft).clone() else {
                 return;
             };
+            // Kept on offer if they no longer apply, until discarded.
             match replay(&base.model, &d.pending.concat()) {
                 Ok(m) => {
                     working.set(Rc::new(m));
                     pending.set(d.pending);
                     redo_stack.set(Vec::new());
                     error.set(None);
+                    draft.set(None);
                 }
-                Err(e) => error.set(Some(format!("The kept edits no longer apply: {e}"))),
+                Err(e) => error.set(Some(format!(
+                    "The kept edits no longer apply: {e}. Discard them to edit."
+                ))),
             }
-            draft.set(None);
         })
     };
     let discard_draft = {
@@ -759,6 +767,9 @@ pub fn model_editor(props: &EditorProps) -> Html {
         },
     };
     let compile_running = matches!(current_compile, Compile::Running);
+    // Edits wait while a kept draft is on offer, so restoring it never
+    // replaces newer ones.
+    let changeable = editing && !*busy && draft.is_none();
     html! {
         <>
             if let Some(d) = &*draft {
@@ -792,7 +803,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
             }
             if *settings {
                 <ModelSettings config={model.config.clone()}
-                    on_edit={(editing && !*busy).then(|| on_edit.clone())} />
+                    on_edit={changeable.then(|| on_edit.clone())} />
             }
             <DiagramView {model} fit_key={props.fit_key.clone()} active={props.active} {problems} {problems_truncated}
                 document={AttrValue::from(props.file_id.to_string())}
@@ -803,7 +814,7 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     let settings = settings.clone();
                     move |()| settings.set(true)
                 })}
-                on_edit={(editing && !*busy).then(|| on_edit.clone())}
+                on_edit={changeable.then(|| on_edit.clone())}
                 on_error={Callback::from({
                     let error = error.clone();
                     move |message: String| error.set(Some(message))

@@ -134,8 +134,9 @@ Note: memory-serve 2.x requires axum 0.8+. For axum 0.7, use memory-serve 0.6.0 
   with their subsystems on every render.
 - **Canvas preferences** (theme, side panel, value labels, recent blocks)
   live in `localStorage` under `unlinked.canvas.*` via `diagram::pref`;
-  unsaved edits are kept as drafts under `unlinked.draft.<file id>` by
-  the editor, which alone reads and writes them.
+  unsaved edits are kept as drafts under
+  `unlinked.draft.<file id>.<version id>` by the editor, which alone reads
+  and writes them.
 - **The clipboard** is one per session (`diagram::CLIPBOARD`), so blocks
   paste across files. Views tell their document apart by
   `DiagramProps::document` (the editor passes its file ID), never by model
