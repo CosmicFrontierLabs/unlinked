@@ -11,6 +11,7 @@ use crate::api;
 use crate::diagnostics_worker::{DiagnosticOutcome, DiagnosticsWorker};
 use crate::diagram::DiagramView;
 use crate::icons;
+use crate::results::ResultsContext;
 use crate::settings::ModelSettings;
 use crate::sim::initial_options;
 use gloo_events::{EventListener, EventListenerOptions};
@@ -280,6 +281,8 @@ pub fn model_editor(props: &EditorProps) -> Html {
             }
         })
     };
+    // A simulation running from the file's Simulate tab, if it is shown.
+    let running = use_context::<ResultsContext>().is_some_and(|r| r.running);
     let save = {
         let (mounted, pending, message, busy, error, stale, base) = (
             mounted.clone(),
@@ -294,7 +297,8 @@ pub fn model_editor(props: &EditorProps) -> Html {
             (props.project_id, props.file_id, props.on_saved.clone());
         let redo_stack = redo_stack.clone();
         Callback::from(move |()| {
-            if *busy || stale.is_some() {
+            // Saving reloads the file, which would end a running simulation.
+            if *busy || stale.is_some() || running {
                 return;
             }
             let edits = pending.concat();
@@ -543,8 +547,12 @@ pub fn model_editor(props: &EditorProps) -> Html {
                     <input class="change-message" placeholder="Describe the change"
                         value={(*message).clone()} oninput={set_message} disabled={*busy} />
                     <button class="tool primary" onclick={save.reform(|_: MouseEvent| ())}
-                        disabled={*busy || stale.is_some()}
-                        title={format!("Save as v{} (Ctrl+S)", base.version + 1)}>
+                        disabled={*busy || stale.is_some() || running}
+                        title={if running {
+                            "Stop the simulation, or let it finish, before saving".to_string()
+                        } else {
+                            format!("Save as v{} (Ctrl+S)", base.version + 1)
+                        }}>
                         { if *busy { "Saving…".to_string() } else { format!("Save v{}", base.version + 1) } }
                     </button>
                 </span>
