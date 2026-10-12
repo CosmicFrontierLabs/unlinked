@@ -7,6 +7,7 @@
 
 use crate::dialog::ParameterDialog;
 use crate::icons;
+use crate::palette::{BlockPalette, Pick, QuickInsert, PALETTE_DRAG};
 use gloo_events::{EventListener, EventListenerOptions};
 use std::rc::Rc;
 use unlinked_model::diff::{BlockChange, ModelDiff};
@@ -314,9 +315,6 @@ impl RouteTarget {
         }
     }
 }
-
-/// `dataTransfer` type carrying a palette block's catalog key.
-const PALETTE_DRAG: &str = "application/x-unlinked-block";
 
 /// Whether a line may start at a port of this kind.
 fn is_source(kind: PortKind) -> bool {
@@ -771,6 +769,9 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let menu = use_state(|| None::<(i32, i32)>);
     let show_problems = use_state(|| false);
     let help = use_state(|| false);
+    // The open quick insert: where it shows in the container, in pixels,
+    // and the diagram point it adds at.
+    let quick = use_state(|| None::<(f64, f64, Point)>);
     let container = use_node_ref();
     let fit_key = props
         .fit_key
@@ -922,7 +923,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             selection.clone(),
             select_box.clone(),
         );
+        let quick = quick.clone();
         Callback::from(move |e: MouseEvent| {
+            // Pressing elsewhere closes the quick insert.
+            if quick.is_some() {
+                quick.set(None);
+            }
             let (sx, sy) = (e.client_x() as f64, e.client_y() as f64);
             // The middle button always pans; while editing, the left button
             // on empty canvas draws a selection box instead.
@@ -1706,8 +1712,12 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         })
     };
     let ondrop = {
-        let (on_edit, system_ref, model) =
-            (on_edit.clone(), system_ref.clone(), props.model.clone());
+        let (on_edit, system_ref, model, select_created) = (
+            on_edit.clone(),
+            system_ref.clone(),
+            props.model.clone(),
+            select_created.clone(),
+        );
         let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         Callback::from(move |e: DragEvent| {
             let Some(on_edit) = &on_edit else {
@@ -1725,6 +1735,10 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 .ok()
                 .and_then(|svg| to_diagram(&e, &container, &view, svg));
             if let Some(edit) = at.and_then(|at| add_block_at(&model, &system_ref, &type_key, at)) {
+                // Selected once added, so it can be wired or set up at once.
+                if let Edit::AddBlock { id, .. } = &edit {
+                    *select_created.borrow_mut() = Some(id.clone());
+                }
                 on_edit.emit(edit);
             }
         })
@@ -1759,28 +1773,33 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             )));
         })
     };
-    let ondblclick = {
-        let path = path.clone();
-        let selection = selection.clone();
-        let model = props.model.clone();
+    // Add a block, or an annotation selected so its text can be typed in
+    // the inspector, at a diagram point.
+    let add_at = {
+        let (selection, select_created, model) = (
+            selection.clone(),
+            select_created.clone(),
+            props.model.clone(),
+        );
         let (on_edit, system_ref) = (on_edit.clone(), system_ref.clone());
-        let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
         let annotation_count = system.map_or(0, |s| s.annotations.len());
-        Callback::from(move |e: MouseEvent| {
-            // While editing, double-clicking empty canvas adds an annotation
-            // there, selected so its text can be typed in the inspector.
-            let on_something = closest(
-                e.target(),
-                "g.block, [data-annotation], polyline, circle, rect.resize-handle, g.state",
-            )
-            .is_some();
-            if let (Some(on_edit), false) = (&on_edit, on_something) {
-                let at = (*rendered)
-                    .as_ref()
-                    .ok()
-                    .and_then(|svg| to_diagram(&e, &container, &view, svg));
-                let sid = unlinked_model::edit::next_sid(&model);
-                if let (Some(at), Some(sid)) = (at, sid) {
+        Callback::from(move |(pick, at): (Pick, Point)| {
+            let Some(on_edit) = &on_edit else {
+                return;
+            };
+            match pick {
+                Pick::Block(type_key) => {
+                    if let Some(edit) = add_block_at(&model, &system_ref, type_key, at) {
+                        if let Edit::AddBlock { id, .. } = &edit {
+                            *select_created.borrow_mut() = Some(id.clone());
+                        }
+                        on_edit.emit(edit);
+                    }
+                }
+                Pick::Annotation => {
+                    let Some(sid) = unlinked_model::edit::next_sid(&model) else {
+                        return;
+                    };
                     let snap = |v: f64| (v / SNAP).round() * SNAP;
                     let (x, y) = (snap(at.x), snap(at.y));
                     let (text, position) = ("Annotation".to_string(), Rect::new(x, y, x, y));
@@ -1798,6 +1817,37 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         properties: [("SID".to_string(), sid.to_string())].into(),
                     };
                     selection.set(Selection::Annotation(annotation_count, added));
+                }
+            }
+        })
+    };
+    let ondblclick = {
+        let path = path.clone();
+        let selection = selection.clone();
+        let model = props.model.clone();
+        let (container, rendered, view) = (container.clone(), rendered.clone(), view.clone());
+        let (quick, editable) = (quick.clone(), props.on_edit.is_some());
+        Callback::from(move |e: MouseEvent| {
+            // While editing, double-clicking empty canvas opens the quick
+            // insert there.
+            let on_something = closest(
+                e.target(),
+                "g.block, [data-annotation], polyline, circle, rect.resize-handle, g.state",
+            )
+            .is_some();
+            if editable && !on_something {
+                let at = (*rendered)
+                    .as_ref()
+                    .ok()
+                    .and_then(|svg| to_diagram(&e, &container, &view, svg));
+                let origin = container
+                    .cast::<HtmlElement>()
+                    .map(|el| el.get_bounding_client_rect());
+                if let (Some(at), Some(r)) = (at, origin) {
+                    // Kept inside the canvas, at roughly its largest size.
+                    let x = (e.client_x() as f64 - r.left()).min(r.width() - 330.0);
+                    let y = (e.client_y() as f64 - r.top()).min(r.height() - 420.0);
+                    quick.set(Some((x.max(0.0), y.max(0.0), at)));
                 }
                 return;
             }
@@ -2168,11 +2218,26 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         move |p: Vec<String>| path.set(p)
                     })} />
                     if props.on_edit.is_some() {
-                        <BlockPalette />
+                        <BlockPalette theme={*theme} on_add={{
+                            let (add_at, container, rendered, view) =
+                                (add_at.clone(), container.clone(), rendered.clone(), view.clone());
+                            // In the middle of what is shown.
+                            Callback::from(move |type_key: &'static str| {
+                                let el = container.cast::<HtmlElement>();
+                                let vb = (*rendered).as_ref().ok().and_then(|svg| view_box(svg));
+                                if let (Some(el), Some([vx, vy, ..])) = (el, vb) {
+                                    let at = Point::new(
+                                        (el.client_width() as f64 / 2.0 - view.x) / view.scale + vx,
+                                        (el.client_height() as f64 / 2.0 - view.y) / view.scale + vy,
+                                    );
+                                    add_at.emit((Pick::Block(type_key), at));
+                                }
+                            })
+                        }} />
                     }
                 </aside>
                 <div class={classes!("diagram", (*theme == Theme::Light).then_some("light"), props.on_edit.is_some().then_some("editing"))}
-                    ref={container} tabindex="0"
+                    ref={container.clone()} tabindex="0"
                     {onmousedown} {onmousemove} onmouseup={end_drag.clone()} onmouseleave={end_drag}
                     {onclick} {ondblclick} {onkeydown} {ondragover} {ondrop} {oncontextmenu}>
                     <style>{ highlight }</style>
@@ -2182,6 +2247,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         ondblclick={Callback::from(|e: MouseEvent| e.stop_propagation())}>
                         { for crumbs }
                     </nav>
+                    if let Some((x, y, at)) = *quick {
+                        <QuickInsert theme={*theme} {x} {y}
+                            on_pick={{
+                                let (add_at, quick, container) = (add_at.clone(), quick.clone(), container.clone());
+                                Callback::from(move |pick: Pick| {
+                                    quick.set(None);
+                                    add_at.emit((pick, at));
+                                    if let Some(el) = container.cast::<HtmlElement>() {
+                                        let _ = el.focus();
+                                    }
+                                })
+                            }}
+                            on_close={{
+                                let (quick, container) = (quick.clone(), container.clone());
+                                Callback::from(move |()| {
+                                    quick.set(None);
+                                    if let Some(el) = container.cast::<HtmlElement>() {
+                                        let _ = el.focus();
+                                    }
+                                })
+                            }} />
+                    }
                     if *help {
                         <ShortcutHelp editable={props.on_edit.is_some()} on_close={{
                             let help = help.clone();
@@ -2357,40 +2444,6 @@ fn system_tree(props: &TreeProps) -> Html {
                 { &props.model.name }
             </a>
             { level(&props.model.root, &[], props) }
-        </div>
-    }
-}
-
-/// Native blocks that can be dragged onto the diagram, by category.
-#[function_component(BlockPalette)]
-fn block_palette() -> Html {
-    let groups = catalog::PALETTE_CATEGORIES.iter().map(|category| {
-        let items = catalog::blocks_in_category(category).map(|b| {
-            let type_key = b.type_key;
-            let ondragstart = Callback::from(move |e: DragEvent| {
-                if let Some(d) = e.data_transfer() {
-                    let _ = d.set_data(PALETTE_DRAG, type_key);
-                    d.set_effect_allowed("copy");
-                }
-            });
-            html! {
-                <li class="palette-block" draggable="true" {ondragstart} title={b.type_key}>
-                    { b.label }
-                </li>
-            }
-        });
-        html! {
-            <>
-                <h4>{ *category }</h4>
-                <ul>{ for items }</ul>
-            </>
-        }
-    });
-    html! {
-        <div class="palette">
-            <h3>{ "Blocks" }</h3>
-            <p class="hint">{ "Drag onto the diagram. Drag from a port to another to connect; select a line and press Delete to remove it." }</p>
-            { for groups }
         </div>
     }
 }
