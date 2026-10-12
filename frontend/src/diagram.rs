@@ -3040,32 +3040,69 @@ struct TreeProps {
     on_open: Callback<Vec<String>>,
 }
 
+/// The model's subsystems as a tree, as Simulink's model browser shows it:
+/// levels open along the way to the shown system and closed elsewhere,
+/// until toggled.
 #[function_component(SystemTree)]
 fn system_tree(props: &TreeProps) -> Html {
-    fn level(sys: &System, prefix: &[String], props: &TreeProps) -> Html {
-        let subs: Vec<&Block> = sys
+    // Levels whose open state the user flipped from that default.
+    let toggled = use_state(std::collections::HashSet::<Vec<String>>::new);
+    let toggle = {
+        let toggled = toggled.clone();
+        Callback::from(move |p: Vec<String>| {
+            let mut t = (*toggled).clone();
+            if !t.remove(&p) {
+                t.insert(p);
+            }
+            toggled.set(t);
+        })
+    };
+    fn level(
+        sys: &System,
+        prefix: &[String],
+        props: &TreeProps,
+        toggled: &std::collections::HashSet<Vec<String>>,
+        toggle: &Callback<Vec<String>>,
+    ) -> Html {
+        let subs: Vec<(&Block, &System)> = sys
             .blocks
             .iter()
-            .filter(|b| b.subsystem.is_some())
+            .filter_map(|b| Some((b, b.subsystem.as_deref()?)))
             .collect();
         if subs.is_empty() {
             return html! {};
         }
         html! {
             <ul>
-                { for subs.into_iter().map(|b| {
+                { for subs.into_iter().map(|(b, sub)| {
                     let mut p = prefix.to_vec();
                     p.push(b.name.clone());
                     let active = p == props.current;
+                    let on_the_way = props.current.starts_with(&p) && !active;
+                    let open = on_the_way != toggled.contains(&p);
+                    let nested = sub.blocks.iter().any(|b| b.subsystem.is_some());
                     let on_open = props.on_open.clone();
                     let target = p.clone();
+                    let flip = toggle.reform({
+                        let p = p.clone();
+                        move |_: MouseEvent| p.clone()
+                    });
                     html! {
                         <li>
+                            if nested {
+                                <button class={classes!("twisty", open.then_some("open"))} onclick={flip}
+                                    aria-expanded={open.to_string()}
+                                    aria-label={if open { "Collapse" } else { "Expand" }} />
+                            } else {
+                                <span class="twisty" />
+                            }
                             <a class={classes!(active.then_some("active"))}
                                 onclick={Callback::from(move |_: MouseEvent| on_open.emit(target.clone()))}>
                                 { b.name.replace('\n', " ") }
                             </a>
-                            { level(b.subsystem.as_ref().unwrap(), &p, props) }
+                            if open {
+                                { level(sub, &p, props, toggled, toggle) }
+                            }
                         </li>
                     }
                 }) }
@@ -3079,7 +3116,7 @@ fn system_tree(props: &TreeProps) -> Html {
                 onclick={Callback::from(move |_: MouseEvent| on_open.emit(vec![]))}>
                 { &props.model.name }
             </a>
-            { level(&props.model.root, &[], props) }
+            { level(&props.model.root, &[], props, &toggled, &toggle) }
         </div>
     }
 }
