@@ -6,6 +6,7 @@
 //! block name subcharted states.
 
 use crate::dialog::ParameterDialog;
+use crate::find::{FindBlocks, Found};
 use crate::icons;
 use crate::palette::{BlockPalette, Pick, QuickInsert, PALETTE_DRAG};
 use gloo_events::{EventListener, EventListenerOptions};
@@ -997,6 +998,8 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     let menu = use_state(|| None::<(i32, i32)>);
     let show_problems = use_state(|| false);
     let help = use_state(|| false);
+    // Whether the find box is open.
+    let finding = use_state(|| false);
     // The open quick insert: where it shows in the container, in pixels,
     // and the diagram point it adds at.
     let quick = use_state(|| None::<(f64, f64, Point)>);
@@ -2373,6 +2376,28 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 p.push(name);
                 path.set(p);
                 selection.set(Selection::Nothing);
+                return;
+            }
+            // Double-clicking another block edits its parameters, and an
+            // annotation its text, as in Simulink: the first click selected
+            // it, so its inspector is showing.
+            let field = if closest(e.target(), "[data-annotation]").is_some() {
+                ".inspector textarea.annotation-text"
+            } else if block_group(e.target()).is_some() {
+                ".inspector :is(input.param, select, textarea)"
+            } else {
+                return;
+            };
+            let field = container
+                .cast::<Element>()
+                .and_then(|c| c.parent_element())
+                .and_then(|v| v.query_selector(field).ok().flatten())
+                .and_then(|f| f.dyn_into::<HtmlElement>().ok());
+            if let (true, Some(field)) = (editable, field) {
+                let _ = field.focus();
+                if let Some(input) = field.dyn_ref::<HtmlInputElement>() {
+                    input.select();
+                }
             }
         })
     };
@@ -2438,6 +2463,43 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     view.dispatch(ViewAction::Set(fit(&el, size)));
                 }
             }
+        })
+    };
+    // Bring block `id` of the shown system into view, at the current zoom,
+    // when it is not wholly in view already.
+    let reveal = {
+        let (view, container, rendered) = (view.clone(), container.clone(), rendered.clone());
+        let blocks: Vec<(String, Rect)> = system
+            .map(|s| {
+                s.blocks
+                    .iter()
+                    .map(|b| (b.id.0.clone(), b.position))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Callback::from(move |id: String| {
+            let Some(r) = blocks.iter().find(|(b, _)| *b == id).map(|(_, r)| *r) else {
+                return;
+            };
+            let el = container.cast::<HtmlElement>();
+            let vb = (*rendered).as_ref().ok().and_then(|svg| view_box(svg));
+            let (Some(el), Some([vx, vy, ..])) = (el, vb) else {
+                return;
+            };
+            let (cw, ch) = (el.client_width() as f64, el.client_height() as f64);
+            let v = *view;
+            let screen = |x: f64, y: f64| ((x - vx) * v.scale + v.x, (y - vy) * v.scale + v.y);
+            let (l, t) = screen(r.left, r.top);
+            let (rr, b) = screen(r.right, r.bottom);
+            if l >= 0.0 && t >= 0.0 && rr <= cw && b <= ch {
+                return;
+            }
+            let (cx, cy) = ((r.left + r.right) / 2.0 - vx, (r.top + r.bottom) / 2.0 - vy);
+            view.dispatch(ViewAction::Set(View {
+                scale: v.scale,
+                x: cw / 2.0 - cx * v.scale,
+                y: ch / 2.0 - cy * v.scale,
+            }));
         })
     };
     // Zoom by `factor` about the middle of the canvas.
@@ -2540,6 +2602,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_settings.clone(),
             select_on_open.clone(),
         );
+        let reveal = reveal.clone();
         let target = d.target.clone();
         Callback::from(move |_: MouseEvent| match &target {
             DiagnosticTarget::Model => {}
@@ -2553,6 +2616,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     // Another level selects the block once it is shown.
                     if names == *path {
                         selection.set(Selection::Blocks(vec![id.0.clone()]));
+                        reveal.emit(id.0.clone());
                     } else {
                         *select_on_open.borrow_mut() = Some(id.0.clone());
                         path.set(names);
@@ -2700,7 +2764,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
     // are editing actions.
     let onkeydown = {
         let (fit_view, zoom_by, help) = (fit_view.clone(), zoom_by.clone(), help.clone());
+        let (finding, reveal) = (finding.clone(), reveal.clone());
         let (selection, path, menu) = (selection.clone(), path.clone(), menu.clone());
+        let order: Vec<String> = system
+            .map(|s| s.blocks.iter().map(|b| b.id.0.clone()).collect())
+            .unwrap_or_default();
         Callback::from(move |e: KeyboardEvent| {
             // Keys for controls shown over the canvas are theirs.
             let control = closest(
@@ -2717,6 +2785,25 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 "=" | "+" if command => zoom_by.emit(1.25),
                 "-" | "_" if command => zoom_by.emit(1.0 / 1.25),
                 "?" => help.set(!*help),
+                "f" if command => finding.set(true),
+                // With a block selected, Tab steps through the blocks and
+                // Shift+Tab back; otherwise Tab moves focus as usual, so the
+                // canvas never traps it.
+                "Tab" if !command && !selection.blocks().is_empty() => {
+                    let n = order.len();
+                    let at = selection
+                        .blocks()
+                        .last()
+                        .and_then(|id| order.iter().position(|o| o == id))
+                        .unwrap_or(0);
+                    let next = if e.shift_key() {
+                        (at + n - 1) % n
+                    } else {
+                        (at + 1) % n
+                    };
+                    selection.set(Selection::Blocks(vec![order[next].clone()]));
+                    reveal.emit(order[next].clone());
+                }
                 "Escape" => {
                     if menu.is_some() {
                         menu.set(None);
@@ -2776,6 +2863,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     title={if *theme == Theme::Dark { "Light canvas" } else { "Dark canvas" }}>
                     { if *theme == Theme::Dark { icons::sun() } else { icons::moon() } }
                 </button>
+                <button class={classes!("tool", "icon", (*finding).then_some("active"))}
+                    title="Find blocks (Ctrl+F)" onclick={{
+                        let finding = finding.clone();
+                        Callback::from(move |_: MouseEvent| finding.set(!*finding))
+                    }}>{ icons::search() }</button>
                 <button class={classes!("tool", "icon", (*help).then_some("active"))}
                     onclick={toggle_help} title="Keyboard and mouse shortcuts (?)">{ icons::help() }</button>
                 { props.trailing.clone() }
@@ -2845,6 +2937,42 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                 let (quick, container) = (quick.clone(), container.clone());
                                 Callback::from(move |()| {
                                     quick.set(None);
+                                    if let Some(el) = container.cast::<HtmlElement>() {
+                                        let _ = el.focus();
+                                    }
+                                })
+                            }} />
+                    }
+                    if *finding {
+                        <FindBlocks model={props.model.clone()}
+                            on_pick={{
+                                let reveal = reveal.clone();
+                                let (finding, path, selection, select_on_open, container) = (
+                                    finding.clone(),
+                                    path.clone(),
+                                    selection.clone(),
+                                    select_on_open.clone(),
+                                    container.clone(),
+                                );
+                                Callback::from(move |f: Found| {
+                                    finding.set(false);
+                                    // Another level selects the block once shown.
+                                    if f.path == *path {
+                                        reveal.emit(f.id.clone());
+                                        selection.set(Selection::Blocks(vec![f.id]));
+                                    } else {
+                                        *select_on_open.borrow_mut() = Some(f.id);
+                                        path.set(f.path);
+                                    }
+                                    if let Some(el) = container.cast::<HtmlElement>() {
+                                        let _ = el.focus();
+                                    }
+                                })
+                            }}
+                            on_close={{
+                                let (finding, container) = (finding.clone(), container.clone());
+                                Callback::from(move |()| {
+                                    finding.set(false);
                                     if let Some(el) = container.cast::<HtmlElement>() {
                                         let _ = el.focus();
                                     }
@@ -2998,6 +3126,11 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Space", "Fit to view"),
         ("Ctrl+= / Ctrl+-", "Zoom in / out"),
         ("Double-click a subsystem", "Open it"),
+        ("Ctrl+F", "Find blocks anywhere in the model"),
+        (
+            "Tab / Shift+Tab",
+            "With a block selected, select the next / previous",
+        ),
         ("Esc", "Clear the selection, or go up a level"),
         ("?", "Show these shortcuts"),
     ];
@@ -3005,6 +3138,7 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
         ("Drag on empty canvas", "Select by box; Shift adds"),
         ("Shift+click", "Add to or remove from the selection"),
         ("Double-click empty canvas", "Find and add a block"),
+        ("Double-click a block", "Edit its parameters"),
         ("Drag from a port", "Connect to another port"),
         ("Ctrl+drag a line", "Branch it"),
         ("Ctrl+click a block", "Connect the selected block to it"),
