@@ -3726,6 +3726,15 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         .into_iter()
         .filter(|&a| matches!(a, Action::Arrange(_)) && enabled(a))
         .collect();
+    // The source and name of a line the open menu is for, to name in place.
+    let menu_line: Option<(Endpoint, String)> = system
+        .filter(|_| menu.is_some())
+        .and_then(|sys| match &*selection {
+            Selection::Wire(dst) => unlinked_model::edit::line_into(sys, dst),
+            Selection::Trunk(src) => unlinked_model::edit::line_from(sys, src),
+            _ => None,
+        })
+        .and_then(|line| Some((line.src.clone()?, line.name.clone().unwrap_or_default())));
     let menu_items = MENU
         .into_iter()
         .filter(|&a| !matches!(a, Action::Arrange(_)) && enabled(a))
@@ -4549,6 +4558,23 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                     })
                                 }}>
                                     <span>{ "Add block here…" }</span><span class="shortcut">{ "Double-click" }</span>
+                                </button>
+                            }
+                            // On a line: name its signal in place, where the
+                            // menu opened.
+                            if let Some((src, name)) = menu_line.clone() {
+                                <button class="menu-item" onclick={{
+                                    let (naming, container) = (naming.clone(), container.clone());
+                                    Callback::from(move |_: MouseEvent| {
+                                        if let Some(el) = container.cast::<HtmlElement>() {
+                                            let r = el.get_bounding_client_rect();
+                                            let left = (x as f64 - r.left() - 80.0).max(0.0);
+                                            let top = (y as f64 - r.top() - 30.0).max(0.0);
+                                            naming.set(Some((src.clone(), (left, top), name.clone())));
+                                        }
+                                    })
+                                }}>
+                                    <span>{ "Name signal…" }</span><span class="shortcut">{ "Double-click" }</span>
                                 </button>
                             }
                             { for MENU.iter().filter(|&&a| enabled(a) && !matches!(a, Action::Arrange(_)))
