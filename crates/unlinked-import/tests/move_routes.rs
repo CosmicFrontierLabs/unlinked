@@ -163,3 +163,19 @@ fn moving_the_plant_keeps_the_feedback_route() {
         assert!(points.contains(&"[20, 0]") && points.contains(&"[0, -70]"));
     }
 }
+
+/// Moving every block of a branched line in one batch, as a group move does.
+#[test]
+fn moving_connected_blocks_together_round_trips() {
+    for (name, bytes) in fixtures(false) {
+        let original = import(name, &bytes).unwrap();
+        let edits: Vec<Edit> = ["1", "2", "3"]
+            .iter()
+            .map(|id| shift(&original, id, 10.0, 20.0))
+            .collect();
+        let mut expected = original.clone();
+        apply_batch(&mut expected, &edits).unwrap();
+        let out = apply_edits(name, &bytes, &edits).unwrap();
+        assert_eq!(import(name, &out).unwrap(), expected, "{name}");
+    }
+}
