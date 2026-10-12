@@ -453,9 +453,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
         let (reload, error) = (reload.clone(), error.clone());
         Callback::from(move |(file_id, path): (Uuid, String)| {
             if gloo_utils::window()
-                .confirm_with_message(&format!(
-                    "Delete {path} from this project?"
-                ))
+                .confirm_with_message(&format!("Delete {path} from this project?"))
                 .unwrap_or(false)
             {
                 mutate(api::delete_file(id, file_id), reload.clone(), error.clone());
@@ -555,7 +553,7 @@ pub fn project_page(props: &ProjectProps) -> Html {
             <h2>{ "Files" }</h2>
             if editor {
                 <div class="inline-form">
-                    { text_input(&folder, "Folder (optional)") }
+                    { text_input(&folder, "Upload folder (optional)") }
                     { text_input(&message, "Change message") }
                     <label class="button primary">
                         { if *uploading { "Uploading…" } else { "Upload files…" } }

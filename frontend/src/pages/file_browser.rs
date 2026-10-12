@@ -240,3 +240,91 @@ pub(super) fn file_browser(props: &BrowserProps) -> Html {
         </section>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::FileVersionInfo;
+
+    fn file(id: u128, path: &str, bytes: i64) -> FileInfo {
+        let created_at = chrono::DateTime::from_timestamp(id as i64, 0).unwrap();
+        FileInfo {
+            id: Uuid::from_u128(id),
+            project_id: Uuid::nil(),
+            path: path.into(),
+            created_at,
+            latest: FileVersionInfo {
+                id: Uuid::from_u128(id + 100),
+                file_id: Uuid::from_u128(id),
+                version: 1,
+                sha256: String::new(),
+                size_bytes: bytes,
+                author: None,
+                message: String::new(),
+                created_at,
+            },
+        }
+    }
+    fn paths(rows: &[Entry<'_>]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match row {
+                Entry::Folder { path, count, .. } => format!("{path}/ ({count})"),
+                Entry::File(f) => f.path.clone(),
+            })
+            .collect()
+    }
+    #[test]
+    fn folders_respect_path_boundaries_and_count_descendants() {
+        let files = vec![
+            file(1, "plant/a.mdl", 20),
+            file(2, "plant/inner/b.slx", 30),
+            file(3, "plants/c.mdl", 40),
+            file(4, "readme.txt", 10),
+        ];
+        assert_eq!(
+            paths(&entries(&files, "", "", Kind::All, Sort::Name)),
+            ["plant/ (2)", "plants/ (1)", "readme.txt"]
+        );
+        assert_eq!(
+            paths(&entries(&files, "/plant/", "", Kind::All, Sort::Name)),
+            ["plant/inner/ (1)", "plant/a.mdl"]
+        );
+    }
+    #[test]
+    fn search_is_global_and_filters_are_case_insensitive() {
+        let files = vec![
+            file(1, "plant/GAIN.SLX", 20),
+            file(2, "other/gain.m", 30),
+            file(3, "gain.txt", 40),
+        ];
+        assert_eq!(
+            paths(&entries(&files, "plant", " GAIN ", Kind::All, Sort::Name)),
+            ["gain.txt", "other/gain.m", "plant/GAIN.SLX"]
+        );
+        assert_eq!(
+            paths(&entries(&files, "plant", "gain", Kind::Script, Sort::Name)),
+            ["other/gain.m"]
+        );
+        assert_eq!(
+            paths(&entries(&files, "", "", Kind::Model, Sort::Name)),
+            ["plant/ (1)"]
+        );
+        assert!(entries(&files, "", "missing", Kind::All, Sort::Name).is_empty());
+    }
+    #[test]
+    fn sort_newest_or_largest_first() {
+        let files = vec![
+            file(1, "z.mdl", 100),
+            file(2, "a.mdl", 20),
+            file(3, "b.mdl", 50),
+        ];
+        assert_eq!(
+            paths(&entries(&files, "", "", Kind::All, Sort::Updated)),
+            ["b.mdl", "a.mdl", "z.mdl"]
+        );
+        assert_eq!(
+            paths(&entries(&files, "", "", Kind::All, Sort::Size)),
+            ["z.mdl", "b.mdl", "a.mdl"]
+        );
+    }
+}
