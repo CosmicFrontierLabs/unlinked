@@ -38,7 +38,8 @@ with sync_playwright() as p:
     expect(stop).not_to_have_attribute('aria-invalid','true')
     # Integrator has enough parameters to offer filtering; adding stays unsaved.
     diagram.get_by_role('listitem',name=re.compile(r'^Integrator \(Integrator\):')).dblclick()
-    page.get_by_role('checkbox',name='Limit output',exact=True).check()
+    page.get_by_role('checkbox',name='Limit output',exact=True).click()
+    expect(page.get_by_role('checkbox',name='Limit output',exact=True)).to_be_checked()
     search=page.get_by_role('searchbox',name='Search parameters',exact=True)
     expect(search).to_be_visible()
     search.fill('initial')

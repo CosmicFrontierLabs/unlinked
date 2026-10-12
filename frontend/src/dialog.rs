@@ -119,7 +119,7 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
             }
         };
         html! {
-            <div class="dialog-field">
+            <div key={p.name} class="dialog-field">
                 <div class="dialog-label-row">
                     <label for={id} class="dialog-label">
                         { p.label }
@@ -176,7 +176,7 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
             }
             if matched == 0 { <p class="muted" role="status">{ "No matching parameters." }</p> }
             { for sections.iter().filter(|s| s.fields.iter().any(|(p, visible)| matches(p, *visible))).map(|s| html! {
-                <fieldset>
+                <fieldset key={s.name}>
                     <legend>{ s.name }</legend>
                     { for s.fields.iter().filter(|(p, visible)| matches(p, *visible)).map(|(p, _)| field(p)) }
                 </fieldset>
