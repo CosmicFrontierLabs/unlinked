@@ -39,8 +39,10 @@ with sync_playwright() as p:
     page.get_by_role('button',name='Diagram',exact=True).click()
     wire=page.locator('.diagram polyline.wire-hit').first
     wire.dispatch_event('click')
-    page.locator('.recorded').get_by_role('button',name='Plot',exact=True).first.click()
+    plot=page.locator('.recorded').get_by_role('button',name='Plot',exact=True).first
+    plot.focus();plot.press('Enter')
     expect(sim).to_be_visible()
+    expect(page.get_by_role('button',name='Simulate',exact=True)).to_be_focused()
     expect(query).to_have_value('')
     expect(sim.locator('.signal-options input')).to_have_count(2)
     # Bulk selection retains the user's ordering instead of sorting by ID.
