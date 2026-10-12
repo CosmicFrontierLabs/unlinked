@@ -3527,8 +3527,14 @@ fn sparkline(run: &ShownRun, indices: &[usize]) -> Html {
     if !lo.is_finite() {
         return html! {};
     }
-    // Halved, so the span of values near ±f64::MAX stays finite.
-    let span = if hi > lo { hi / 2.0 - lo / 2.0 } else { 1.0 };
+    // In units of the largest magnitude, so the span stays finite near
+    // ±f64::MAX and nonzero for the tiniest values.
+    let scale = match lo.abs().max(hi.abs()) {
+        m if m > 0.0 => m,
+        _ => 1.0,
+    };
+    let (low, high) = (lo / scale, hi / scale);
+    let span = if high > low { high - low } else { 1.0 };
     let x = |t: f64| {
         if t1 > t0 {
             (t - t0) / (t1 - t0) * W
@@ -3536,7 +3542,7 @@ fn sparkline(run: &ShownRun, indices: &[usize]) -> Html {
             0.0
         }
     };
-    let y = |v: f64| H - 2.0 - (v / 2.0 - lo / 2.0) / span * (H - 4.0);
+    let y = |v: f64| H - 2.0 - (v / scale - low) / span * (H - 4.0);
     let colors = ["#7aa2f7", "#9ece6a", "#e0af68"];
     let lines = series.iter().zip(colors).flat_map(|(s, color)| {
         sparkline_runs(time, s, MAX_POINTS)
@@ -3578,19 +3584,24 @@ fn sparkline_runs(time: &[f64], values: &[f64], max: usize) -> Vec<Vec<(f64, f64
         return Vec::new();
     }
     let step = n.div_ceil(max.max(1)).max(1);
-    let picked = (0..n)
-        .step_by(step)
-        .chain((!(n - 1).is_multiple_of(step)).then_some(n - 1));
     let mut runs = vec![Vec::new()];
-    for i in picked {
-        match (time[i], values[i]) {
-            (t, v) if t.is_finite() && v.is_finite() => runs.last_mut().unwrap().push((t, v)),
-            _ => {
-                if !runs.last().unwrap().is_empty() {
-                    runs.push(Vec::new());
-                }
-            }
+    // A gap anywhere since the last drawn sample, picked or not, breaks
+    // the line there.
+    let mut gap = false;
+    for i in 0..n {
+        let (t, v) = (time[i], values[i]);
+        if !(t.is_finite() && v.is_finite()) {
+            gap = true;
+            continue;
         }
+        if i % step != 0 && i != n - 1 {
+            continue;
+        }
+        if gap && !runs.last().unwrap().is_empty() {
+            runs.push(Vec::new());
+        }
+        gap = false;
+        runs.last_mut().unwrap().push((t, v));
     }
     runs.retain(|r| !r.is_empty());
     runs
@@ -4033,6 +4044,13 @@ mod tests {
         let gappy = [1.0, f64::NAN, 3.0, 4.0];
         let runs = sparkline_runs(&[0.0, 1.0, 2.0, 3.0], &gappy, 300);
         assert_eq!(runs, vec![vec![(0.0, 1.0)], vec![(2.0, 3.0), (3.0, 4.0)]]);
+        // A gap between drawn samples breaks the line too.
+        let time: Vec<f64> = (0..600).map(f64::from).collect();
+        let mut ones = vec![1.0; 600];
+        ones[1] = f64::NAN;
+        let runs = sparkline_runs(&time, &ones, 300);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0], vec![(0.0, 1.0)]);
         assert!(sparkline_runs(&[], &[], 300).is_empty());
     }
 
