@@ -1743,6 +1743,30 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             },
         )
     };
+    // The hovered line's name and recorded signals, found again only when
+    // another line is hovered or the model, level or signals change.
+    let tip_signals = {
+        let (model, run) = (props.model.clone(), run.clone());
+        use_memo(
+            (
+                (*line_tip).map(|(i, ..)| i),
+                Rc::as_ptr(&props.model) as usize,
+                (*path).clone(),
+                run.as_ref().map(|r| Rc::as_ptr(&r.signals) as usize),
+            ),
+            move |(line, _, path, _)| {
+                let refs: Vec<&str> = path.iter().map(String::as_str).collect();
+                let (run, sys) = (run?, model.system_at(&refs)?);
+                let line = sys.lines.get((*line)?)?;
+                let src = line.src.as_ref()?;
+                let name = line.name.clone().unwrap_or_else(|| {
+                    let block = sys.block(&src.block).map_or("", |b| b.name.as_str());
+                    format!("{} out {}", block.replace('\n', " "), src.port.index)
+                });
+                Some((name, run.signal_indices(&model, path, src)))
+            },
+        )
+    };
     let values: Vec<(Point, String)> = match &run {
         Some(run) => sources
             .0
@@ -2005,7 +2029,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     .cast::<HtmlElement>()
                     .map(|el| el.get_bounding_client_rect());
                 line_tip.set(line.zip(r).map(|(i, r)| {
-                    // At the card's largest: 18rem wide, four lines.
+                    // At the card's largest, as `.line-tip` bounds it.
                     let x = (cx - r.left() + 14.0).min(r.width() - 300.0).max(0.0);
                     let y = (cy - r.top() + 18.0).min(r.height() - 110.0).max(0.0);
                     (i, x, y)
@@ -3863,25 +3887,17 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     <style>{ highlight }</style>
                     <div class="canvas" style={transform}>{ canvas }{ overlay }</div>
                     // With a run shown, a hovered line tells its value.
-                    if let Some((name, value, x, y)) = (*line_tip).and_then(|(i, x, y)| {
-                        let (run, sys) = (run.as_ref()?, system?);
-                        let line = sys.lines.get(i)?;
-                        let src = line.src.as_ref()?;
-                        let value = value_label(run, &run.signal_indices(&props.model, &path, src))?;
-                        let name = line.name.clone().unwrap_or_else(|| {
-                            let block = sys.block(&src.block).map_or("", |b| b.name.as_str());
-                            format!("{} out {}", block.replace('\n', " "), src.port.index)
-                        });
-                        Some((name, value, x, y))
+                    if let Some((name, value, x, y)) = (*line_tip).zip((*tip_signals).as_ref()).and_then(|((_, x, y), (name, indices))| {
+                        Some((name, value_label(run.as_ref()?, indices)?, x, y))
                     }) {
                         <div class="hover-card line-tip" style={format!("left: {x}px; top: {y}px;")}>
-                            <div class="hover-name">{ name }</div>
+                            <div class="hover-name" title={name.clone()}>{ name }</div>
                             <div class="mono">{ value }</div>
                             <div class="muted">{ run.as_ref().map(|r| format!("at t = {} in the v{} run",
                                 r.time.get(r.sample_index).copied().map(short_value).unwrap_or_default(),
                                 r.version)).unwrap_or_default() }</div>
                             if stale {
-                                <div class="muted">{ "The diagram has changed since this run." }</div>
+                                <div class="muted">{ "The diagram changed since this run." }</div>
                             }
                         </div>
                     }
