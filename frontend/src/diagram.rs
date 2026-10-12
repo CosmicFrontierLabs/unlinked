@@ -4086,8 +4086,38 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                         }
                     })} />
                 }
+                // Several blocks: what they are and what can be done to all.
+                if selection.blocks().len() > 1 {
+                    <aside class="inspector">
+                        <h3>{ format!("{} blocks", selection.blocks().len()) }</h3>
+                        <p class="muted selection-names">
+                            { selection.blocks().iter()
+                                .filter_map(|id| level_blocks.iter().find(|b| b.id.0 == *id))
+                                .map(|b| b.name.replace('\n', " "))
+                                .take(12).collect::<Vec<_>>().join(", ") }
+                            if selection.blocks().len() > 12 { { "…" } }
+                        </p>
+                        if props.on_edit.is_some() {
+                            <div class="selection-actions">
+                                { for [Action::Arrange(Arrange::Left), Action::Arrange(Arrange::Center),
+                                    Action::Arrange(Arrange::Top), Action::Arrange(Arrange::Middle),
+                                    Action::Arrange(Arrange::Across), Action::Arrange(Arrange::Down),
+                                    Action::Group, Action::Delete]
+                                    .into_iter().filter(|&a| enabled(a)).map(|a| {
+                                        let act = act.clone();
+                                        html! {
+                                            <button onclick={Callback::from(move |_: MouseEvent| act.emit(a))}>
+                                                { a.label().0 }
+                                            </button>
+                                        }
+                                    }) }
+                            </div>
+                        }
+                    </aside>
+                }
                 // Closing an inspector clears what it shows, as Esc does.
-                if selected_line.is_some() || selected_annotation.is_some() || selected_block.is_some() {
+                if selected_line.is_some() || selected_annotation.is_some() || selected_block.is_some()
+                    || selection.blocks().len() > 1 {
                     <button class="tool icon inspector-close" title="Close (Esc)" aria-label="Close the inspector"
                         onclick={{
                             let (selection, container) = (selection.clone(), container.clone());
