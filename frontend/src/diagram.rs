@@ -2443,6 +2443,43 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
         })
     };
+    // Bring block `id` of the shown system into view, at the current zoom,
+    // when it is not wholly in view already.
+    let reveal = {
+        let (view, container, rendered) = (view.clone(), container.clone(), rendered.clone());
+        let blocks: Vec<(String, Rect)> = system
+            .map(|s| {
+                s.blocks
+                    .iter()
+                    .map(|b| (b.id.0.clone(), b.position))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Callback::from(move |id: String| {
+            let Some(r) = blocks.iter().find(|(b, _)| *b == id).map(|(_, r)| *r) else {
+                return;
+            };
+            let el = container.cast::<HtmlElement>();
+            let vb = (*rendered).as_ref().ok().and_then(|svg| view_box(svg));
+            let (Some(el), Some([vx, vy, ..])) = (el, vb) else {
+                return;
+            };
+            let (cw, ch) = (el.client_width() as f64, el.client_height() as f64);
+            let v = *view;
+            let screen = |x: f64, y: f64| ((x - vx) * v.scale + v.x, (y - vy) * v.scale + v.y);
+            let (l, t) = screen(r.left, r.top);
+            let (rr, b) = screen(r.right, r.bottom);
+            if l >= 0.0 && t >= 0.0 && rr <= cw && b <= ch {
+                return;
+            }
+            let (cx, cy) = ((r.left + r.right) / 2.0 - vx, (r.top + r.bottom) / 2.0 - vy);
+            view.dispatch(ViewAction::Set(View {
+                scale: v.scale,
+                x: cw / 2.0 - cx * v.scale,
+                y: ch / 2.0 - cy * v.scale,
+            }));
+        })
+    };
     // Zoom by `factor` about the middle of the canvas.
     let zoom_by = {
         let (view, container) = (view.clone(), container.clone());
@@ -2543,6 +2580,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             props.on_settings.clone(),
             select_on_open.clone(),
         );
+        let reveal = reveal.clone();
         let target = d.target.clone();
         Callback::from(move |_: MouseEvent| match &target {
             DiagnosticTarget::Model => {}
@@ -2556,6 +2594,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     // Another level selects the block once it is shown.
                     if names == *path {
                         selection.set(Selection::Blocks(vec![id.0.clone()]));
+                        reveal.emit(id.0.clone());
                     } else {
                         *select_on_open.borrow_mut() = Some(id.0.clone());
                         path.set(names);
@@ -2864,6 +2903,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     if *finding {
                         <FindBlocks model={props.model.clone()}
                             on_pick={{
+                                let reveal = reveal.clone();
                                 let (finding, path, selection, select_on_open, container) = (
                                     finding.clone(),
                                     path.clone(),
@@ -2875,6 +2915,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                                     finding.set(false);
                                     // Another level selects the block once shown.
                                     if f.path == *path {
+                                        reveal.emit(f.id.clone());
                                         selection.set(Selection::Blocks(vec![f.id]));
                                     } else {
                                         *select_on_open.borrow_mut() = Some(f.id);
