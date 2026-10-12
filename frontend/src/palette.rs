@@ -171,7 +171,7 @@ pub fn block_palette(props: &PaletteProps) -> Html {
 }
 
 /// What the quick insert adds.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pick {
     Block(&'static str),
     Annotation,
@@ -187,13 +187,29 @@ pub struct QuickInsertProps {
     pub on_close: Callback<()>,
 }
 
+/// What the quick insert offers for `query`: the best matching blocks, then
+/// an annotation when nothing is typed yet or the query names one.
+fn quick_picks(query: &str) -> Vec<Pick> {
+    let q = query.trim().to_lowercase();
+    let annotation = ["annotation", "text", "note", "comment"]
+        .iter()
+        .any(|word| word.starts_with(&q));
+    search(query)
+        .into_iter()
+        .take(MAX_MATCHES)
+        .map(|b| Pick::Block(b.type_key))
+        .chain(annotation.then_some(Pick::Annotation))
+        .collect()
+}
+
 /// Type to find a block, as in Simulink's quick insert: arrows choose,
-/// Enter adds, Escape closes. The last entry adds an annotation instead.
+/// Enter adds, Escape closes. An annotation can be added from it too.
 #[function_component(QuickInsert)]
 pub fn quick_insert(props: &QuickInsertProps) -> Html {
     let query = use_state(String::new);
     let chosen = use_state(|| 0usize);
     let input = use_node_ref();
+    let list = use_node_ref();
     let thumbs = use_thumbnails(props.theme);
     {
         let input = input.clone();
@@ -203,13 +219,20 @@ pub fn quick_insert(props: &QuickInsertProps) -> Html {
             }
         });
     }
-    let picks: Vec<Pick> = search(&query)
-        .into_iter()
-        .take(MAX_MATCHES)
-        .map(|b| Pick::Block(b.type_key))
-        .chain(std::iter::once(Pick::Annotation))
-        .collect();
-    let current = (*chosen).min(picks.len() - 1);
+    let picks = quick_picks(&query);
+    let current = (*chosen).min(picks.len().saturating_sub(1));
+    // Keep the chosen row in view as the arrows move through a long list.
+    {
+        let list = list.clone();
+        use_effect_with((current, (*query).clone()), move |_| {
+            let row = list
+                .cast::<web_sys::Element>()
+                .and_then(|l| l.query_selector(".quick-row.chosen").ok().flatten());
+            if let Some(row) = row {
+                row.scroll_into_view_with_bool(false);
+            }
+        });
+    }
     let oninput = {
         let (query, chosen) = (query.clone(), chosen.clone());
         Callback::from(move |e: InputEvent| {
@@ -223,10 +246,15 @@ pub fn quick_insert(props: &QuickInsertProps) -> Html {
         Callback::from(move |e: KeyboardEvent| {
             // Keys typed here are not diagram shortcuts.
             e.stop_propagation();
+            let n = picks.len();
             match e.key().as_str() {
-                "ArrowDown" => chosen.set((current + 1) % picks.len()),
-                "ArrowUp" => chosen.set((current + picks.len() - 1) % picks.len()),
-                "Enter" => on_pick.emit(picks[current]),
+                "ArrowDown" if n > 0 => chosen.set((current + 1) % n),
+                "ArrowUp" if n > 0 => chosen.set((current + n - 1) % n),
+                "Enter" => {
+                    if let Some(pick) = picks.get(current) {
+                        on_pick.emit(*pick);
+                    }
+                }
                 "Escape" => on_close.emit(()),
                 _ => return,
             }
@@ -258,7 +286,8 @@ pub fn quick_insert(props: &QuickInsertProps) -> Html {
             ),
         };
         html! {
-            <li class={classes!("quick-row", (i == current).then_some("chosen"))} {onclick} {onmouseenter}>
+            <li id={format!("quick-option-{i}")} role="option" aria-selected={(i == current).to_string()}
+                class={classes!("quick-row", (i == current).then_some("chosen"))} {onclick} {onmouseenter}>
                 { image }
                 <span class="quick-label">{ label }</span>
                 <span class="quick-detail">{ detail }</span>
@@ -270,9 +299,17 @@ pub fn quick_insert(props: &QuickInsertProps) -> Html {
             onmousedown={stop.clone()} ondblclick={stop.clone()} onclick={stop}>
             <div class="palette-search">
                 { icons::search() }
-                <input ref={input} placeholder="Add a block…" value={(*query).clone()} {oninput} {onkeydown} />
+                <input ref={input} placeholder="Add a block…" value={(*query).clone()} {oninput} {onkeydown}
+                    role="combobox" aria-label="Block to add" aria-autocomplete="list"
+                    aria-expanded="true" aria-controls="quick-options"
+                    aria-activedescendant={(!picks.is_empty()).then(|| format!("quick-option-{current}"))} />
             </div>
-            <ul>{ for rows }</ul>
+            <ul id="quick-options" role="listbox" ref={list}>
+                { for rows }
+                if picks.is_empty() {
+                    <li class="quick-empty muted">{ "No block matches." }</li>
+                }
+            </ul>
         </div>
     }
 }
@@ -301,6 +338,15 @@ mod tests {
         assert!(search("wave").iter().any(|b| b.label == "Sine Wave"));
         assert!(search("discrete").iter().any(|b| b.category == "Discrete"));
         assert!(search("zzzz").is_empty());
+    }
+
+    #[test]
+    fn annotation_is_offered_only_when_asked_for() {
+        assert_eq!(quick_picks("").last(), Some(&Pick::Annotation));
+        assert_eq!(quick_picks("ann"), vec![Pick::Annotation]);
+        assert!(quick_picks("text").contains(&Pick::Annotation));
+        assert!(!quick_picks("gain").contains(&Pick::Annotation));
+        assert!(quick_picks("zzzz").is_empty());
     }
 
     #[test]
