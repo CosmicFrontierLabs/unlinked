@@ -73,7 +73,10 @@ fn number(v: f64) -> String {
     if v != 0.0 && (v.abs() < 0.0001 || v.abs() >= 1e7) {
         format!("{v:.5e}")
     } else {
-        fmt_num(v)
+        format!("{v:.6}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 
