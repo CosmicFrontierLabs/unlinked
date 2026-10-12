@@ -145,13 +145,18 @@ enum Drag {
 /// menu.
 #[derive(Clone, Copy, PartialEq)]
 enum Action {
+    Cut,
     Copy,
     Paste,
+    /// Copy and paste the selection in one step.
+    Duplicate,
     Rotate,
     Flip,
     Group,
     Expand,
     Delete,
+    /// Edit the name of the lone selected block.
+    Rename,
     SelectAll,
     /// Move the selected blocks by (dx, dy).
     Nudge(f64, f64),
@@ -160,14 +165,17 @@ enum Action {
 /// Actions on the editing toolbar, in groups, and in the context menu, in
 /// order.
 const TOOLBAR: [&[Action]; 3] = [
-    &[Action::Copy, Action::Paste, Action::Delete],
+    &[Action::Cut, Action::Copy, Action::Paste, Action::Delete],
     &[Action::Rotate, Action::Flip],
     &[Action::Group, Action::Expand],
 ];
-const MENU: [Action; 8] = [
+const MENU: [Action; 11] = [
+    Action::Cut,
     Action::Copy,
     Action::Paste,
+    Action::Duplicate,
     Action::Delete,
+    Action::Rename,
     Action::Rotate,
     Action::Flip,
     Action::Group,
@@ -203,7 +211,14 @@ fn hit(target: Option<web_sys::EventTarget>, annotations: &[Annotation]) -> Sele
 fn available(action: Action, selection: &Selection, clipboard: bool, subsystem: bool) -> bool {
     let blocks = !selection.blocks().is_empty();
     match action {
-        Action::Copy | Action::Rotate | Action::Flip | Action::Group | Action::Nudge(..) => blocks,
+        Action::Cut
+        | Action::Copy
+        | Action::Duplicate
+        | Action::Rotate
+        | Action::Flip
+        | Action::Group
+        | Action::Nudge(..) => blocks,
+        Action::Rename => selection.blocks().len() == 1,
         Action::Expand => subsystem,
         Action::Paste => clipboard,
         Action::SelectAll => true,
@@ -238,6 +253,7 @@ fn action_button(action: Action, enabled: bool, act: &Callback<Action>, menu: bo
 impl Action {
     fn icon(self) -> Html {
         match self {
+            Action::Cut => icons::cut(),
             Action::Copy => icons::copy(),
             Action::Paste => icons::paste(),
             Action::Rotate => icons::rotate(),
@@ -245,15 +261,20 @@ impl Action {
             Action::Group => icons::group(),
             Action::Expand => icons::expand(),
             Action::Delete => icons::delete(),
-            Action::SelectAll | Action::Nudge(..) => html! {},
+            Action::Duplicate | Action::Rename | Action::SelectAll | Action::Nudge(..) => {
+                html! {}
+            }
         }
     }
 
     /// Label and shortcut, as shown on buttons and in the context menu.
     fn label(self) -> (&'static str, &'static str) {
         match self {
+            Action::Cut => ("Cut", "Ctrl+X"),
             Action::Copy => ("Copy", "Ctrl+C"),
             Action::Paste => ("Paste", "Ctrl+V"),
+            Action::Duplicate => ("Duplicate", "Ctrl+D"),
+            Action::Rename => ("Rename", "F2"),
             Action::Rotate => ("Rotate", "Ctrl+R"),
             Action::Flip => ("Flip", "Ctrl+I"),
             Action::Group => ("Group into subsystem", "Ctrl+G"),
@@ -381,6 +402,33 @@ fn snap_port(
         }
     }
     best.map(|(_, ep, p)| (ep, p))
+}
+
+/// The connection Ctrl-clicking block `to` with block `from` selected makes:
+/// from `from`'s first output not yet connected (else its first, to branch
+/// it) to `to`'s first undriven input.
+fn auto_connect(sys: &System, from: &BlockId, to: &BlockId) -> Option<(Endpoint, Endpoint)> {
+    let (a, b) = (sys.block(from)?, sys.block(to)?);
+    let port = |block: &BlockId, kind, index| Endpoint {
+        block: block.clone(),
+        port: PortRef { kind, index },
+    };
+    let outputs: Vec<Endpoint> = (1..=a.ports.outputs.min(64))
+        .map(|i| port(from, PortKind::Out, i))
+        .collect();
+    let src = outputs
+        .iter()
+        .find(|ep| !sys.lines.iter().any(|l| l.src.as_ref() == Some(*ep)))
+        .or(outputs.first())?
+        .clone();
+    let dst = (1..=b.ports.inputs.min(64))
+        .map(|i| port(to, PortKind::In, i))
+        .find(|ep| {
+            !sys.lines
+                .iter()
+                .any(|l| unlinked_model::edit::drives(l, ep))
+        })?;
+    Some((src, dst))
 }
 
 /// An orthogonal path from `a` to `b` turning halfway across, as a new
@@ -1350,6 +1398,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             route_preview.clone(),
         );
         let (selection, view) = (selection.clone(), view.clone());
+        let (model, on_error) = (props.model.clone(), props.on_error.clone());
         let blocks: Vec<(String, Rect)> = system
             .map(|s| {
                 s.blocks
@@ -1459,7 +1508,47 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                     moved,
                     ..
                 }) => {
-                    if let (true, Some(on_edits)) = (moved && offset != (0.0, 0.0), &on_edits) {
+                    let copy = e.ctrl_key() || e.meta_key();
+                    if let (true, true, Some(on_edits)) =
+                        (moved && offset != (0.0, 0.0), copy, &on_edits)
+                    {
+                        // Ctrl/Cmd held on release copies the blocks to
+                        // where they were dragged and leaves the originals,
+                        // as in Simulink.
+                        for (group, ..) in &blocks {
+                            let _ = group.remove_attribute("transform");
+                        }
+                        let ids: Vec<BlockId> = blocks
+                            .iter()
+                            .map(|(_, id, _)| BlockId(id.clone()))
+                            .collect();
+                        let copied = unlinked_model::edit::next_sid(&model).and_then(|sid| {
+                            let at = Point::new(offset.0, offset.1);
+                            unlinked_model::edit::duplicate(&model, &system_ref, &ids, at, sid).ok()
+                        });
+                        match copied {
+                            Some(group) => {
+                                let added = group
+                                    .iter()
+                                    .filter_map(|edit| match edit {
+                                        Edit::AddBlock { id, .. } => Some(id.0.clone()),
+                                        _ => None,
+                                    })
+                                    .collect();
+                                on_edits.emit(group);
+                                selection.set(Selection::Blocks(added));
+                            }
+                            None => {
+                                if let Some(on_error) = &on_error {
+                                    on_error.emit(
+                                        "Cannot copy these blocks: only native blocks copy".into(),
+                                    );
+                                }
+                            }
+                        }
+                    } else if let (true, Some(on_edits)) =
+                        (moved && offset != (0.0, 0.0), &on_edits)
+                    {
                         let (dx, dy) = offset;
                         on_edits.emit(
                             blocks
@@ -1521,12 +1610,45 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
         let selection = selection.clone();
         let annotations: Vec<Annotation> =
             system.map(|s| s.annotations.clone()).unwrap_or_default();
+        let (on_edit, on_error, system_ref) =
+            (on_edit.clone(), props.on_error.clone(), system_ref.clone());
+        let (model, shown) = (props.model.clone(), (*path).clone());
         Callback::from(move |e: MouseEvent| {
             let moved = matches!(drag.borrow_mut().take(), Some(Drag::Ended { moved: true }));
             if moved {
                 return;
             }
-            selection.set(match hit(e.target(), &annotations) {
+            let clicked = hit(e.target(), &annotations);
+            // Ctrl/Cmd-clicking a block with another selected connects them,
+            // as in Simulink: the selected block's first free output to the
+            // clicked block's first free input.
+            if let (true, Some(on_edit), [from], Selection::Blocks(to)) = (
+                e.ctrl_key() || e.meta_key(),
+                &on_edit,
+                selection.blocks(),
+                &clicked,
+            ) {
+                let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
+                let pair = to.first().filter(|to| *to != from).and_then(|to| {
+                    auto_connect(
+                        model.system_at(&refs)?,
+                        &BlockId(from.clone()),
+                        &BlockId(to.clone()),
+                    )
+                });
+                if let Some((src, dst)) = pair {
+                    on_edit.emit(Edit::Connect {
+                        system: system_ref.clone(),
+                        src,
+                        dst,
+                    });
+                    selection.set(clicked);
+                } else if let Some(on_error) = &on_error {
+                    on_error.emit("No free output and input to connect these blocks".into());
+                }
+                return;
+            }
+            selection.set(match clicked {
                 // Shift-click adds or removes a block.
                 Selection::Blocks(ids) if e.shift_key() => {
                     let mut selected = selection.blocks().to_vec();
@@ -1590,6 +1712,70 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                 .filter(|b| selection.blocks().contains(&b.id.0))
                 .collect();
             match action {
+                // Copy, then delete what was copied; only blocks that can
+                // be pasted back are cut, and then nothing else changes.
+                Action::Cut => {
+                    let ids: Vec<BlockId> =
+                        selection.blocks().iter().cloned().map(BlockId).collect();
+                    if let Err(e) =
+                        unlinked_model::clipboard::paste(&model, &system_ref, &ids, 0, &model)
+                    {
+                        if let Some(on_error) = &on_error {
+                            on_error.emit(format!("Cannot cut: {e}"));
+                        }
+                        return;
+                    }
+                    if let Some(group) = confirm_delete(&model, &system_ref, &ids, &lines) {
+                        *clipboard.borrow_mut() = Some(Clipboard {
+                            model: model.clone(),
+                            system: system_ref.clone(),
+                            ids,
+                            pastes: 0,
+                        });
+                        on_edits.emit(group);
+                        selection.set(Selection::Nothing);
+                    }
+                }
+                // Paste a copy of the selection beside it, leaving the
+                // clipboard alone.
+                Action::Duplicate => {
+                    let ids: Vec<BlockId> =
+                        selection.blocks().iter().cloned().map(BlockId).collect();
+                    match unlinked_model::clipboard::paste(&model, &system_ref, &ids, 0, &model) {
+                        Ok(group) => {
+                            let added = group
+                                .iter()
+                                .filter_map(|edit| match edit {
+                                    Edit::AddBlock { id, .. } => Some(id.0.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            on_edits.emit(group);
+                            selection.set(Selection::Blocks(added));
+                        }
+                        Err(e) => {
+                            if let Some(on_error) = &on_error {
+                                on_error.emit(format!("Cannot duplicate: {e}"));
+                            }
+                        }
+                    }
+                }
+                // The inspector shows the lone selected block's name.
+                Action::Rename => {
+                    let field = container
+                        .cast::<Element>()
+                        .and_then(|c| c.parent_element())
+                        .and_then(|v| {
+                            v.query_selector(".inspector input.block-name")
+                                .ok()
+                                .flatten()
+                        })
+                        .and_then(|i| i.dyn_into::<HtmlInputElement>().ok());
+                    if let Some(field) = field {
+                        let _ = field.focus();
+                        field.select();
+                    }
+                }
                 // Copy the selected blocks; paste duplicates them with their
                 // internal lines, offset from the originals.
                 Action::Copy => {
@@ -1773,8 +1959,11 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
             }
             let key = e.key().to_ascii_lowercase();
             let action = match key.as_str() {
+                "x" if command => Action::Cut,
                 "c" if command => Action::Copy,
                 "v" if command => Action::Paste,
+                "d" if command => Action::Duplicate,
+                "f2" => Action::Rename,
                 "r" if command => Action::Rotate,
                 "i" if command => Action::Flip,
                 "a" if command => Action::SelectAll,
@@ -2476,9 +2665,15 @@ fn shortcut_help(props: &ShortcutHelpProps) -> Html {
     const EDIT: &[(&str, &str)] = &[
         ("Drag on empty canvas", "Select by box; Shift adds"),
         ("Shift+click", "Add to or remove from the selection"),
+        ("Double-click empty canvas", "Find and add a block"),
         ("Drag from a port", "Connect to another port"),
+        ("Ctrl+drag a line", "Branch it"),
+        ("Ctrl+click a block", "Connect the selected block to it"),
         ("Drag a line segment", "Reroute it"),
-        ("Ctrl+C / Ctrl+V", "Copy / paste"),
+        ("Ctrl+drag a block", "Copy it there"),
+        ("Ctrl+X / Ctrl+C / Ctrl+V", "Cut / copy / paste"),
+        ("Ctrl+D", "Duplicate"),
+        ("F2", "Rename the selected block"),
         ("Delete", "Delete the selection"),
         ("Arrows", "Nudge by a grid step (Shift: one unit)"),
         ("Ctrl+R / Ctrl+I", "Rotate / flip"),

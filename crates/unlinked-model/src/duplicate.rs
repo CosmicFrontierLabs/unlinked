@@ -10,6 +10,19 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_EDITS: usize = 2000;
 const MAX_SELECTION: usize = 256;
 
+/// The name of a copy of block `name`, as Simulink names one: its name
+/// without trailing digits, numbered with the first number `claim` accepts
+/// ("Gain" and "Gain1" copy to "Gain1", "Gain2", …). `claim` takes a name
+/// if it is free.
+pub(crate) fn copy_name(name: &str, mut claim: impl FnMut(&str) -> bool) -> String {
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    let base = if base.is_empty() { name } else { base };
+    (1u64..)
+        .map(|i| format!("{base}{i}"))
+        .find(|n| claim(n))
+        .expect("some number is free")
+}
+
 /// Build an atomic duplicate action without modifying `model`.
 ///
 /// Until the edit vocabulary can preserve their metadata, styled,
@@ -137,14 +150,7 @@ pub fn duplicate(
         }
         let new_id = BlockId((first_sid + index as u64).to_string());
         mapped.insert(id.clone(), new_id.clone());
-        let mut suffix = 1usize;
-        let name = loop {
-            let name = format!("{} copy{suffix}", block.name);
-            if names.insert(name.clone()) {
-                break name;
-            }
-            suffix += 1;
-        };
+        let name = copy_name(&block.name, |n| names.insert(n.to_string()));
         let mut position = block.position;
         position.left += offset.x;
         position.right += offset.x;
@@ -342,7 +348,7 @@ mod tests {
         assert_eq!(gain.parameters, original.root.blocks[1].parameters);
         assert_eq!(gain.position.left, 60.);
         assert_eq!(gain.position.top, 10.);
-        assert_eq!(gain.name, "gain copy1");
+        assert_eq!(gain.name, "gain1");
         let connections = source.root.connections();
         assert_eq!(connections.len(), 3);
         assert!(connections
@@ -415,11 +421,22 @@ mod tests {
         assert!(copy(&source, &["1"]).is_err());
     }
     #[test]
+    fn copies_are_numbered_as_simulink_numbers_them() {
+        let taken = |names: &[&str]| {
+            let mut set: BTreeSet<String> = names.iter().map(|n| n.to_string()).collect();
+            move |n: &str| set.insert(n.to_string())
+        };
+        assert_eq!(copy_name("Gain", taken(&["Gain"])), "Gain1");
+        assert_eq!(copy_name("Gain1", taken(&["Gain", "Gain1"])), "Gain2");
+        assert_eq!(copy_name("Gain", taken(&["Gain", "Gain1"])), "Gain2");
+        assert_eq!(copy_name("42", taken(&["42"])), "421");
+    }
+    #[test]
     fn deterministic_names_and_bounds() {
         let mut source = model();
-        source.root.blocks[2].name = "source copy1".into();
+        source.root.blocks[2].name = "source1".into();
         let edits = copy(&source, &["1"]).unwrap();
-        assert!(matches!(&edits[0], Edit::AddBlock{name,..} if name == "source copy2"));
+        assert!(matches!(&edits[0], Edit::AddBlock{name,..} if name == "source2"));
         assert!(copy(&source, &["1", "1"]).is_err());
         assert!(duplicate(
             &source,

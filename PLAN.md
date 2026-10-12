@@ -99,10 +99,12 @@ CI. Per-model import, render and simulation coverage is tracked in
     or flipping a block reroutes its lines.
   - Annotations: add, move, edit plain or TeX-source text, and delete.
   - Selection by box, Shift-click and Ctrl+A; group move, rotate and delete;
-    copy/paste of native blocks with the lines between them; undo/redo by
-    action. Arrow keys nudge the selection by a grid step (Shift for one
-    unit); a toolbar and a right-click menu offer the same actions as the
-    shortcuts.
+    cut/copy/paste and duplicate (Ctrl+D, or Ctrl-drag to copy to where the
+    blocks are dropped) of native blocks with the lines between them, copies
+    numbered as Simulink numbers them; Ctrl-click a block to connect the
+    selected block to it; undo/redo by action. Arrow keys nudge the
+    selection by a grid step (Shift for one unit); a toolbar and a
+    right-click menu offer the same actions as the shortcuts.
   - Model settings: solver, start/stop time, step sizes and tolerances,
     written verbatim to the active configuration set's solver component
     (with `SolverName`/`SolverType` kept in step). Unrecognized solvers and
