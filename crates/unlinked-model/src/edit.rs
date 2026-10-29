@@ -1053,7 +1053,7 @@ fn add_block(
     position: Rect,
 ) -> Result<(), EditError> {
     let descriptor = catalog::find(block_type)
-        .filter(|d| d.creatable && d.source_block.is_none())
+        .filter(|d| d.creatable)
         .ok_or_else(|| EditError::Invalid(format!("{block_type:?} is not in the block palette")))?;
     let next = next_sid(model).ok_or_else(|| EditError::Invalid("no SIDs left".into()))?;
     let sid =
@@ -1077,9 +1077,11 @@ fn add_block(
             "the ports of a new {block_type} cannot be resolved"
         )));
     };
+    // Library blocks are `Reference` blocks linked to their source; their
+    // creation parameters are the library mask's values.
     sys.blocks.push(Block {
         id: id.clone(),
-        block_type: descriptor.type_key.into(),
+        block_type: descriptor.slx_block_type.into(),
         name: name.into(),
         position,
         orientation: Orientation::Right,
@@ -1087,7 +1089,7 @@ fn add_block(
         ports,
         parameters,
         mask: None,
-        library_source: None,
+        library_source: descriptor.source_block.map(str::to_owned),
         subsystem: None,
         style: BlockStyle::default(),
         interface: None,

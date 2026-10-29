@@ -143,7 +143,7 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
             </div>
         }
     };
-    let Some(descriptor) = catalog::find(&b.block_type) else {
+    let Some(descriptor) = catalog::descriptor_for(b) else {
         return html! {};
     };
     let sections = descriptor.dialog_sections(&b.parameters);

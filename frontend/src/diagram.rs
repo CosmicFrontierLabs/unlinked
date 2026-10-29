@@ -4872,7 +4872,7 @@ fn hover_card(props: &HoverCardProps) -> Html {
     else {
         return html! {};
     };
-    let descriptor = catalog::find(&b.block_type).filter(|_| b.mask.is_none());
+    let descriptor = catalog::descriptor_for(b);
     let parameters: Vec<(String, String)> = match descriptor {
         Some(d) => d
             .parameters
@@ -5435,10 +5435,10 @@ fn inspector(props: &InspectorProps) -> Html {
         });
     let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
     let script = props.chart.as_ref().and_then(|c| c.script.clone());
-    // Native catalog blocks get their dialog; any other stored parameters,
-    // and every parameter of other blocks, are listed raw.
-    let descriptor = catalog::find(&b.block_type)
-        .filter(|_| b.mask.is_none() && b.library_source.is_none() && b.subsystem.is_none());
+    // Native catalog blocks, and library blocks the catalog knows, get their
+    // dialog; any other stored parameters, and every parameter of other
+    // blocks, are listed raw.
+    let descriptor = catalog::descriptor_for(b);
     let others: Vec<(&String, &String)> = b
         .parameters
         .iter()
