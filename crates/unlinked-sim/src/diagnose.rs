@@ -236,10 +236,14 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
             remember(&mut ids, block.id.0.clone(), location.clone());
             let flat = format!("{prefix}{}", block.id.0.replace('/', "//"));
             remember(&mut ids, flat.clone(), location.clone());
-            if block.mask.is_some() || block.library_source.is_some() {
+            // Registered library sources (Ramp, Chirp Signal, Repeating
+            // Sequence) lower like native blocks and are not flagged as links.
+            let library = crate::library::lowered_type(block);
+            if library.is_none() && (block.mask.is_some() || block.library_source.is_some()) {
                 report.emit(Severity::Warning, "simulation_link_or_mask", location.clone(),
                     "Masks and library links require supported explicit lowering before simulation.".into());
-            } else if block.subsystem.is_none()
+            } else if library.is_none()
+                && block.subsystem.is_none()
                 && !crate::vector::supported_native_type(&block.block_type)
             {
                 report.emit(
@@ -282,7 +286,7 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     }
                 }
             }
-            if let Some(descriptor) = catalog::find(&block.block_type) {
+            if let Some(descriptor) = catalog::descriptor_for(block) {
                 for p in descriptor.parameters {
                     if !matches!(
                         p.kind,

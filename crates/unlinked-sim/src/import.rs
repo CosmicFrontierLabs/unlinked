@@ -43,6 +43,15 @@ pub(crate) fn literal_requirements(
             ("SineType", &["Time based"]),
             ("TimeSource", &["Use simulation time"]),
         ],
+        "DiscretePulseGenerator" => &[
+            ("PulseType", &["Time based"]),
+            ("TimeSource", &["Use simulation time"]),
+        ],
+        "SignalGenerator" => &[
+            ("WaveForm", &["sine", "square", "sawtooth"]),
+            ("Units", &["rad/sec", "Hertz"]),
+            ("TimeSource", &["Use simulation time"]),
+        ],
         "Switch" | "RelationalOperator" => &[("ZeroCross", &["off"])],
         _ => &[],
     }
@@ -225,7 +234,10 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         } else {
             1
         };
-        if let Some(sample) = block.param("SampleTime").filter(|_| !discrete) {
+        // A time-based Pulse Generator ignores SampleTime, which belongs to
+        // the Sample based mode rejected below.
+        let pulse = block.block_type == "DiscretePulseGenerator";
+        if let Some(sample) = block.param("SampleTime").filter(|_| !discrete && !pulse) {
             let value = unlinked_matlab::eval_expr(sample, &ws)
                 .map_err(|e| block_error(id, format!("SampleTime: {e}")))?;
             let acceptable = value == -1.0
@@ -334,19 +346,90 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             "DigitalClock" => Kind::DigitalClock {
                 period_ticks: period,
             },
-            "Step" => {
-                let time = p("Time", "1")?;
-                let ticks = (time - options.start) / options.step;
-                if time > options.start && time < options.stop && !on_grid(ticks) {
+            "Step" => Kind::Step {
+                time: p("Time", "1")?,
+                before: p("Before", "0")?,
+                after: p("After", "1")?,
+            },
+            "DiscretePulseGenerator" => {
+                // The file default for this block type is Sample based, so an
+                // absent mode is not assumed to be the supported one.
+                match block.param("PulseType") {
+                    Some("Time based") => {}
+                    Some(other) => {
+                        return Err(block_error(id, format!("Pulse Generator PulseType={other} is unsupported; only Time based pulses are simulated")))
+                    }
+                    None => {
+                        return Err(block_error(id, "Pulse Generator PulseType is unspecified; only an explicit Time based mode is simulated"))
+                    }
+                }
+                let period = p("Period", "10")?;
+                let pulse_width = p("PulseWidth", "5")?;
+                if !(0.0..=100.0).contains(&pulse_width) {
                     return Err(block_error(
                         id,
-                        "Step transition must align with fixed-step grid",
+                        "PulseWidth must be a percentage from 0 to 100",
                     ));
                 }
-                Kind::Step {
-                    time,
-                    before: p("Before", "0")?,
-                    after: p("After", "1")?,
+                Kind::PulseGenerator {
+                    amplitude: p("Amplitude", "1")?,
+                    period,
+                    width: period * pulse_width / 100.0,
+                    phase_delay: p("PhaseDelay", "0")?,
+                }
+            }
+            "SignalGenerator" => {
+                let waveform = block.param("WaveForm").unwrap_or("sine");
+                if !["sine", "square", "sawtooth"].contains(&waveform) {
+                    return Err(block_error(id, format!("Signal Generator WaveForm={waveform} is unsupported; only sine, square and sawtooth are simulated")));
+                }
+                let hertz = match block.param("Units").unwrap_or("rad/sec") {
+                    "rad/sec" => false,
+                    "Hertz" => true,
+                    other => {
+                        return Err(block_error(
+                            id,
+                            format!("Signal Generator Units={other} is unsupported"),
+                        ))
+                    }
+                };
+                let frequency = p("Frequency", "1")?;
+                if waveform != "sine" && frequency <= 0.0 {
+                    return Err(block_error(
+                        id,
+                        "square and sawtooth waveforms require a positive Frequency",
+                    ));
+                }
+                Kind::SignalGenerator {
+                    waveform: waveform.into(),
+                    amplitude: p("Amplitude", "1")?,
+                    frequency,
+                    hertz,
+                }
+            }
+            "Ramp" => Kind::Ramp {
+                slope: p("slope", "1")?,
+                start: p("start", "0")?,
+                initial: p("X0", "0")?,
+            },
+            "ChirpSignal" => Kind::Chirp {
+                initial_frequency: p("f1", "0.1")?,
+                target_time: p("T", "100")?,
+                target_frequency: p("f2", "1")?,
+                phase: p("phi", "0")?,
+            },
+            "RepeatingSequence" => {
+                // Scalarization already replaced these expressions by literal
+                // arrays, so no workspace is needed here.
+                let array = |key: &str, default: &str| -> Result<Vec<f64>, Error> {
+                    let source = block.param(key).unwrap_or(default);
+                    let value = unlinked_matlab::eval_array_expr(source, &BTreeMap::new())
+                        .map_err(|e| block_error(id, format!("{key}: {e}")))?;
+                    Ok(value.data)
+                };
+                Kind::RepeatingSequence {
+                    times: array("rep_seq_t", "[0 2]")?,
+                    values: array("rep_seq_y", "[0 2]")?,
                 }
             }
             "Sin" => Kind::Sine {
@@ -484,6 +567,7 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             }
             other => return Err(block_error(id, format!("unsupported block type {other}"))),
         };
+        super::source_timing(&kind, options).map_err(|message| block_error(id, message))?;
         graph.nodes.push(Node {
             id: id.clone(),
             name: format!("{}/{}", model.name, block.name),

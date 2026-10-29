@@ -6,7 +6,9 @@ filesystem, network, subprocess or native runtime dependency. `compile` resolves
 `simulate_model` combines both. Trace JSON contains sample times, stable block
 IDs mapped to scalar sample vectors, and the selected solver.
 
-Implemented: Constant/Ground, Clock, Step, time-based Sine, Gain, Bias, Sum/Add,
+Implemented: Constant/Ground, Clock, Step, time-based Sine, time-based Pulse
+Generator, Signal Generator (sine/square/sawtooth), Ramp, Chirp Signal,
+Repeating Sequence, Gain, Bias, Sum/Add,
 Product/division, Saturation, Integrator, UnitDelay, Abs, scalar trigonometric
 and math operations, scalar relational comparisons, logical operators, nonzero
 Switch routing, and single-input sinks. Logic and relational outputs use exact
@@ -158,6 +160,55 @@ inherited (`-1`) sample times reject until rate inference is supported. Periods
 must be positive integer multiples of the observation step; offsets and continuous
 sample times reject. Sampling is direct-feedthrough at hits, so an algebraic
 feedback loop still rejects. See the [block reference](https://www.mathworks.com/help/simulink/slref/zeroorderhold.html).
+
+### Time-based sources
+
+`DiscretePulseGenerator` (Pulse Generator) runs only with `PulseType=Time based`
+and simulation time as its time source: the output is 0 until `PhaseDelay`,
+then `Amplitude` for `Period*PulseWidth/100` seconds of every `Period`, with
+the rising edge taking the high value and the falling edge the low one, as in
+the parameter-effects figure of the
+[block reference](https://www.mathworks.com/help/simulink/slref/pulsegenerator.html).
+`Sample based` pulses, an external time signal, constant configurations
+(a width of 0 % or 100 %, which Simulink also rejects) and negative phase
+delays reject. `SignalGenerator` supports `WaveForm` sine, square and
+sawtooth with `Units` `rad/sec` or `Hertz`, following the default-output
+figures of the
+[block reference](https://www.mathworks.com/help/simulink/slref/signalgenerator.html):
+sine is `A sin(ωt)`, square is `-A` over the first half of each period and
+`+A` over the second, and sawtooth falls linearly from `+A` at the start of
+each period to `-A` at its end. The `random` waveform and an external time
+source reject; square and sawtooth need a positive frequency. Both blocks
+expand scalar parameters against vector or matrix ones (`VectorParams1D`).
+
+Three library blocks are recognised by their `SourceBlock` path on `Reference`
+blocks and lowered from their mask parameters: `simulink/Sources/Ramp`
+(`slope`, `start`, `X0`, also read as `InitialOutput`; output `X0` until
+`start`, then `X0 + slope*(t - start)`;
+[reference](https://www.mathworks.com/help/simulink/slref/ramp.html)),
+`simulink/Sources/Chirp Signal` (`f1`, `T`, `f2`, optional `phi` in radians;
+`sin(2π(f1 t + (f2 - f1) t²/(2T)) + phi)`, whose instantaneous frequency sweeps
+linearly from `f1` to `f2` at `T` and keeps changing at that rate afterwards;
+the start time must be 0 as the
+[reference](https://www.mathworks.com/help/simulink/slref/chirpsignal.html)
+requires) and `simulink/Sources/Repeating Sequence` (`rep_seq_t`, `rep_seq_y`;
+linear interpolation repeated with the last time value as the period, per the
+[reference](https://www.mathworks.com/help/simulink/slref/repeatingsequence.html);
+times must be strictly increasing from 0, since the published algorithm is
+stated for sequences starting at zero). Ramp and Chirp parameters expand like
+the native sources; a Repeating Sequence is scalar. Any other link or mask
+still rejects.
+
+Like Step transitions, every edge of these sources must fall on the sampling
+grid for fixed-step runs: the Pulse Generator phase delay must be a sample time
+and its period and high time whole numbers of steps (the fixed-step guidance of
+its reference); the square half period and the sawtooth period must be whole
+numbers of steps with time zero on the grid (the default 1 rad/s period of 2π
+therefore rejects for those waveforms; use Hertz or a dividing step); and a
+Repeating Sequence whose first and last output values differ needs its period
+on the grid. Smooth sources (sine, ramp, chirp, a sequence that wraps
+continuously) have no such constraint. At an edge the solver uses the left
+limit when integrating the preceding interval, so pulse integrals are exact.
 
 ### Random sources
 

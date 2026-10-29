@@ -166,7 +166,9 @@ CI. Per-model import, render and simulation coverage is tracked in
   next run form, preserving unmatched current root inputs. Initialization
   scripts retain their recorded version; missing scripts prevent reuse.
 - Solvers: Euler, RK4, adaptive Dormand–Prince 5(4).
-- Blocks: sources (Constant, Clock, Step, Sine), Gain, Bias, Sum, Product,
+- Blocks: sources (Constant, Clock, Step, Sine, time-based Pulse Generator,
+  Signal Generator sine/square/sawtooth, and the library Ramp, Chirp Signal
+  and Repeating Sequence), Gain, Bias, Sum, Product,
   Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
   operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
