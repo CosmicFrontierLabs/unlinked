@@ -178,7 +178,7 @@ fn unsupported_data_timing_and_state_semantics_fail_closed() {
 }
 #[test]
 fn backing_subsystem_content_and_connections_cannot_disappear() {
-    for edit in 0..10 {
+    for edit in 0..9 {
         let mut m = model();
         let backing = &mut m.root.blocks[1];
         match edit {
@@ -211,13 +211,36 @@ fn backing_subsystem_content_and_connections_cannot_disappear() {
                     .parameters
                     .insert("OutDataTypeStr".into(), "uint8".into());
             }
-            9 => {
-                backing.parameters.insert("Commented".into(), "on".into());
-            }
             _ => unreachable!(),
         }
         assert!(compile(&m, &options()).is_err(), "edit {edit}");
     }
+}
+#[test]
+fn commented_matlab_function_block_is_removed_as_one_node() {
+    // Commented out, the function block disappears (nothing downstream to
+    // ground); commented through, it passes the clock on.
+    let mut m = model();
+    m.root.blocks.push(block("sink", "Scope", "sink", 1, 0));
+    m.root.lines.push(line("f", 1, "sink", 1));
+    for (setting, expected) in [("on", 0.0), ("through", 1.0)] {
+        let mut m = m.clone();
+        m.root.blocks[1]
+            .parameters
+            .insert("Commented".into(), setting.into());
+        let trace = simulate_model(&m, &options()).unwrap();
+        for (i, t) in trace.time.iter().enumerate() {
+            assert!(
+                (trace.signals["sink"][i] - expected * t).abs() < 1e-12,
+                "{setting}"
+            );
+        }
+    }
+    // Commented content inside the generated backing subsystem is still refused.
+    m.root.blocks[1].subsystem.as_mut().unwrap().blocks[1]
+        .parameters
+        .insert("Commented".into(), "on".into());
+    assert!(compile(&m, &options()).is_err());
 }
 
 #[test]

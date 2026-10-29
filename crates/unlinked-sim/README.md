@@ -144,8 +144,23 @@ limit sooner. Trusted native callers can pass an explicit `ArrayBudget` to
 `simulate_with_observer_and_budget`; server jobs retain the fixed budget, shared
 with initialization, plus the 30-second cooperative deadline and 25,001-sample
 cap. Budget exhaustion is an explicit error, never a partial successful trace.
-Blocks marked `Commented=on` or `Commented=through` are rejected until their
-removal/bypass semantics are implemented, including nested and routing blocks.
+
+### Commented blocks
+
+Blocks marked `Commented=on` are removed before simulation as Simulink's
+[Comment Out](https://www.mathworks.com/help/simulink/ug/comment-out-blocks.html)
+does: the signals into them are terminated and every destination their outputs
+fed reads Ground (0), recorded under the commented block's own ID. Blocks marked
+`Commented=through` are removed and input *i* is wired straight to output *i*;
+an undriven input grounds its outputs. Both work at every subsystem level and
+around Goto/From routing (a commented-out Goto grounds its From blocks), and
+the removed blocks' parameters are never evaluated. As in Simulink, comment
+through is refused for blocks whose input and output port counts differ or
+that have control or connection ports (so also for Goto and From); Inport,
+Outport, Goto Tag Visibility and Data Store Memory blocks cannot be commented,
+and any other `Commented` value is rejected. The renderer greys commented
+blocks and their lines, dashes the commented-through path and shows the `%`
+or `%%` badge.
 
 ### Zero-order hold
 

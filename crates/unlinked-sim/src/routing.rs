@@ -20,13 +20,18 @@ fn system(system: &mut System, depth: usize, remaining: &mut usize) -> Result<()
         .ok_or_else(|| Error::Options("routing block budget exceeded".into()))?;
     let mut tags = BTreeMap::new();
     for block in &system.blocks {
-        if block
-            .param("Commented")
-            .is_some_and(|value| value.trim() != "off")
+        // Routing blocks become identity nodes below, which would let a
+        // commented-through Goto or From pass its port-count check; Simulink
+        // refuses it because the signal has no paired input and output port.
+        if matches!(block.block_type.as_str(), "Goto" | "From")
+            && block.commented() == Ok(Commented::Through)
         {
             return Err(block_error(
                 &block.id.0,
-                "commented or commented-through blocks are unsupported",
+                format!(
+                    "Commented=through is refused for {} blocks: routing blocks have no paired input and output ports",
+                    block.block_type
+                ),
             ));
         }
         if block.block_type == "Goto" {

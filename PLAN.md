@@ -170,8 +170,10 @@ CI. Per-model import, render and simulation coverage is tracked in
   Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
   operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
-  matrix signals lowered to scalars. The authoritative list and its limits are
-  in [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
+  matrix signals lowered to scalars; blocks commented out (grounded) or
+  commented through (wired input to output) at any level. The authoritative
+  list and its limits are in
+  [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
 - Multirate discrete scheduling on integer sample ticks (held values between
   hits and through solver stages), and local Goto/From routing.
 - Pure scalar MATLAB Function charts execute through a bounded function

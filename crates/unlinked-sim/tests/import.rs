@@ -181,29 +181,43 @@ fn logical_import_accepts_boolean_outputs_and_rejects_unsupported_modes() {
 }
 
 #[test]
-fn commented_blocks_and_subsystems_never_execute_silently() {
-    for kind in ["Gain", "Goto", "SubSystem"] {
-        for setting in ["on", "through"] {
-            let mut m = model();
-            m.root.blocks[1].block_type = kind.into();
-            m.root.blocks[1]
-                .parameters
-                .insert("Commented".into(), setting.into());
-            assert!(compile(&m, &Options::default())
-                .unwrap_err()
-                .to_string()
-                .contains("commented"));
-        }
-    }
+fn commented_blocks_are_removed_before_their_parameters_are_evaluated() {
+    // Live, an undefined gain symbol is an error.
     let mut m = model();
+    m.root.blocks[1]
+        .parameters
+        .insert("Gain".into(), "undefined_symbol".into());
+    assert!(compile(&m, &Options::default()).is_err());
+    // Commented out or through, the gain is gone: nothing downstream needs
+    // grounding and its parameters are never evaluated.
+    for setting in ["on", "through"] {
+        let mut m = m.clone();
+        m.root.blocks[1]
+            .parameters
+            .insert("Commented".into(), setting.into());
+        let trace = simulate_model(&m, &Options::default()).unwrap();
+        assert!(!trace.signals.contains_key("g"), "{setting}");
+        assert!(trace.signals["c"].iter().all(|v| *v == 3.0));
+    }
+    // Nested commented blocks are removed too.
+    let mut nested = model();
     let mut sub = block("sub", "SubSystem", &[]);
     sub.subsystem = Some(Box::new(System {
-        blocks: vec![block("nested", "Gain", &[("Commented", "on")])],
+        blocks: vec![block(
+            "nested",
+            "Gain",
+            &[("Gain", "undefined_symbol"), ("Commented", "on")],
+        )],
         ..System::default()
     }));
-    m.root.blocks.push(sub);
+    nested.root.blocks.push(sub);
+    assert!(simulate_model(&nested, &Options::default()).is_ok());
+    // Any other value is refused rather than ignored.
+    m.root.blocks[1]
+        .parameters
+        .insert("Commented".into(), "maybe".into());
     assert!(compile(&m, &Options::default())
         .unwrap_err()
         .to_string()
-        .contains("commented"));
+        .contains("Commented=maybe"));
 }

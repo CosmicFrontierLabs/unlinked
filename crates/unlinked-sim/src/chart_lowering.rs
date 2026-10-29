@@ -259,7 +259,11 @@ fn validate_backing(
             && block.ports.state == 0
             && block.ports.lconn == 0
             && block.ports.rconn == 0
-            && block.param("Commented").is_none_or(|s| s == "off")
+    }
+    // The lowered block keeps its own `Commented` setting for the commented
+    // pass; generated backing content, however, is never commented.
+    fn uncommented(block: &Block) -> bool {
+        block.param("Commented").is_none_or(|s| s == "off")
     }
     if block.block_type != "SubSystem"
         || block.param("SFBlockType") != Some("MATLAB Function")
@@ -293,6 +297,7 @@ fn validate_backing(
     for child in &system.blocks {
         if blocks.insert(&child.id, child).is_some()
             || !ordinary(child)
+            || !uncommented(child)
             || child.subsystem.is_some()
         {
             return Err(fail("MATLAB Function backing subsystem has duplicate IDs or unsupported nested/masked/conditional content"));
