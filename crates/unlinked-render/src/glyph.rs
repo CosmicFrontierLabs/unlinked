@@ -181,11 +181,16 @@ pub fn appearance(block: &Block) -> Appearance {
             vec![(0.1, 0.8), (0.35, 0.8)],
         ]),
         "MultiPortSwitch" => text("*"),
-        "ManualSwitch" => Icon::Strokes(vec![
-            vec![(0.1, 0.3), (0.3, 0.3)],
-            vec![(0.1, 0.7), (0.3, 0.7)],
-            vec![(0.3, 0.3), (0.7, 0.5), (0.9, 0.5)],
-        ]),
+        "ManualSwitch" => {
+            // The arm shows the connected input: sw=1 the first (upper),
+            // sw=0 the second. https://www.mathworks.com/help/simulink/slref/manualswitch.html
+            let from = if p("sw") == "0" { 0.7 } else { 0.3 };
+            Icon::Strokes(vec![
+                vec![(0.1, 0.3), (0.3, 0.3)],
+                vec![(0.1, 0.7), (0.3, 0.7)],
+                vec![(0.3, from), (0.7, 0.5), (0.9, 0.5)],
+            ])
+        }
         "RelationalOperator" => text(&relop(&non_empty(p("Operator"), ">="))),
         "Logic" => text(&non_empty(p("Operator"), "AND")),
         "Abs" => text("|u|"),
@@ -269,12 +274,17 @@ fn subsystem_icon(block: &Block) -> Icon {
 }
 
 fn reference_icon(block: &Block) -> Icon {
+    // Unmasked library blocks store an empty SourceType; their library name
+    // is the better label then.
     let source_type = block
         .param("SourceType")
+        .filter(|t| !t.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| block.display_type().replace('\n', " "));
     let p = |k: &str| block.param(k).unwrap_or_default().trim().to_string();
     match source_type.as_str() {
+        "Index Vector" => Icon::Text(vec!["Index".into(), "Vector".into()]),
+        "Environment Controller" => Icon::Text(vec!["Sim".into(), "Coder".into()]),
         "Compare To Zero" => Icon::Text(vec![format!("{} 0", relop(&non_empty(p("relop"), "<=")))]),
         "Compare To Constant" => Icon::Text(vec![format!(
             "{} {}",

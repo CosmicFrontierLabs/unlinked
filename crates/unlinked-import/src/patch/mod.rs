@@ -461,6 +461,40 @@ mod tests {
     }
 
     #[test]
+    fn library_palette_blocks_write_their_source_block() {
+        use unlinked_model::edit::{apply_batch, next_sid};
+        let src = MDL.replace(
+            "Name\t\"m\"\n    Block",
+            "Name\t\"m\"\n    SIDHighWatermark\t\"7\"\n    Block",
+        );
+        let model = import("m.mdl", src.as_bytes()).unwrap();
+        let sid = next_sid(&model).unwrap().to_string();
+        let edits = [Edit::AddBlock {
+            system: vec![],
+            id: sid.as_str().into(),
+            block_type: "IndexVector".into(),
+            name: "iv".into(),
+            position: Rect::new(100.0, 10.0, 130.0, 40.0),
+        }];
+        let out = apply_edits("m.mdl", src.as_bytes(), &edits).unwrap();
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(
+            text.contains(
+                "      BlockType\tReference\n      Name\t\"iv\"\n      SID\t\"8\"\n      Ports\t[2, 1]\n      Position\t[100, 10, 130, 40]\n      SourceBlock\t\"simulink/Signal Routing/Index Vector\"\n"
+            ),
+            "{text}"
+        );
+        let mut expected = model;
+        apply_batch(&mut expected, &edits).unwrap();
+        let reimported = import("m.mdl", &out).unwrap();
+        assert_eq!(reimported.root, expected.root);
+        assert_eq!(
+            reimported.root.blocks[1].library_source.as_deref(),
+            Some("simulink/Signal Routing/Index Vector")
+        );
+    }
+
+    #[test]
     fn orientation_keeps_the_legacy_form_until_a_mirror_needs_rotation() {
         use unlinked_model::Orientation;
         let orient = |orientation, mirrored| {

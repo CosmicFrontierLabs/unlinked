@@ -148,7 +148,7 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
             };
             let native =
                 block.mask.is_none() && block.library_source.is_none() && block.subsystem.is_none();
-            if let Some(descriptor) = catalog::find(&block.block_type).filter(|_| native) {
+            if let Some(descriptor) = catalog::descriptor_for(block) {
                 for parameter in descriptor.parameters {
                     spend!();
                     if let Some(value) = block.param(parameter.name) {

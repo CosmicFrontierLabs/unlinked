@@ -5437,8 +5437,7 @@ fn inspector(props: &InspectorProps) -> Html {
     let script = props.chart.as_ref().and_then(|c| c.script.clone());
     // Native catalog blocks get their dialog; any other stored parameters,
     // and every parameter of other blocks, are listed raw.
-    let descriptor = catalog::find(&b.block_type)
-        .filter(|_| b.mask.is_none() && b.library_source.is_none() && b.subsystem.is_none());
+    let descriptor = catalog::descriptor_for(b);
     let others: Vec<(&String, &String)> = b
         .parameters
         .iter()
