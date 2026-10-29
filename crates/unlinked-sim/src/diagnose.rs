@@ -236,7 +236,16 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
             remember(&mut ids, block.id.0.clone(), location.clone());
             let flat = format!("{prefix}{}", block.id.0.replace('/', "//"));
             remember(&mut ids, flat.clone(), location.clone());
-            if block.mask.is_some() || block.library_source.is_some() {
+            let supported_link = block.mask.is_none()
+                && block.subsystem.is_none()
+                && block.block_type == "Reference"
+                && block
+                    .library_source
+                    .as_deref()
+                    .is_some_and(|src| crate::vector::supported_library_source(src).is_some());
+            if supported_link {
+                // Index Vector and Environment Controller lower natively.
+            } else if block.mask.is_some() || block.library_source.is_some() {
                 report.emit(Severity::Warning, "simulation_link_or_mask", location.clone(),
                     "Masks and library links require supported explicit lowering before simulation.".into());
             } else if block.subsystem.is_none()

@@ -168,7 +168,9 @@ CI. Per-model import, render and simulation coverage is tracked in
 - Solvers: Euler, RK4, adaptive Dormand–Prince 5(4).
 - Blocks: sources (Constant, Clock, Step, Sine), Gain, Bias, Sum, Product,
   Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
-  operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
+  operators, Switch (nonzero and threshold criteria), Selector, Multiport
+  Switch and the library Index Vector, Manual Switch, Environment Controller,
+  Mux/Demux, virtual subsystems, proper SISO
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
   matrix signals lowered to scalars. The authoritative list and its limits are
   in [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).

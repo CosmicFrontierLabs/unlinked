@@ -87,6 +87,8 @@ fn control_palette_defaults_match_analytic_responses() {
         "TransferFcn",
         "StateSpace",
         "Switch",
+        "ManualSwitch",
+        "MultiPortSwitch",
         "Abs",
         "Trigonometry",
         "Terminator",
@@ -162,4 +164,60 @@ fn default_switch_selects_both_branches() {
             .iter()
             .all(|&v| v == 2.0)
     );
+}
+#[test]
+fn library_palette_blocks_are_linked_references_that_simulate() {
+    use unlinked_model::edit::{next_sid, Edit};
+    let wire = |src: &str, dst: &str, index: u32| Line {
+        src: Some(Endpoint {
+            block: src.into(),
+            port: PortRef {
+                kind: PortKind::Out,
+                index: 1,
+            },
+        }),
+        dst: Some(Endpoint {
+            block: dst.into(),
+            port: PortRef {
+                kind: PortKind::In,
+                index,
+            },
+        }),
+        ..Default::default()
+    };
+    for (key, first, second, expected) in [
+        ("IndexVector", "1", "[5 6]", 6.0),
+        ("EnvironmentController", "4", "9", 4.0),
+    ] {
+        let mut m = model("Constant");
+        m.root.blocks.truncate(1);
+        m.root.blocks[0]
+            .parameters
+            .insert("Value".into(), first.into());
+        let mut other = block("other", "Constant");
+        other.parameters.insert("Value".into(), second.into());
+        m.root.blocks.push(other);
+        let sid = next_sid(&m).unwrap().to_string();
+        Edit::AddBlock {
+            system: vec![],
+            id: sid.as_str().into(),
+            block_type: key.into(),
+            name: "linked".into(),
+            position: Rect::new(100.0, 0.0, 130.0, 30.0),
+        }
+        .apply(&mut m)
+        .unwrap_or_else(|e| panic!("{key}: {e}"));
+        let added = m.root.blocks.last().unwrap().clone();
+        assert_eq!(added.block_type, "Reference");
+        assert_eq!(
+            added.library_source.as_deref(),
+            catalog::find(key).unwrap().source_block
+        );
+        assert_eq!(catalog::descriptor_for(&added).unwrap().type_key, key);
+        assert_eq!(added.ports.inputs, 2);
+        m.root.lines = vec![wire("source", &sid, 1), wire("other", &sid, 2)];
+        assert!(unlinked_model::validation::validate_structure(&m).is_valid());
+        let trace = simulate_model(&m, &options()).unwrap_or_else(|e| panic!("{key}: {e}"));
+        assert!(trace.signals[&sid].iter().all(|&v| v == expected), "{key}");
+    }
 }

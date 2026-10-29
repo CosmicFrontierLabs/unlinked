@@ -2,6 +2,7 @@
 //! Runtime integration remains in the existing scalar engine. Values and matrix
 //! coordinates follow MATLAB column-major order; one-dimensional vectors have
 //! no row/column orientation. No implicit reshape or matrix-to-vector flattening.
+use super::selection::{cell_items, DimensionSelect, MultiPortConfig, SwitchCriteria};
 use super::{block_error, Error};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use unlinked_matlab::array_runtime::{Value, ValueKind};
@@ -82,6 +83,23 @@ enum Operation {
     },
     Transfer,
     MatlabFunction,
+    /// Compile-time element selection; one entry per declared dimension.
+    Selector {
+        dimensions: Vec<DimensionSelect>,
+        input_width: Option<usize>,
+    },
+    /// Runtime data-port selection. With one data port (`index_vector`) the
+    /// control indexes the elements of that vector instead.
+    MultiPort {
+        config: MultiPortConfig,
+        index_vector: bool,
+    },
+    /// Pass input `port` unchanged (Manual Switch, Environment Controller).
+    /// `expand` allows scalar expansion against the other inputs.
+    Select {
+        port: usize,
+        expand: bool,
+    },
 }
 struct Spec {
     operation: Operation,
@@ -260,7 +278,426 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             | "From"
             | "GotoTagVisibility"
             | "MatlabFunction"
+            | "Selector"
+            | "MultiPortSwitch"
+            | "ManualSwitch"
+            // Internal spelling for the library-sourced Environment Controller.
+            | "EnvironmentController"
     )
+}
+
+/// Library-linked `Reference` blocks the simulator lowers itself, by their
+/// `SourceBlock` path (library names may wrap with newlines in files).
+/// Returns the block's library name.
+pub(crate) fn supported_library_source(source: &str) -> Option<&'static str> {
+    let normalized: String = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    match normalized.as_str() {
+        "simulink/Signal Routing/Index Vector" => Some("Index Vector"),
+        "simulink/Signal Routing/Environment Controller" => Some("Environment Controller"),
+        _ => None,
+    }
+}
+
+/// Rewrite a supported library-linked block into its native equivalent so the
+/// ordinary lowering applies. Index Vector is a Multiport Switch with one
+/// zero-based data port (<https://www.mathworks.com/help/simulink/slref/indexvector.html>);
+/// a linked block stores only the parameters it overrides, so the library's
+/// values are filled in when absent. Environment Controller passes its Sim
+/// input during simulation (<https://www.mathworks.com/help/simulink/slref/environmentcontroller.html>).
+fn lower_library_block(block: &mut Block) {
+    if block.block_type != "Reference" || block.mask.is_some() || block.subsystem.is_some() {
+        return;
+    }
+    let Some(kind) = block
+        .library_source
+        .as_deref()
+        .and_then(supported_library_source)
+    else {
+        return;
+    };
+    match kind {
+        "Index Vector" => {
+            block.block_type = "MultiPortSwitch".into();
+            block
+                .parameters
+                .entry("Inputs".into())
+                .or_insert_with(|| "1".into());
+            block
+                .parameters
+                .entry("DataPortOrder".into())
+                .or_insert_with(|| "Zero-based contiguous".into());
+        }
+        _ => block.block_type = "EnvironmentController".into(),
+    }
+    block.library_source = None;
+}
+
+/// Zero-based indices from a dialog index expression. `min` is the first
+/// valid index in the block's index mode (0 or 1).
+fn index_list(
+    block: &Block,
+    key: &str,
+    source: &str,
+    min: f64,
+    workspace: &Workspace,
+    budget: &mut ArrayBudget,
+) -> Result<Vec<usize>, Error> {
+    let value = eval(block, key, source, workspace, budget)?;
+    if value.rows > 1 && value.cols > 1 {
+        return Err(block_error(
+            &block.id.0,
+            format!("{key} must be a scalar or vector of indices"),
+        ));
+    }
+    value
+        .data
+        .iter()
+        .map(|&n| {
+            if n.fract() != 0.0 || n < min || n - min >= MAX_ELEMENTS as f64 {
+                Err(block_error(
+                    &block.id.0,
+                    format!(
+                        "{key} contains an index {n} outside the {}-based range",
+                        min as usize
+                    ),
+                ))
+            } else {
+                Ok((n - min) as usize)
+            }
+        })
+        .collect()
+}
+
+/// Selector dialog configuration. Index ports and more than two dimensions
+/// reject explicitly. <https://www.mathworks.com/help/simulink/slref/selector.html>
+fn selector(
+    block: &Block,
+    workspace: &Workspace,
+    budget: &mut ArrayBudget,
+) -> Result<Operation, Error> {
+    let id = &block.id.0;
+    let min = match block
+        .param("IndexMode")
+        .map(str::trim)
+        .unwrap_or("One-based")
+    {
+        "One-based" => 1.0,
+        "Zero-based" => 0.0,
+        other => {
+            return Err(block_error(
+                id,
+                format!("unsupported Selector IndexMode={other}"),
+            ))
+        }
+    };
+    let input_width = match block.param("InputPortWidth") {
+        None => None,
+        Some(raw) => {
+            let value = eval(block, "InputPortWidth", raw, workspace, budget)?;
+            let n = value.data[0];
+            if value.data.len() != 1 || n.fract() != 0.0 || (n != -1.0 && n < 1.0) {
+                return Err(block_error(
+                    id,
+                    "Selector InputPortWidth must be -1 or a positive integer",
+                ));
+            }
+            (n != -1.0).then_some(n as usize)
+        }
+    };
+    if block.ports.inputs > 1 {
+        return Err(block_error(
+            id,
+            "Selector index ports are unsupported; indices must come from the dialog",
+        ));
+    }
+    let dimensions = match block.param("NumberOfDimensions").map(str::trim) {
+        None | Some("1") => 1,
+        Some("2") => 2,
+        Some(other) => {
+            let message = format!(
+                "unsupported Selector NumberOfDimensions={other}; only 1 and 2 are supported"
+            );
+            return Err(block_error(id, message));
+        }
+    };
+    let cells = |key: &str, fallback: Option<&str>, default: &str| -> Result<Vec<String>, Error> {
+        let raw = block
+            .param(key)
+            .or_else(|| fallback.and_then(|k| block.param(k)))
+            .unwrap_or(default);
+        cell_items(raw).map_err(|e| block_error(id, format!("{key}: {e}")))
+    };
+    // Legacy spelling of pre-R2007 files: Elements/InputPortWidth/ElementSrc.
+    if block.param("IndexOptionArray").is_none() && block.param("IndexOptions").is_none() {
+        if let Some(elements) = block.param("Elements") {
+            if block
+                .param("ElementSrc")
+                .is_some_and(|source| source.trim() != "Internal")
+            {
+                return Err(block_error(
+                    id,
+                    "Selector ElementSrc=External (port-driven indices) is unsupported",
+                ));
+            }
+            if dimensions != 1 {
+                return Err(block_error(
+                    id,
+                    "legacy Selector Elements apply to one-dimensional selection only",
+                ));
+            }
+            let indices = index_list(block, "Elements", elements, min, workspace, budget)?;
+            return Ok(Operation::Selector {
+                dimensions: vec![DimensionSelect::Indices(indices)],
+                input_width,
+            });
+        }
+    }
+    let options = cells(
+        "IndexOptionArray",
+        Some("IndexOptions"),
+        "{'Index vector (dialog)'}",
+    )?;
+    let params = cells("IndexParamArray", Some("Indices"), "{'[1 3]'}")?;
+    let sizes = cells("OutputSizeArray", Some("OutputSizes"), "{'1'}")?;
+    if options.len() != dimensions {
+        return Err(block_error(
+            id,
+            format!(
+                "Selector IndexOptionArray lists {} options for {dimensions} dimension(s)",
+                options.len()
+            ),
+        ));
+    }
+    let mut selects = Vec::with_capacity(dimensions);
+    for (d, option) in options.iter().enumerate() {
+        let param = |list: &[String], key: &str| -> Result<String, Error> {
+            list.get(d).cloned().ok_or_else(|| {
+                block_error(
+                    id,
+                    format!("Selector {key} has no entry for dimension {}", d + 1),
+                )
+            })
+        };
+        let select = match option.trim() {
+            "Select all" => DimensionSelect::All,
+            "Index vector (dialog)" => DimensionSelect::Indices(index_list(
+                block,
+                &format!("IndexParamArray[{}]", d + 1),
+                &param(&params, "IndexParamArray")?,
+                min,
+                workspace,
+                budget,
+            )?),
+            "Starting index (dialog)" => {
+                let key = format!("IndexParamArray[{}]", d + 1);
+                let start = index_list(block, &key, &param(&params, "IndexParamArray")?, min, workspace, budget)?;
+                let [start] = start[..] else {
+                    return Err(block_error(id, format!("{key} must be a single starting index")));
+                };
+                let size_key = format!("OutputSizeArray[{}]", d + 1);
+                let size = eval(block, &size_key, &param(&sizes, "OutputSizeArray")?, workspace, budget)?;
+                let n = size.data[0];
+                if size.data.len() != 1 || n.fract() != 0.0 || n < 1.0 || n > MAX_ELEMENTS as f64 {
+                    return Err(block_error(id, format!("{size_key} must be a positive integer output size")));
+                }
+                let n = n as usize;
+                if start + n > MAX_ELEMENTS {
+                    return Err(block_error(id, "signal element budget exceeded"));
+                }
+                DimensionSelect::Indices((start..start + n).collect())
+            }
+            other @ ("Index vector (port)" | "Starting index (port)" | "Starting and ending indices (port)") => {
+                return Err(block_error(
+                    id,
+                    format!("Selector IndexOptionArray entry {other:?} (port-driven indices) is unsupported"),
+                ))
+            }
+            other => {
+                return Err(block_error(
+                    id,
+                    format!("unsupported Selector IndexOptionArray entry {other:?}"),
+                ))
+            }
+        };
+        selects.push(select);
+    }
+    Ok(Operation::Selector {
+        dimensions: selects,
+        input_width,
+    })
+}
+
+/// Multiport Switch dialog configuration, including the legacy `zeroidx`
+/// spelling of the port order. Absent values use the documented defaults.
+/// <https://www.mathworks.com/help/simulink/slref/multiportswitch.html>
+fn multiport(
+    block: &Block,
+    workspace: &Workspace,
+    budget: &mut ArrayBudget,
+) -> Result<Operation, Error> {
+    let id = &block.id.0;
+    let n = count(block, "Inputs", "3", workspace, budget)?;
+    #[derive(PartialEq)]
+    enum Order {
+        Zero,
+        One,
+        Specify,
+    }
+    let order = match block.param("DataPortOrder").map(str::trim) {
+        Some("Zero-based contiguous") => Order::Zero,
+        Some("One-based contiguous") => Order::One,
+        Some("Specify indices") => Order::Specify,
+        Some(other) => {
+            return Err(block_error(
+                id,
+                format!("unsupported MultiPortSwitch DataPortOrder={other}"),
+            ))
+        }
+        None => match block.param("zeroidx").map(str::trim) {
+            Some("on") => Order::Zero,
+            None | Some("off") => Order::One,
+            Some(other) => {
+                return Err(block_error(
+                    id,
+                    format!("unsupported MultiPortSwitch zeroidx={other}"),
+                ))
+            }
+        },
+    };
+    if block
+        .param("AllowDiffInputSizes")
+        .is_some_and(|v| v.trim() != "off")
+    {
+        return Err(block_error(
+            id,
+            "MultiPortSwitch AllowDiffInputSizes=on (variable-size output) is unsupported",
+        ));
+    }
+    let additional_default_port = match block
+        .param("DataPortForDefault")
+        .map(str::trim)
+        .unwrap_or("Last data port")
+    {
+        "Last data port" => false,
+        "Additional data port" => true,
+        other => {
+            return Err(block_error(
+                id,
+                format!("unsupported MultiPortSwitch DataPortForDefault={other}"),
+            ))
+        }
+    };
+    let error_on_default = match block
+        .param("DiagnosticForDefault")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+        .unwrap_or("error")
+    {
+        "error" => true,
+        // A warning changes no output value; Unlinked does not surface it.
+        "warning" | "none" => false,
+        other => {
+            return Err(block_error(
+                id,
+                format!("unsupported MultiPortSwitch DiagnosticForDefault={other}"),
+            ))
+        }
+    };
+    let index_vector = n == 1;
+    if index_vector {
+        if order == Order::Specify {
+            return Err(block_error(
+                id,
+                "MultiPortSwitch with one data port (index vector) requires a contiguous DataPortOrder",
+            ));
+        }
+        if additional_default_port {
+            return Err(block_error(
+                id,
+                "MultiPortSwitch with one data port (index vector) does not support an additional default port",
+            ));
+        }
+    }
+    let indices: Vec<Vec<i64>> = match order {
+        Order::Zero => (0..n as i64).map(|i| vec![i]).collect(),
+        Order::One => (1..=n as i64).map(|i| vec![i]).collect(),
+        Order::Specify => {
+            let raw = block.param("DataPortIndices").ok_or_else(|| {
+                block_error(id, "DataPortOrder=Specify indices requires DataPortIndices")
+            })?;
+            let items =
+                cell_items(raw).map_err(|e| block_error(id, format!("DataPortIndices: {e}")))?;
+            if items.len() != n {
+                return Err(block_error(
+                    id,
+                    format!(
+                        "DataPortIndices lists {} entries for {n} data ports",
+                        items.len()
+                    ),
+                ));
+            }
+            let mut seen = BTreeSet::new();
+            let mut indices = Vec::with_capacity(n);
+            for (k, item) in items.iter().enumerate() {
+                let key = format!("DataPortIndices[{}]", k + 1);
+                let value = eval(block, &key, item, workspace, budget)?;
+                let mut port = Vec::with_capacity(value.data.len());
+                for &v in &value.data {
+                    if v.fract() != 0.0 || v.abs() > 9_007_199_254_740_992.0 {
+                        return Err(block_error(id, format!("{key} must contain integers")));
+                    }
+                    if !seen.insert(v as i64) {
+                        return Err(block_error(
+                            id,
+                            format!("DataPortIndices assigns control value {v} to more than one data port"),
+                        ));
+                    }
+                    port.push(v as i64);
+                }
+                indices.push(port);
+            }
+            indices
+        }
+    };
+    Ok(Operation::MultiPort {
+        config: MultiPortConfig {
+            indices,
+            additional_default_port,
+            error_on_default,
+        },
+        index_vector,
+    })
+}
+
+/// The lowered scalar Multiport Switch block in the canonical parameter form
+/// `import.rs` reads back: explicit indices, default port and diagnostic.
+fn canonical_multiport(block: &Block, config: &MultiPortConfig) -> Block {
+    let mut scalar = block.clone();
+    scalar.block_type = "MultiPortSwitch".into();
+    let p = &mut scalar.parameters;
+    p.insert("Inputs".into(), config.indices.len().to_string());
+    p.insert("DataPortOrder".into(), "Specify indices".into());
+    p.insert("DataPortIndices".into(), config.indices_literal());
+    p.insert(
+        "DataPortForDefault".into(),
+        if config.additional_default_port {
+            "Additional data port"
+        } else {
+            "Last data port"
+        }
+        .into(),
+    );
+    p.insert(
+        "DiagnosticForDefault".into(),
+        if config.error_on_default {
+            "Error"
+        } else {
+            "None"
+        }
+        .into(),
+    );
+    p.remove("zeroidx");
+    scalar
 }
 
 fn describe(
@@ -268,18 +705,18 @@ fn describe(
     workspace: &Workspace,
     budget: &mut ArrayBudget,
 ) -> Result<Spec, Error> {
-    if !supported_native_type(&block.block_type) {
-        return Err(block_error(
-            &block.id.0,
-            format!("unsupported block type {}", block.block_type),
-        ));
-    }
-
+    lower_library_block(block);
     let id = &block.id.0;
     if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
         return Err(block_error(
             id,
             "subsystems, masks and library links require explicit lowering before simulation",
+        ));
+    }
+    if !supported_native_type(&block.block_type) {
+        return Err(block_error(
+            id,
+            format!("unsupported block type {}", block.block_type),
         ));
     }
     if [
@@ -299,9 +736,11 @@ fn describe(
             "only ordinary input/output ports are supported",
         ));
     }
-    if block.block_type == "Switch" && block.param("Criteria") != Some("u2 ~= 0") {
-        return Err(block_error(id, "Switch currently requires Criteria=u2 ~= 0; threshold criteria need datatype propagation"));
-    }
+    let switch_criteria = if block.block_type == "Switch" {
+        Some(SwitchCriteria::parse(block.param("Criteria")).map_err(|e| block_error(id, e))?)
+    } else {
+        None
+    };
     if matches!(block.block_type.as_str(), "Switch" | "RelationalOperator")
         && block.param("ZeroCross").is_some_and(|v| v != "off")
     {
@@ -388,6 +827,50 @@ fn describe(
         }
         "RelationalOperator" => (Operation::Elementwise, 2, None),
         "Switch" => (Operation::Elementwise, 3, None),
+        "Selector" => (selector(block, workspace, budget)?, 1, None),
+        "MultiPortSwitch" => {
+            let operation = multiport(block, workspace, budget)?;
+            let Operation::MultiPort { config, .. } = &operation else {
+                unreachable!()
+            };
+            let inputs = 1 + config.data_ports();
+            (operation, inputs, None)
+        }
+        "ManualSwitch" => {
+            // sw=1 connects the first input, sw=0 the second (reference page).
+            // There is no documented default, so an absent value rejects.
+            let port = match block.param("sw").map(str::trim) {
+                Some("1") => 0,
+                Some("0") => 1,
+                Some(other) => {
+                    return Err(block_error(
+                        id,
+                        format!("ManualSwitch sw={other} must be 0 or 1"),
+                    ))
+                }
+                None => {
+                    return Err(block_error(
+                        id,
+                        "ManualSwitch requires an explicit sw position (0 or 1)",
+                    ))
+                }
+            };
+            if block.param("varsize").is_some_and(|v| v.trim() != "off") {
+                return Err(block_error(
+                    id,
+                    "ManualSwitch varsize=on (inputs differing in size) is unsupported",
+                ));
+            }
+            (Operation::Select { port, expand: true }, 2, None)
+        }
+        "EnvironmentController" => (
+            Operation::Select {
+                port: 0,
+                expand: false,
+            },
+            2,
+            None,
+        ),
         "Mux" => {
             let v = eval(
                 block,
@@ -522,6 +1005,10 @@ fn describe(
         ],
         "Bias" => &[("Bias", "0")],
         "Saturate" | "Saturation" => &[("LowerLimit", "-0.5"), ("UpperLimit", "0.5")],
+        // The threshold is disabled, and not evaluated, for the nonzero criterion.
+        "Switch" if switch_criteria.is_some_and(|c| c != SwitchCriteria::Nonzero) => {
+            &[("Threshold", "0")]
+        }
         _ => &[],
     };
     for &(key, default) in numeric {
@@ -702,6 +1189,51 @@ fn infer(
         }
         Operation::Reduce => inputs[0].map(|_| Shape::SCALAR),
         Operation::Elementwise => broadcast(id, inputs.iter().copied())?,
+        Operation::Selector {
+            dimensions,
+            input_width,
+        } => match inputs[0] {
+            None => None,
+            Some(input) => Some(selected_shape(id, dimensions, *input_width, input)?),
+        },
+        Operation::MultiPort { index_vector, .. } => {
+            if inputs[0].is_some_and(|s| s != Shape::SCALAR) {
+                return Err(block_error(
+                    id,
+                    "MultiPortSwitch control input must be scalar",
+                ));
+            }
+            if *index_vector {
+                match inputs[1] {
+                    Some(data) if !data.vector && data.len() > 1 => {
+                        return Err(block_error(
+                            id,
+                            "MultiPortSwitch with one data port indexes a scalar or one-dimensional vector",
+                        ))
+                    }
+                    Some(_) => Some(Shape::SCALAR),
+                    None => None,
+                }
+            } else {
+                broadcast(id, inputs[1..].iter().copied())?
+            }
+        }
+        Operation::Select { port, expand } => {
+            if *expand {
+                broadcast(id, inputs.iter().copied())?
+            } else {
+                let mut known = inputs.iter().flatten();
+                if let Some(first) = known.next() {
+                    if known.any(|s| s != first) {
+                        return Err(block_error(
+                            id,
+                            "Environment Controller inputs must have identical dimensions",
+                        ));
+                    }
+                }
+                inputs[*port]
+            }
+        }
         Operation::Transfer | Operation::MatlabFunction => Some(Shape::SCALAR),
         Operation::Mux { .. } => {
             if inputs.iter().any(Option::is_none) {
@@ -740,6 +1272,86 @@ fn infer(
         return Err(block_error(id, "signal element budget exceeded"));
     }
     Ok(vec![output])
+}
+
+/// Resolve a Selector's per-dimension selections against its input shape,
+/// returning the zero-based indices along each dimension.
+fn selected_indices(
+    id: &str,
+    dimensions: &[DimensionSelect],
+    input_width: Option<usize>,
+    input: Shape,
+) -> Result<Vec<Vec<usize>>, Error> {
+    let extents: Vec<usize> = if dimensions.len() == 1 {
+        if !input.vector && input.len() > 1 {
+            return Err(block_error(
+                id,
+                "one-dimensional Selector requires a scalar or vector input; set NumberOfDimensions=2 for matrices",
+            ));
+        }
+        if input_width.is_some_and(|w| w != input.len()) {
+            return Err(block_error(
+                id,
+                format!(
+                    "Selector InputPortWidth {} does not match the input width {}",
+                    input_width.unwrap(),
+                    input.len()
+                ),
+            ));
+        }
+        vec![input.len()]
+    } else {
+        if input.vector {
+            return Err(block_error(
+                id,
+                "two-dimensional Selector requires a matrix input; one-dimensional vectors have no row/column orientation",
+            ));
+        }
+        vec![input.rows, input.cols]
+    };
+    dimensions
+        .iter()
+        .zip(&extents)
+        .enumerate()
+        .map(|(d, (select, &extent))| match select {
+            DimensionSelect::All => Ok((0..extent).collect()),
+            DimensionSelect::Indices(indices) => {
+                if let Some(bad) = indices.iter().find(|&&i| i >= extent) {
+                    return Err(block_error(
+                        id,
+                        format!(
+                            "Selector index {} exceeds the input extent {extent} along dimension {}",
+                            bad + 1,
+                            d + 1
+                        ),
+                    ));
+                }
+                Ok(indices.clone())
+            }
+        })
+        .collect()
+}
+fn selected_shape(
+    id: &str,
+    dimensions: &[DimensionSelect],
+    input_width: Option<usize>,
+    input: Shape,
+) -> Result<Shape, Error> {
+    let indices = selected_indices(id, dimensions, input_width, input)?;
+    Ok(if indices.len() == 1 {
+        Shape::vector(indices[0].len())
+    } else {
+        let (rows, cols) = (indices[0].len(), indices[1].len());
+        if rows * cols == 1 {
+            Shape::SCALAR
+        } else {
+            Shape {
+                rows,
+                cols,
+                vector: false,
+            }
+        }
+    })
 }
 
 struct Builder {
@@ -1168,6 +1780,74 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
                 builder.block(reduced, id.clone(), name(0, 0), n)?;
                 for (k, input) in input_ids[0].iter().enumerate() {
                     builder.wire(input, id, k)?;
+                }
+            }
+            Operation::Selector {
+                dimensions,
+                input_width,
+            } => {
+                let input = input_shapes[0];
+                let indices = selected_indices(&block.id.0, dimensions, *input_width, input)?;
+                for (j, id) in lowered[i][0].iter().enumerate() {
+                    // Column-major element of the input for output element j.
+                    let element = if indices.len() == 1 {
+                        indices[0][j]
+                    } else {
+                        let rows = indices[0].len();
+                        indices[0][j % rows] + indices[1][j / rows] * input.rows
+                    };
+                    builder.block(identity(block), id.clone(), name(0, j), 1)?;
+                    builder.wire(&input_ids[0][element], id, 0)?;
+                }
+            }
+            Operation::MultiPort {
+                config,
+                index_vector: true,
+            } => {
+                // The control selects one element of the single data vector:
+                // element k answers to control value base + k, where base is
+                // the first contiguous index (0 or 1).
+                let elements = input_shapes[1].len();
+                let per_element = MultiPortConfig {
+                    indices: (0..elements)
+                        .map(|k| vec![config.indices[0][0] + k as i64])
+                        .collect(),
+                    additional_default_port: false,
+                    error_on_default: config.error_on_default,
+                };
+                let id = &lowered[i][0][0];
+                builder.block(
+                    canonical_multiport(block, &per_element),
+                    id.clone(),
+                    name(0, 0),
+                    1 + elements,
+                )?;
+                builder.wire(source(0, 0), id, 0)?;
+                for (k, input) in input_ids[1].iter().enumerate() {
+                    builder.wire(input, id, 1 + k)?;
+                }
+            }
+            Operation::MultiPort {
+                config,
+                index_vector: false,
+            } => {
+                for (j, id) in lowered[i][0].iter().enumerate() {
+                    builder.block(
+                        canonical_multiport(block, config),
+                        id.clone(),
+                        name(0, j),
+                        spec.inputs,
+                    )?;
+                    builder.wire(source(0, 0), id, 0)?;
+                    for port in 1..spec.inputs {
+                        builder.wire(source(port, j), id, port)?;
+                    }
+                }
+            }
+            Operation::Select { port, .. } => {
+                for (j, id) in lowered[i][0].iter().enumerate() {
+                    builder.block(identity(block), id.clone(), name(0, j), 1)?;
+                    builder.wire(source(*port, j), id, 0)?;
                 }
             }
             _ => {
