@@ -6,7 +6,10 @@ use unlinked_model::*;
 mod routing;
 
 pub fn flatten(model: &Model) -> Result<Model, Error> {
-    let model = super::chart_lowering::lower_charts(routing::lower(model)?)?;
+    // Commented blocks go last so a commented Goto grounds its From blocks
+    // and a commented MATLAB Function block is dropped as a single node.
+    let model =
+        super::commented::lower(super::chart_lowering::lower_charts(routing::lower(model)?)?)?;
     fn id(prefix: &str, id: &BlockId) -> BlockId {
         BlockId(format!("{prefix}{}", id.0.replace('/', "//")))
     }

@@ -169,11 +169,15 @@ CI. Per-model import, render and simulation coverage is tracked in
 - Blocks: sources (Constant, Clock, Step, Sine, time-based Pulse Generator,
   Signal Generator sine/square/sawtooth, and the library Ramp, Chirp Signal
   and Repeating Sequence), Gain, Bias, Sum, Product,
-  Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
-  operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
+  Saturation, Integrator, UnitDelay, Abs, Math Function and Trigonometric
+  Function (real operators, including two-input and `sincos`), Sqrt, Sign,
+  Rounding, Unary Minus, Polynomial, Dot Product, MinMax, relational and
+  logical operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
-  matrix signals lowered to scalars. The authoritative list and its limits are
-  in [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
+  matrix signals lowered to scalars; blocks commented out (grounded) or
+  commented through (wired input to output) at any level. The authoritative
+  list and its limits are in
+  [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
 - Multirate discrete scheduling on integer sample ticks (held values between
   hits and through solver stages), and local Goto/From routing.
 - Pure scalar MATLAB Function charts execute through a bounded function

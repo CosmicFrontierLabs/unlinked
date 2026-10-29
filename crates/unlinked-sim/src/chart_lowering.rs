@@ -62,6 +62,16 @@ pub(super) fn lower_charts(
                     "ambiguous duplicate block name in chart path",
                 ));
             }
+            if matches!(
+                block.commented(),
+                Ok(unlinked_model::Commented::Out | unlinked_model::Commented::Through)
+            ) {
+                // The commented pass drops this block with everything inside
+                // it, so its charts are neither validated nor lowered; they
+                // only count as matched so the path check below still holds.
+                mark_commented(block, &path, depth, charts, seen, work)?;
+                continue;
+            }
             if let Some(chart) = charts.get(path.as_str()) {
                 if !seen.insert(path.clone()) {
                     return Err(block_error(&block.id.0, "ambiguous chart path"));
@@ -220,6 +230,32 @@ pub(super) fn lower_charts(
         Ok(())
     }
 
+    fn mark_commented(
+        block: &unlinked_model::Block,
+        path: &str,
+        depth: usize,
+        charts: &BTreeMap<&str, &unlinked_model::Chart>,
+        seen: &mut BTreeSet<String>,
+        work: &mut usize,
+    ) -> Result<(), Error> {
+        if depth > 64 {
+            return Err(Error::Options(
+                "MATLAB Function chart path exceeds 64 subsystem levels".into(),
+            ));
+        }
+        if charts.contains_key(path) {
+            seen.insert(path.to_string());
+        }
+        for child in block.subsystem.iter().flat_map(|sub| &sub.blocks) {
+            *work = work.checked_sub(1).ok_or_else(|| {
+                Error::Options("MATLAB Function path traversal exceeds 100000 blocks".into())
+            })?;
+            let child_path = format!("{path}/{}", child.name.replace('/', "//"));
+            mark_commented(child, &child_path, depth + 1, charts, seen, work)?;
+        }
+        Ok(())
+    }
+
     let mut seen = BTreeSet::new();
     let mut work = 100_000;
     walk(
@@ -259,7 +295,11 @@ fn validate_backing(
             && block.ports.state == 0
             && block.ports.lconn == 0
             && block.ports.rconn == 0
-            && block.param("Commented").is_none_or(|s| s == "off")
+    }
+    // The lowered block keeps its own `Commented` setting for the commented
+    // pass; generated backing content, however, is never commented.
+    fn uncommented(block: &Block) -> bool {
+        block.param("Commented").is_none_or(|s| s == "off")
     }
     if block.block_type != "SubSystem"
         || block.param("SFBlockType") != Some("MATLAB Function")
@@ -293,6 +333,7 @@ fn validate_backing(
     for child in &system.blocks {
         if blocks.insert(&child.id, child).is_some()
             || !ordinary(child)
+            || !uncommented(child)
             || child.subsystem.is_some()
         {
             return Err(fail("MATLAB Function backing subsystem has duplicate IDs or unsupported nested/masked/conditional content"));

@@ -95,6 +95,14 @@ fn control_palette_defaults_match_analytic_responses() {
         "Switch",
         "Abs",
         "Trigonometry",
+        "Math",
+        "Sqrt",
+        "Signum",
+        "Rounding",
+        "UnaryMinus",
+        "Polyval",
+        "DotProduct",
+        "MinMax",
         "Terminator",
         "Display",
     ] {
@@ -139,6 +147,11 @@ fn control_palette_defaults_match_analytic_responses() {
                 "TransferFcn" => 2.0 * (1.0 - (-t).exp()),
                 "StateSpace" => 2.0 * t.exp(),
                 "Trigonometry" => 2.0_f64.sin(),
+                "Math" => 2.0_f64.exp(),
+                "Sqrt" => 2.0_f64.sqrt(),
+                "Signum" => 1.0,
+                "UnaryMinus" => -2.0,
+                "DotProduct" => 4.0,
                 _ => 2.0,
             };
             assert!(

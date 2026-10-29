@@ -26,6 +26,11 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 pub const MAX_PORTS: u32 = 1024;
+/// Simulink's library default for the Polynomial block's `coefs`
+/// (https://www.mathworks.com/help/simulink/slref/polynomial.html). Files
+/// omit parameters left at their defaults, so an imported block without
+/// `coefs` evaluates this polynomial rather than the identity.
+pub const POLYVAL_DEFAULT_COEFS: &str = "[ +2.081618890e-019, -1.441693666e-014, +4.719686976e-010, -8.536869453e-006, +1.621573104e-001, -8.087801117e+001 ]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ParameterKind {
@@ -159,6 +164,8 @@ pub enum PortRule {
     /// One output; an input when `TimeSource` is an external signal.
     TimeSource,
     Trigonometry,
+    /// Math Function: pow, hypot, rem and mod take two inputs.
+    MathFunction,
     Display,
     Integrator,
     Scope,
@@ -440,6 +447,16 @@ impl PortRule {
                     } else {
                         1
                     },
+                );
+            }
+            Self::MathFunction => {
+                return known(
+                    if matches!(value("Operator"), Some("pow" | "hypot" | "rem" | "mod")) {
+                        2
+                    } else {
+                        1
+                    },
+                    1,
                 );
             }
             Self::Display => return known(u32::from(value("Floating") != Some("on")), 0),
@@ -2140,6 +2157,223 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         PortRule::Trigonometry,
         [40.0, 30.0],
     ),
+    block(
+        "Math",
+        "Math Function",
+        "Math",
+        &[
+            param(
+                "Operator",
+                "Function",
+                Enum(
+                    &[
+                        "exp",
+                        "log",
+                        "2^u",
+                        "10^u",
+                        "log10",
+                        "magnitude^2",
+                        "square",
+                        "pow",
+                        "conj",
+                        "reciprocal",
+                        "hypot",
+                        "rem",
+                        "mod",
+                        "transpose",
+                        "hermitian",
+                    ],
+                ),
+                "exp",
+                true,
+                dialog(
+                    "Operation",
+                    "Mathematical function to apply. pow, hypot, rem and mod use two inputs; transpose and hermitian swap matrix dimensions.",
+                    None,
+                ),
+            ),
+            param(
+                "OutputSignalType",
+                "Output signal type",
+                Enum(&["auto", "real", "complex"]),
+                "auto",
+                false,
+                dialog(
+                    "Operation",
+                    "Numeric type of the output; the simulator supports real outputs only.",
+                    None,
+                ),
+            ),
+        ],
+        PortRule::MathFunction,
+        [40.0, 30.0],
+    ),
+    block(
+        "Sqrt",
+        "Sqrt",
+        "Math",
+        &[
+            param(
+                "Operator",
+                "Function",
+                Enum(&["sqrt", "signedSqrt", "rSqrt"]),
+                "sqrt",
+                false,
+                dialog(
+                        "Operation",
+                        "Square root of the input, its sign-preserving form sign(u)*sqrt(|u|), or the reciprocal square root.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "sqrt",
+                                label: "Square root",
+                            },
+                            EnumLabel {
+                                value: "signedSqrt",
+                                label: "Signed square root",
+                            },
+                            EnumLabel {
+                                value: "rSqrt",
+                                label: "Reciprocal square root",
+                            },
+                        ],
+                    ),
+            ),
+            param(
+                "OutputSignalType",
+                "Output signal type",
+                Enum(&["auto", "real", "complex"]),
+                "auto",
+                false,
+                dialog(
+                    "Operation",
+                    "Numeric type of the output; the simulator supports real outputs only.",
+                    None,
+                ),
+            ),
+        ],
+        ONE,
+        [30.0, 30.0],
+    ),
+    block("Signum", "Sign", "Math", &[], ONE, [30.0, 30.0]),
+    block(
+        "Rounding",
+        "Rounding Function",
+        "Math",
+        &[
+            param(
+                "Operator",
+                "Function",
+                Enum(&["floor", "ceil", "round", "fix"]),
+                "floor",
+                false,
+                dialog(
+                        "Operation",
+                        "Rounding direction: toward minus infinity, plus infinity, the nearest integer (halves away from zero), or zero.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "floor",
+                                label: "floor (toward -inf)",
+                            },
+                            EnumLabel {
+                                value: "ceil",
+                                label: "ceil (toward +inf)",
+                            },
+                            EnumLabel {
+                                value: "round",
+                                label: "round (nearest)",
+                            },
+                            EnumLabel {
+                                value: "fix",
+                                label: "fix (toward zero)",
+                            },
+                        ],
+                    ),
+            ),
+        ],
+        ONE,
+        [30.0, 30.0],
+    ),
+    block("UnaryMinus", "Unary Minus", "Math", &[], ONE, [30.0, 30.0]),
+    block(
+        "Polyval",
+        "Polynomial",
+        "Math",
+        &[ParameterDescriptor {
+            implicit_default: Some(POLYVAL_DEFAULT_COEFS),
+            ..param(
+                "coefs",
+                "Polynomial coefficients",
+                Expr,
+                "[1 0]",
+                false,
+                dialog(
+                    "Operation",
+                    "Coefficients in descending powers of the input, as for MATLAB polyval; the last value is the constant term. New blocks start as the identity; an imported block without coefficients keeps the Simulink library polynomial.",
+                    None,
+                ),
+            )
+        }],
+        ONE,
+        [40.0, 30.0],
+    ),
+    block(
+        "DotProduct",
+        "Dot Product",
+        "Math",
+        &[],
+        PortRule::Fixed {
+            inputs: 2,
+            outputs: 1,
+        },
+        [30.0, 30.0],
+    ),
+    block(
+        "MinMax",
+        "MinMax",
+        "Math",
+        &[
+            param(
+                "Function",
+                "Function",
+                Enum(&["min", "max"]),
+                "min",
+                false,
+                dialog(
+                    "Operation",
+                    "Minimum or maximum, taken elementwise across the inputs, or over the elements of a single vector input.",
+                    None,
+                ),
+            ),
+            ParameterDescriptor {
+                implicit_default: Some("1"),
+                ..param(
+                    "Inputs",
+                    "Number of input ports",
+                    Int,
+                    "2",
+                    true,
+                    dialog(
+                        "Operation",
+                        "Number of input ports. One port reduces a vector to a scalar. Changes the block interface.",
+                        None,
+                    ),
+                )
+            },
+        ],
+        PortRule::Count {
+            parameter: "Inputs",
+            input: true,
+            widths: false,
+            other: 1,
+        },
+        [30.0, 30.0],
+    ),
     block("Terminator", "Terminator", "Sinks", &[], SINK, [20.0, 20.0]),
     block(
         "Display",
@@ -2506,6 +2740,17 @@ mod tests {
         assert_eq!(ports("Trigonometry", "Operator", "atan2"), known(2, 1));
         assert_eq!(ports("Trigonometry", "Operator", "sincos"), known(1, 2));
         assert_eq!(ports("Trigonometry", "Operator", "cos + jsin"), known(1, 1));
+        for operator in ["pow", "hypot", "rem", "mod"] {
+            assert_eq!(ports("Math", "Operator", operator), known(2, 1));
+        }
+        for operator in ["exp", "transpose", "2^u"] {
+            assert_eq!(ports("Math", "Operator", operator), known(1, 1));
+        }
+        assert_eq!(ports("MinMax", "Inputs", "3"), known(3, 1));
+        assert_eq!(
+            find("MinMax").unwrap().resolve_ports(&BTreeMap::new()),
+            known(1, 1)
+        );
         assert_eq!(ports("Display", "Floating", "on"), known(0, 0));
     }
 }

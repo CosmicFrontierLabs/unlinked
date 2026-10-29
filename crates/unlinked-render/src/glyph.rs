@@ -190,7 +190,11 @@ pub fn appearance(block: &Block) -> Appearance {
         "Logic" => text(&non_empty(p("Operator"), "AND")),
         "Abs" => text("|u|"),
         "Signum" => text("sign"),
-        "Sqrt" => text("√u"),
+        "Sqrt" => text(&sqrt_label(&non_empty(p("Operator"), "sqrt"))),
+        "Rounding" => text(&non_empty(p("Operator"), "floor")),
+        "UnaryMinus" => text("-u"),
+        "Polyval" => text("P(u)"),
+        "DotProduct" => text("u₁·u₂"),
         "Math" => text(&math_label(&non_empty(p("Operator"), "exp"))),
         "Trigonometry" => text(&non_empty(p("Operator"), "sin")),
         "MinMax" => text(&non_empty(p("Function"), "min")),
@@ -398,6 +402,14 @@ fn math_label(op: &str) -> String {
         "transpose" => "uᵀ".into(),
         "hermitian" => "uᴴ".into(),
         other => other.into(),
+    }
+}
+
+fn sqrt_label(op: &str) -> String {
+    match op {
+        "signedSqrt" => "signed\n√u".into(),
+        "rSqrt" => "1/√u".into(),
+        _ => "√u".into(),
     }
 }
 

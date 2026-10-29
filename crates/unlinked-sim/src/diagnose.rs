@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use unlinked_model::validation::{validate_structure, Diagnostic, DiagnosticTarget, Severity};
-use unlinked_model::{catalog, Block, BlockId, Model};
+use unlinked_model::{catalog, Block, BlockId, Commented, Model};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CheckMode {
@@ -236,6 +236,21 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
             remember(&mut ids, block.id.0.clone(), location.clone());
             let flat = format!("{prefix}{}", block.id.0.replace('/', "//"));
             remember(&mut ids, flat.clone(), location.clone());
+            if let Some(reason) = crate::commented::refusal(block) {
+                report.emit(
+                    Severity::Error,
+                    "simulation_commented",
+                    target(&path, block, Some("Commented")),
+                    reason,
+                );
+            }
+            if block.commented().is_ok_and(|c| c != Commented::Off) {
+                // Commented blocks are removed before simulation (Commented=on
+                // grounds their destinations, Commented=through wires input i
+                // to output i), so their own parameters are never evaluated
+                // and their contents never run.
+                continue;
+            }
             // Registered library sources (Ramp, Chirp Signal, Repeating
             // Sequence) lower like native blocks and are not flagged as links.
             let library = crate::library::lowered_type(block);
@@ -265,17 +280,6 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     "simulation_input_missing",
                     location.clone(),
                     "Provide an explicit root input binding to compile this model.".into(),
-                );
-            }
-            if block
-                .param("Commented")
-                .is_some_and(|v| !matches!(v, "" | "off"))
-            {
-                report.emit(
-                    Severity::Warning,
-                    "simulation_commented",
-                    location.clone(),
-                    "Commented and pass-through blocks are not supported by the simulator.".into(),
                 );
             }
             if block.mask.is_none() && block.library_source.is_none() {

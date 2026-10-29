@@ -9,9 +9,9 @@ IDs mapped to scalar sample vectors, and the selected solver.
 Implemented: Constant/Ground, Clock, Step, time-based Sine, time-based Pulse
 Generator, Signal Generator (sine/square/sawtooth), Ramp, Chirp Signal,
 Repeating Sequence, Gain, Bias, Sum/Add,
-Product/division, Saturation, Integrator, UnitDelay, Abs, scalar trigonometric
-and math operations, scalar relational comparisons, logical operators, nonzero
-Switch routing, and single-input sinks. Logic and relational outputs use exact
+Product/division, Saturation, Integrator, UnitDelay, Abs, the stateless Math
+Operations blocks listed under "Math operations" below, scalar relational
+comparisons, logical operators, nonzero Switch routing, and single-input sinks. Logic and relational outputs use exact
 0/1 scalar values, including declared boolean outputs. Switch currently accepts
 only `Criteria=u2 ~= 0`; threshold criteria require signal datatype propagation
 to reproduce boolean-control behavior and therefore reject. Explicit zero-crossing
@@ -146,8 +146,78 @@ limit sooner. Trusted native callers can pass an explicit `ArrayBudget` to
 `simulate_with_observer_and_budget`; server jobs retain the fixed budget, shared
 with initialization, plus the 30-second cooperative deadline and 25,001-sample
 cap. Budget exhaustion is an explicit error, never a partial successful trace.
-Blocks marked `Commented=on` or `Commented=through` are rejected until their
-removal/bypass semantics are implemented, including nested and routing blocks.
+
+### Commented blocks
+
+Blocks marked `Commented=on` are removed before simulation as Simulink's
+[Comment Out](https://www.mathworks.com/help/simulink/ug/comment-out-blocks.html)
+does: the signals into them are terminated and every destination their outputs
+fed reads Ground (0). Blocks marked `Commented=through` are removed and input
+*i* is wired straight to output *i*; an undriven input grounds its outputs.
+Both work at every subsystem level and around Goto/From routing (a
+commented-out Goto grounds its From blocks), and the removed blocks are never
+evaluated or validated: neither their parameters nor anything inside a
+commented subsystem, including its routing blocks and MATLAB Function charts.
+As in Simulink, comment through is refused for blocks whose input and output
+port counts differ or that have control or connection ports (so also for Goto
+and From); Inport, Outport, Goto Tag Visibility and Data Store Memory blocks
+cannot be commented, and any other `Commented` value is rejected. The renderer
+greys commented blocks and their lines, dashes the commented-through path and
+shows the `%` or `%%` badge.
+
+Two known divergences from Simulink: the Ground standing in for a
+commented-out block is recorded in the trace under that block's own ID (so a
+trace equals the edited model's only when the commented block had no connected
+outputs; Simulink logs nothing for it), and that Ground is scalar, so a
+width-sensitive destination such as an equal-width Demux reports its own width
+error where Simulink would back-propagate the destination width.
+
+### Math operations
+
+Elementwise blocks accept scalars, vectors and matrices with scalar expansion
+between two inputs. Results that leave the reals (log or sqrt of a negative,
+`reciprocal` of zero, `rem(x, 0)`, `acosh` below one) are non-finite signal
+errors, never substituted values; complex output types reject.
+
+- **Math Function** (`Operator`): `exp`, `log`, `2^u`, `10^u`, `log10`,
+  `magnitude^2`, `square`, `conj` (identity on reals), `reciprocal` (exact
+  division only), the two-input `pow`, `hypot`, `rem`, `mod`, and
+  `transpose`/`hermitian`. `rem` takes the sign of the dividend and `mod` the
+  sign of the divisor with `mod(x, 0) = x`, and both compensate for
+  floating-point round-off as MATLAB does (`mod(4*pi, 2*pi)` and `rem(1, 0.1)`
+  are exactly 0). `pow` with *Signed power* on (the default) is `sign(u)*|u|^v`
+  for both the `auto` and `real` output types, since every signal here is
+  real, as the
+  [block reference](https://www.mathworks.com/help/simulink/slref/mathfunction.html)
+  specifies; with *Signed power* off it is `u^v`. `transpose` and `hermitian`
+  (equal on reals) swap the rows and columns of a matrix signal; a 1-D vector
+  has no orientation and rejects, so use an oriented `1xN`/`Nx1` Constant
+  (`VectorParams1D=off`). `OutputSignalType=complex` and Newton-Raphson
+  reciprocals reject.
+- **Trigonometric Function** (`Operator`): `sin`, `cos`, `tan`, `asin`, `acos`,
+  `atan`, `atan2` (y on port 1, x on port 2), `sinh`, `cosh`, `tanh`, `asinh`,
+  `acosh`, `atanh`, and `sincos` with separate sine (port 1) and cosine (port 2)
+  outputs traced as `id:out:1` / `id:out:2`. `cos + jsin`, CORDIC/Lookup
+  approximations and complex outputs reject.
+- **Sqrt** (`Operator`): `sqrt`, `signedSqrt` (`sign(u)*sqrt(|u|)`, defined for
+  negatives) and `rSqrt` (`1/sqrt(u)`); exact algorithms only, so the
+  Newton-Raphson and Lookup methods reject under both the pre-R2026b
+  `AlgorithmType` name and `SqrtAlgorithmType`/`RSqrtAlgorithmType`.
+- **Sign**, **Unary Minus**, **Rounding Function** (`floor`, `ceil`, `round`
+  with halves away from zero, `fix` toward zero).
+- **Polynomial** (`coefs` in descending powers, as `polyval`), evaluated
+  elementwise by Horner's rule with up to 1,024 coefficients. A block without
+  `coefs` uses the file's `BlockParameterDefaults`, else Simulink's library
+  default polynomial; palette blocks are created with an explicit `[1 0]`.
+- **Dot Product**: `sum(u1 .* u2)` of two scalars, 1-D vectors or column
+  vectors of equal length, lowered to Product terms `id:$dot:k` and a Sum;
+  other matrices reject. Expanding a scalar against a vector is an Unlinked
+  extension that the block reference does not describe.
+- **MinMax** (`Function`, `Inputs`): one input reduces a scalar or 1-D vector
+  to a scalar; several inputs compare elementwise with scalar expansion.
+  Matrix reduction, `CollapseMode=Specified dimension` and the library
+  *MinMax Running Resettable* block reject. Zero-crossing settings are ignored
+  as for Abs and Saturation: there is no event root finding.
 
 ### Zero-order hold
 
