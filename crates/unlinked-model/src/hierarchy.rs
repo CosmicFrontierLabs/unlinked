@@ -69,10 +69,11 @@ pub(crate) fn safe_selected(block: &Block) -> Result<(), EditError> {
             block.name
         ))
     };
-    let descriptor =
-        catalog::find(&block.block_type).ok_or_else(|| bad("not a supported native leaf block"))?;
+    // Known library links move like native leaf blocks: the moved block
+    // keeps its `SourceBlock`, and the writers persist it.
+    let descriptor = catalog::descriptor_for(block)
+        .ok_or_else(|| bad("not a supported native leaf block or known library link"))?;
     if block.mask.is_some()
-        || block.library_source.is_some()
         || block.subsystem.is_some()
         || block.interface.is_some()
         || matches!(
@@ -81,7 +82,7 @@ pub(crate) fn safe_selected(block: &Block) -> Result<(), EditError> {
         )
     {
         return Err(bad(
-            "hierarchical, linked, masked, interface and scoped blocks are unsupported",
+            "hierarchical, masked, interface and scoped blocks are unsupported",
         ));
     }
     for (key, value) in &block.parameters {
@@ -160,8 +161,8 @@ pub(crate) fn validate_endpoint(
     {
         return Err(EditError::NoPort(ep.clone()));
     }
-    if b.mask.is_none() && b.library_source.is_none() && b.subsystem.is_none() {
-        if let Some(d) = catalog::find(&b.block_type) {
+    if b.mask.is_none() {
+        if let Some(d) = catalog::descriptor_for(b) {
             if d.resolve_ports(&b.parameters) != PortResolution::Known(b.ports) {
                 return Err(invalid(
                     "boundary endpoint ports are unresolved or inconsistent",
@@ -930,6 +931,46 @@ mod tests {
             "grouped"
         )
         .is_err());
+    }
+    #[test]
+    fn known_library_links_group_and_keep_their_source() {
+        let mut m = model();
+        Edit::AddBlock {
+            system: vec![],
+            id: "6".into(),
+            block_type: "SaturationDynamic".into(),
+            name: "limits".into(),
+            position: Rect::new(200., 100., 230., 150.),
+        }
+        .apply(&mut m)
+        .unwrap();
+        for (src, port) in [("2", 1), ("5", 2), ("1", 3)] {
+            Edit::Connect {
+                system: vec![],
+                src: endpoint(&src.into(), PortKind::Out, 1),
+                dst: endpoint(&"6".into(), PortKind::In, port),
+            }
+            .apply(&mut m)
+            .unwrap();
+        }
+        let original = m.root.block(&"6".into()).unwrap().clone();
+        group(&mut m, &["5", "6"]).unwrap();
+        let wrapper = m.root.block(&"10".into()).unwrap();
+        let inner = wrapper.subsystem.as_ref().unwrap();
+        let moved = inner.block(&"6".into()).unwrap();
+        assert_eq!(moved.block_type, "Reference");
+        assert_eq!(moved.library_source, original.library_source);
+        assert_eq!(moved.parameters, original.parameters);
+        assert_eq!(moved.ports, original.ports);
+        // Two boundary inputs (from blocks 1 and 2) feed the link inside.
+        assert_eq!(wrapper.ports.inputs, 2);
+        assert_eq!(wrapper.ports.outputs, 0);
+        assert!(crate::validation::validate_structure(&m).is_valid());
+        // Links the catalog does not know still refuse.
+        let mut unknown = model();
+        unknown.root.blocks[1].library_source = Some("simulink/Discontinuities/Backlash".into());
+        unknown.root.blocks[1].block_type = "Reference".into();
+        assert!(group(&mut unknown, &["2"]).is_err());
     }
     #[test]
     fn selection_order_does_not_change_port_order() {

@@ -261,6 +261,8 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     .library_source
                     .as_deref()
                     .is_some_and(|src| crate::vector::supported_library_source(src).is_some());
+            // Discontinuities links are catalog library descriptors.
+            let supported_link = supported_link || crate::vector::supported_library(block);
             let library = crate::library::lowered_type(block).or(supported_link.then_some("link"));
             if library.is_none() && (block.mask.is_some() || block.library_source.is_some()) {
                 report.emit(Severity::Warning, "simulation_link_or_mask", location.clone(),

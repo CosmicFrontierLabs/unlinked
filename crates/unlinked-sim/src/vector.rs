@@ -14,6 +14,8 @@ const MAX_NODES: usize = 100_000;
 const MAX_WIRES: usize = 1_000_000;
 const MAX_SHAPE_WORK: usize = 10_000_000;
 type Workspace = BTreeMap<String, Value>;
+/// Array-valued block parameters with their defaults.
+type Params = &'static [(&'static str, &'static str)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Shape {
@@ -273,6 +275,8 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             | "ZeroOrderHold"
             | "Saturate"
             | "Saturation"
+            | "DeadZone"
+            | "Quantizer"
             | "TransferFcn"
             | "DiscreteTransferFcn"
             | "StateSpace"
@@ -307,6 +311,45 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             // Internal spelling for the library-sourced Environment Controller.
             | "EnvironmentController"
     )
+}
+
+/// The internal block type implementing a Simulink library link: the
+/// catalog's type key for its `SourceBlock` path (compared with line breaks
+/// collapsed, as `catalog::find_library` does). The catalog's library
+/// descriptors are exactly the links the simulator lowers, so a palette tile
+/// and its simulation support are added together; every other link rejects.
+/// These type keys are internal: a file's `BlockType` is never one of them.
+pub(crate) fn library_block_type(source: &str) -> Option<&'static str> {
+    catalog::find_by_source(source).map(|d| d.type_key)
+}
+/// Whether a block is a `Reference` to a library block the simulator lowers.
+pub(crate) fn supported_library(block: &Block) -> bool {
+    block.block_type == "Reference"
+        && block
+            .library_source
+            .as_deref()
+            .is_some_and(|s| library_block_type(s).is_some())
+}
+/// Turn a supported library link into its internal block type, returning
+/// whether it was one. Mask parameter values (when the file carries the mask)
+/// become ordinary parameters unless the block already stores a value of that
+/// name; the link path and mask are then dropped so the block compiles like
+/// any other.
+fn resolve_library(block: &mut Block) -> bool {
+    if !supported_library(block) {
+        return false;
+    }
+    let Some(kind) = block.library_source.as_deref().and_then(library_block_type) else {
+        return false;
+    };
+    if let Some(mask) = block.mask.take() {
+        for p in mask.parameters {
+            block.parameters.entry(p.name).or_insert(p.value);
+        }
+    }
+    block.block_type = kind.into();
+    block.library_source = None;
+    true
 }
 
 /// Library-linked `Reference` blocks the simulator lowers itself, by their
@@ -774,6 +817,9 @@ fn describe(
     // Index Vector and Environment Controller links rewrite into their
     // native equivalents (`lower_library_block`).
     lower_library_block(block);
+    // Catalog library descriptors (the Discontinuities links) become their
+    // internal type keys, with the mask's values as parameters.
+    let linked = resolve_library(block);
     let id = &block.id.0;
     if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
         return Err(block_error(
@@ -781,7 +827,7 @@ fn describe(
             "subsystems, masks and library links require explicit lowering before simulation",
         ));
     }
-    if !library && !supported_native_type(&block.block_type) {
+    if !library && !linked && !supported_native_type(&block.block_type) {
         return Err(block_error(
             id,
             format!("unsupported block type {}", block.block_type),
@@ -816,8 +862,10 @@ fn describe(
     } else {
         None
     };
-    if matches!(block.block_type.as_str(), "Switch" | "RelationalOperator")
-        && block.param("ZeroCross").is_some_and(|v| v != "off")
+    if matches!(
+        block.block_type.as_str(),
+        "Switch" | "RelationalOperator" | "DeadZone"
+    ) && block.param("ZeroCross").is_some_and(|v| v != "off")
     {
         return Err(block_error(
             id,
@@ -825,17 +873,34 @@ fn describe(
         ));
     }
     let mut values = BTreeMap::new();
-    let (operation, inputs, vector_parameter) = match block.block_type.as_str() {
-        "Constant" => (Operation::Source, 0, Some(("Value", "1"))),
+    let (operation, inputs, vector_parameters): (_, _, Params) = match block.block_type.as_str() {
+        "Constant" => (Operation::Source, 0, &[("Value", "1")]),
         "RandomNumber"
         | "UniformRandomNumber"
         | "DiscretePulseGenerator"
         | "SignalGenerator"
         | "Ramp"
-        | "ChirpSignal" => (Operation::ExpandedSource, 0, None),
+        | "ChirpSignal" => (Operation::ExpandedSource, 0, &[]),
         "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" | "RepeatingSequence" => {
-            (Operation::Source, 0, None)
+            (Operation::Source, 0, &[])
         }
+        "DeadZone" => (
+            Operation::Elementwise,
+            1,
+            &[("LowerValue", "-0.5"), ("UpperValue", "0.5")],
+        ),
+        "Quantizer" => (
+            Operation::Elementwise,
+            1,
+            &[("QuantizationInterval", "0.5")],
+        ),
+        "CoulombFriction" => (
+            Operation::Elementwise,
+            1,
+            &[("gain", "1"), ("offset", "[1 3 2 0]")],
+        ),
+        "WrapToZero" => (Operation::Elementwise, 1, &[("Threshold", "255")]),
+        "SaturationDynamic" | "DeadZoneDynamic" => (Operation::Elementwise, 3, &[]),
         "Gain" => {
             let matrix = match block
                 .param("Multiplication")
@@ -850,9 +915,9 @@ fn describe(
                     ))
                 }
             };
-            (Operation::Gain { matrix }, 1, Some(("Gain", "1")))
+            (Operation::Gain { matrix }, 1, &[("Gain", "1")])
         }
-        "Integrator" | "UnitDelay" => (Operation::State, 1, Some(("InitialCondition", "0"))),
+        "Integrator" | "UnitDelay" => (Operation::State, 1, &[("InitialCondition", "0")]),
         "Sum" | "Add" | "Product" => {
             let product = block.block_type == "Product";
             if product
@@ -886,7 +951,7 @@ fn describe(
                     Operation::Elementwise
                 },
                 n,
-                None,
+                &[],
             )
         }
         "Logic" => {
@@ -904,19 +969,19 @@ fn describe(
                     Operation::Elementwise
                 },
                 n,
-                None,
+                &[],
             )
         }
-        "RelationalOperator" => (Operation::Elementwise, 2, None),
-        "Switch" => (Operation::Elementwise, 3, None),
-        "Selector" => (selector(block, workspace, budget)?, 1, None),
+        "RelationalOperator" => (Operation::Elementwise, 2, &[]),
+        "Switch" => (Operation::Elementwise, 3, &[]),
+        "Selector" => (selector(block, workspace, budget)?, 1, &[]),
         "MultiPortSwitch" => {
             let operation = multiport(block, workspace, budget)?;
             let Operation::MultiPort { config, .. } = &operation else {
                 unreachable!()
             };
             let inputs = 1 + config.data_ports();
-            (operation, inputs, None)
+            (operation, inputs, &[])
         }
         "ManualSwitch" => {
             // Position 1 connects the first input, 0 the second (reference
@@ -949,7 +1014,7 @@ fn describe(
                     "ManualSwitch varsize=on (inputs differing in size) is unsupported",
                 ));
             }
-            (Operation::Select { port, expand: true }, 2, None)
+            (Operation::Select { port, expand: true }, 2, &[])
         }
         "EnvironmentController" => (
             Operation::Select {
@@ -957,7 +1022,7 @@ fn describe(
                 expand: false,
             },
             2,
-            None,
+            &[],
         ),
         "Mux" => {
             let v = eval(
@@ -987,7 +1052,7 @@ fn describe(
                     .collect::<Result<Vec<_>, _>>()?
             };
             let n = widths.len();
-            (Operation::Mux { widths }, n, None)
+            (Operation::Mux { widths }, n, &[])
         }
         "Demux" => {
             let v = eval(
@@ -1019,7 +1084,7 @@ fn describe(
                     .collect::<Result<Vec<_>, _>>()?;
                 (widths.len(), Some(widths))
             };
-            (Operation::Demux { widths, ports }, 1, None)
+            (Operation::Demux { widths, ports }, 1, &[])
         }
         "MatlabFunction" => {
             if block.ports.inputs > 256 || block.ports.outputs != 1 {
@@ -1037,36 +1102,36 @@ fn describe(
                     "missing or oversized MATLAB Function script",
                 ));
             }
-            (Operation::MatlabFunction, block.ports.inputs as usize, None)
+            (Operation::MatlabFunction, block.ports.inputs as usize, &[])
         }
-        "TransferFcn" | "DiscreteTransferFcn" | "StateSpace" => (Operation::Transfer, 1, None),
+        "TransferFcn" | "DiscreteTransferFcn" | "StateSpace" => (Operation::Transfer, 1, &[]),
         "Trigonometry" => {
             let operator = block.param("Operator").unwrap_or("sin");
             if operator == "sincos" {
-                (Operation::SinCos, 1, None)
+                (Operation::SinCos, 1, &[])
             } else {
                 let inputs = if super::import::binary_operator("Trigonometry", operator) {
                     2
                 } else {
                     1
                 };
-                (Operation::Elementwise, inputs, None)
+                (Operation::Elementwise, inputs, &[])
             }
         }
         "Math" => {
             let operator = block.param("Operator").unwrap_or("exp");
             if matches!(operator, "transpose" | "hermitian") {
-                (Operation::Transpose, 1, None)
+                (Operation::Transpose, 1, &[])
             } else {
                 let inputs = if super::import::binary_operator("Math", operator) {
                     2
                 } else {
                     1
                 };
-                (Operation::Elementwise, inputs, None)
+                (Operation::Elementwise, inputs, &[])
             }
         }
-        "DotProduct" => (Operation::DotProduct, 2, None),
+        "DotProduct" => (Operation::DotProduct, 2, &[]),
         "MinMax" => {
             let n = count(block, "Inputs", "1", workspace, budget)?;
             block.parameters.insert("Inputs".into(), n.to_string());
@@ -1077,12 +1142,12 @@ fn describe(
                     Operation::Elementwise
                 },
                 n,
-                None,
+                &[],
             )
         }
         "Bias" | "Saturate" | "Saturation" | "Abs" | "Sqrt" | "Signum" | "Rounding"
         | "UnaryMinus" | "Polyval" | "Scope" | "Display" | "Outport" | "Terminator"
-        | "ToWorkspace" | "ZeroOrderHold" => (Operation::Elementwise, 1, None),
+        | "ToWorkspace" | "ZeroOrderHold" => (Operation::Elementwise, 1, &[]),
         other => return Err(block_error(id, format!("unsupported block type {other}"))),
     };
     if output_ports(&operation) == 1 && block.ports.outputs > 1 {
@@ -1091,7 +1156,7 @@ fn describe(
             "multiple output ports are supported only for Demux and sincos",
         ));
     }
-    if let Some((key, default)) = vector_parameter {
+    for &(key, default) in vector_parameters {
         values.insert(
             key.into(),
             eval(
@@ -1326,7 +1391,28 @@ fn infer(
             }
         }
         Operation::Reduce => inputs[0].map(|_| Shape::SCALAR),
-        Operation::Elementwise => broadcast(id, inputs.iter().copied())?,
+        Operation::Elementwise => {
+            // Array parameters expand scalar inputs and must otherwise match
+            // the signal, like Simulink's own scalar expansion.
+            let parameters = spec
+                .values
+                .values()
+                .map(|value| Some(Shape::from_value(value, true)));
+            let output = broadcast(id, inputs.iter().copied().chain(parameters))?;
+            // Wrap To Zero documents no expansion of a vector threshold over
+            // a scalar input: "the input signal and Threshold parameter must
+            // have equal size".
+            if block.block_type == "WrapToZero" {
+                let threshold = Shape::from_value(&spec.values["Threshold"], true);
+                if threshold != Shape::SCALAR && inputs[0].is_some_and(|s| s != threshold) {
+                    return Err(block_error(
+                        id,
+                        "Wrap To Zero requires a scalar Threshold or one matching the input size",
+                    ));
+                }
+            }
+            output
+        }
         Operation::Selector {
             dimensions,
             input_width,

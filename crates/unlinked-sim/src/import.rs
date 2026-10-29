@@ -54,7 +54,10 @@ pub(crate) fn literal_requirements(
             ("Units", &["rad/sec", "Hertz"]),
             ("TimeSource", &["Use simulation time"]),
         ],
-        "Switch" | "RelationalOperator" => &[("ZeroCross", &["off"])],
+        // An omitted `ZeroCross` (Simulink's default, `on`, is not written to
+        // files) is accepted without locating crossings; only an explicit `on`
+        // is refused until zero-crossing support lands.
+        "Switch" | "RelationalOperator" | "DeadZone" => &[("ZeroCross", &["off"])],
         // Trigonometric Function: `cos + jsin` is complex-valued and the
         // CORDIC/Lookup approximations are not reproduced.
         "Trigonometry" => &[
@@ -295,6 +298,8 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     "Inherit: Inherit via internal rule",
                     "Inherit: Inherit via back propagation",
                     "Inherit: Same as input",
+                    // Saturation Dynamic's inherited type is its `u` input.
+                    "Inherit: Same as second input",
                     "Inherit: auto",
                     "double",
                 ],
@@ -603,6 +608,26 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 lower: p("LowerLimit", "-0.5")?,
                 upper: p("UpperLimit", "0.5")?,
             },
+            "DeadZone" => Kind::DeadZone {
+                lower: p("LowerValue", "-0.5")?,
+                upper: p("UpperValue", "0.5")?,
+            },
+            "Quantizer" => Kind::Quantizer {
+                interval: p("QuantizationInterval", "0.5")?,
+            },
+            // The internal type of the Coulomb & Viscous Friction library
+            // link, assigned during scalarization (which has also expanded
+            // the library's vector default `[1 3 2 0]` for `offset` into one
+            // literal per element). A file's `BlockType` is never this.
+            "CoulombFriction" => Kind::CoulombFriction {
+                gain: p("gain", "1")?,
+                offset: p("offset", "[1 3 2 0]")?,
+            },
+            "WrapToZero" => Kind::WrapToZero {
+                threshold: p("Threshold", "255")?,
+            },
+            "SaturationDynamic" => Kind::SaturationDynamic,
+            "DeadZoneDynamic" => Kind::DeadZoneDynamic,
             "Integrator" => Kind::Integrator {
                 initial: p("InitialCondition", "0")?,
             },

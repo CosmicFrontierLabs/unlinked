@@ -512,10 +512,19 @@ fn library_registry_matches_the_catalog_and_other_links_still_reject() {
         .diagnostics
         .iter()
         .any(|d| d.code == "simulation_link_or_mask"));
-    // A Reference block with its own mask is not resolved through the registry.
+    // A Reference block carrying the library mask's values, as SLX files
+    // store link instances, resolves too: the mask values become parameters.
     let mut masked = library("m", "simulink/Sources/Ramp", &[]);
-    masked.mask = Some(Mask::default());
-    assert!(error_of(masked, &options(2.0, 0.01)).contains("masks"));
+    masked.mask = Some(Mask {
+        parameters: vec![unlinked_model::MaskParameter {
+            name: "slope".into(),
+            value: "2".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let trace = simulate_model(&model(vec![masked], vec![]), &options(2.0, 0.01)).unwrap();
+    check(&trace, "m", |t| 2.0 * t, 1e-9);
 }
 
 /// Simulink never writes `Ramp`, `ChirpSignal` or `RepeatingSequence` as a

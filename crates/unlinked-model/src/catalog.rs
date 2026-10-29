@@ -17,6 +17,15 @@
 //! Repeating Sequence follow their own references (linked from their
 //! descriptors); the last three are library blocks, created as `Reference`
 //! blocks carrying their `SourceBlock` path and mask parameter values.
+//! Discontinuities follow the [Dead Zone](https://www.mathworks.com/help/simulink/slref/deadzone.html),
+//! [Quantizer](https://www.mathworks.com/help/simulink/slref/quantizer.html),
+//! [Coulomb and Viscous Friction](https://www.mathworks.com/help/simulink/slref/coulombandviscousfriction.html),
+//! [Wrap To Zero](https://www.mathworks.com/help/simulink/slref/wraptozero.html),
+//! [Saturation Dynamic](https://www.mathworks.com/help/simulink/slref/saturationdynamic.html) and
+//! [Dead Zone Dynamic](https://www.mathworks.com/help/simulink/slref/deadzonedynamic.html)
+//! references; the last four are library-linked `Reference` blocks whose
+//! descriptors carry a `source_block`, so new blocks are written as links
+//! and imported links are recognised by their normalised library path.
 //! Creation-profile simulation tests live in unlinked-sim/tests/catalog.rs;
 //! these do not imply support for every legal setting of a block.
 //! This module never evaluates MATLAB, runs callbacks, or certifies simulation
@@ -226,6 +235,21 @@ pub struct DialogSection {
 }
 
 impl BlockDescriptor {
+    /// `BlockType` of a block created from this descriptor: library-sourced
+    /// descriptors create `Reference` blocks, native ones their own type.
+    pub fn block_type(&self) -> &'static str {
+        if self.source_block.is_some() {
+            "Reference"
+        } else {
+            self.type_key
+        }
+    }
+    /// `SourceType` label for a new link: the library path's final element
+    /// with its line breaks collapsed, as Simulink writes it.
+    pub fn source_type(&self) -> Option<String> {
+        self.source_block
+            .map(|s| canonical_source(s.rsplit('/').next().unwrap_or(s)))
+    }
     pub fn dialog_sections(&self, parameters: &BTreeMap<String, String>) -> Vec<DialogSection> {
         let mut sections: Vec<DialogSection> = Vec::new();
         for field in self.parameters {
@@ -743,6 +767,10 @@ const fn library_block(
 use ParameterKind::{Boolean, Enum, Expression as Expr, IntegerExpression as Int, Text};
 const ONE: PortRule = PortRule::Fixed {
     inputs: 1,
+    outputs: 1,
+};
+const THREE: PortRule = PortRule::Fixed {
+    inputs: 3,
     outputs: 1,
 };
 const SOURCE: PortRule = PortRule::Fixed {
@@ -1957,6 +1985,153 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         [30.0, 30.0],
     ),
     block(
+        "DeadZone",
+        "Dead Zone",
+        "Discontinuities",
+        &[
+            param(
+                "LowerValue",
+                "Start of dead zone",
+                Expr,
+                "-0.5",
+                false,
+                dialog(
+                    "Zone",
+                    "Lower edge of the zero-output region; must be no greater than its end. Inputs below it output the input minus this edge.",
+                    None,
+                ),
+            ),
+            param(
+                "UpperValue",
+                "End of dead zone",
+                Expr,
+                "0.5",
+                false,
+                dialog(
+                    "Zone",
+                    "Upper edge of the zero-output region; must be no smaller than its start. Inputs above it output the input minus this edge.",
+                    None,
+                ),
+            ),
+            ParameterDescriptor {
+                implicit_default: Some("on"),
+                ..param(
+                    "ZeroCross",
+                    "Zero-crossing detection",
+                    Boolean,
+                    "off",
+                    false,
+                    dialog(
+                        "Timing",
+                        "Request zero-crossing detection at the zone edges; solver support is required.",
+                        None,
+                    ),
+                )
+            },
+        ],
+        ONE,
+        [30.0, 30.0],
+    ),
+    block(
+        "Quantizer",
+        "Quantizer",
+        "Discontinuities",
+        &[param(
+            "QuantizationInterval",
+            "Quantization interval",
+            Expr,
+            "0.5",
+            false,
+            dialog(
+                "Quantization",
+                "Nonzero step of the output staircase; the output is the input rounded to the nearest multiple of it (a negative step quantizes like its magnitude).",
+                None,
+            ),
+        )],
+        ONE,
+        [30.0, 30.0],
+    ),
+    library_block(
+        "CoulombFriction",
+        "Coulomb & Viscous Friction",
+        "Discontinuities",
+        "simulink/Discontinuities/Coulomb &\nViscous Friction",
+        &[
+            // The library block ships with `offset = [1 3 2 0]`, which turns a
+            // scalar input into four outputs; that stays the implicit default
+            // so imported blocks behave as in Simulink, but a palette block is
+            // deliberately created with a scalar offset so that it keeps the
+            // width of whatever signal it is dropped onto. The dialog says so.
+            ParameterDescriptor {
+                implicit_default: Some("[1 3 2 0]"),
+                ..param(
+                    "offset",
+                    "Coulomb friction value",
+                    Expr,
+                    "1",
+                    false,
+                    dialog(
+                        "Friction",
+                        "Offset added to the output magnitude; a scalar or a vector matching the input width. The Simulink library default is [1 3 2 0], which widens a scalar input to four outputs; palette blocks start scalar.",
+                        None,
+                    ),
+                )
+            },
+            param(
+                "gain",
+                "Coefficient of viscous friction",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Friction",
+                    "Gain applied to the input magnitude; a scalar or a vector matching the input width.",
+                    None,
+                ),
+            ),
+        ],
+        ONE,
+        [30.0, 30.0],
+    ),
+    library_block(
+        "WrapToZero",
+        "Wrap To Zero",
+        "Discontinuities",
+        "simulink/Discontinuities/Wrap To Zero",
+        &[param(
+            "Threshold",
+            "Threshold",
+            Expr,
+            "255",
+            false,
+            dialog(
+                "Threshold",
+                "Inputs above this value output zero; inputs up to and including it pass through unchanged.",
+                None,
+            ),
+        )],
+        ONE,
+        [30.0, 30.0],
+    ),
+    library_block(
+        "SaturationDynamic",
+        "Saturation Dynamic",
+        "Discontinuities",
+        "simulink/Discontinuities/Saturation\nDynamic",
+        &[],
+        THREE,
+        [30.0, 50.0],
+    ),
+    library_block(
+        "DeadZoneDynamic",
+        "Dead Zone Dynamic",
+        "Discontinuities",
+        "simulink/Discontinuities/Dead Zone\nDynamic",
+        &[],
+        THREE,
+        [30.0, 50.0],
+    ),
+    block(
         "TransferFcn",
         "Transfer Function",
         "Continuous",
@@ -2742,17 +2917,19 @@ pub fn find_by_source(source_block: &str) -> Option<&'static BlockDescriptor> {
     })
 }
 
-/// The descriptor whose dialog describes `block`: a native block's type, or
-/// a `Reference` block's library source. Masked blocks, subsystems and
+/// The descriptor whose dialog describes `block`: a `Reference` block's
+/// library source (a link may carry the library mask's values), or an
+/// unmasked native block's type. Masked native blocks, subsystems and
 /// unknown links have none and keep showing raw parameters.
 pub fn descriptor_for(block: &Block) -> Option<&'static BlockDescriptor> {
-    if block.mask.is_some() || block.subsystem.is_some() {
+    if block.subsystem.is_some() {
         return None;
     }
     match &block.library_source {
-        None => find(&block.block_type).filter(|d| d.source_block.is_none()),
         Some(source) if block.block_type == "Reference" => find_by_source(source),
         Some(_) => None,
+        None if block.mask.is_some() => None,
+        None => find(&block.block_type).filter(|d| d.source_block.is_none()),
     }
 }
 
@@ -3109,6 +3286,50 @@ mod tests {
         assert!(descriptor_for(&block).is_none());
         block.block_type = "ManualSwitch".into();
         assert_eq!(descriptor_for(&block).unwrap().type_key, "ManualSwitch");
+        block.mask = Some(Default::default());
+        assert!(descriptor_for(&block).is_none());
+    }
+    #[test]
+    fn library_links_resolve_by_normalized_source_path() {
+        let wrap = find("WrapToZero").unwrap();
+        assert_eq!(wrap.block_type(), "Reference");
+        assert_eq!(wrap.source_type().as_deref(), Some("Wrap To Zero"));
+        assert_eq!(find("Saturate").unwrap().block_type(), "Saturate");
+        assert_eq!(
+            find("CoulombFriction").unwrap().source_type().as_deref(),
+            Some("Coulomb & Viscous Friction")
+        );
+        assert!(find("Reference").is_none());
+        let mut block = Block {
+            id: crate::BlockId("1".into()),
+            block_type: "Reference".into(),
+            name: "w".into(),
+            position: crate::Rect::default(),
+            orientation: crate::Orientation::Right,
+            mirrored: false,
+            ports: PortCounts::default(),
+            parameters: BTreeMap::new(),
+            mask: None,
+            library_source: Some("simulink/Discontinuities/Saturation\nDynamic".into()),
+            subsystem: None,
+            style: Default::default(),
+            interface: None,
+        };
+        assert_eq!(
+            descriptor_for(&block).map(|d| d.type_key),
+            Some("SaturationDynamic")
+        );
+        block.library_source = Some("simulink/Discontinuities/Saturation Dynamic".into());
+        assert_eq!(
+            descriptor_for(&block).map(|d| d.type_key),
+            Some("SaturationDynamic")
+        );
+        block.library_source = Some("simulink/Discontinuities/Backlash".into());
+        assert!(descriptor_for(&block).is_none());
+        block.library_source = None;
+        assert!(descriptor_for(&block).is_none());
+        block.block_type = "Saturate".into();
+        assert_eq!(descriptor_for(&block).map(|d| d.type_key), Some("Saturate"));
         block.mask = Some(Default::default());
         assert!(descriptor_for(&block).is_none());
     }

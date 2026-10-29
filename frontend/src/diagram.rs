@@ -2636,7 +2636,7 @@ pub fn diagram_view(props: &DiagramProps) -> Html {
                             None => {
                                 if let Some(on_error) = &on_error {
                                     on_error.emit(
-                                        "Cannot copy these blocks: only native blocks copy".into(),
+                                        "Cannot copy these blocks: masked, subsystem and unknown linked blocks do not copy".into(),
                                     );
                                 }
                             }

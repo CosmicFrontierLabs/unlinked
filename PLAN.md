@@ -169,7 +169,9 @@ CI. Per-model import, render and simulation coverage is tracked in
 - Blocks: sources (Constant, Clock, Step, Sine, time-based Pulse Generator,
   Signal Generator sine/square/sawtooth, and the library Ramp, Chirp Signal
   and Repeating Sequence), Gain, Bias, Sum, Product,
-  Saturation, Integrator, UnitDelay, Abs, Math Function and Trigonometric
+  Saturation, Dead Zone, Quantizer, Coulomb & Viscous Friction, Wrap To Zero,
+  Saturation Dynamic, Dead Zone Dynamic (the last four as library links),
+  Integrator, UnitDelay, Abs, Math Function and Trigonometric
   Function (real operators, including two-input and `sincos`), Sqrt, Sign,
   Rounding, Unary Minus, Polynomial, Dot Product, MinMax, relational and
   logical operators, Switch (nonzero and threshold criteria), Selector, Multiport

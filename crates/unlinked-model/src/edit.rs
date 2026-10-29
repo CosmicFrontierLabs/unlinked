@@ -1069,7 +1069,7 @@ fn add_block(
     if sys.blocks.iter().any(|b| b.name == name) {
         return Err(EditError::DuplicateName(name.into()));
     }
-    let parameters = descriptor
+    let mut parameters = descriptor
         .creation_parameters_in(sys)
         .map_err(EditError::Invalid)?;
     let PortResolution::Known(ports) = descriptor.resolve_ports(&parameters) else {
@@ -1077,8 +1077,12 @@ fn add_block(
             "the ports of a new {block_type} cannot be resolved"
         )));
     };
-    // Library blocks are `Reference` blocks linked to their source; their
-    // creation parameters are the library mask's values.
+    // Library links are `Reference` blocks labelled with their source type,
+    // as Simulink writes them; the link path itself is not a parameter, and
+    // the creation parameters are the library mask's values.
+    if let Some(source_type) = descriptor.source_type() {
+        parameters.insert("SourceType".into(), source_type);
+    }
     sys.blocks.push(Block {
         id: id.clone(),
         block_type: descriptor.slx_block_type.into(),
