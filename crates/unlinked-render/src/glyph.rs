@@ -292,6 +292,19 @@ fn reference_icon(block: &Block) -> Icon {
             (0.65, 0.25),
             (0.9, 0.25),
         ]]),
+        "Dead Zone Dynamic" => {
+            Icon::Strokes(vec![vec![(0.1, 0.8), (0.4, 0.5), (0.6, 0.5), (0.9, 0.2)]])
+        }
+        // Zero up to the threshold's abscissa, then the input, then zero.
+        "Wrap To Zero" => Icon::Strokes(vec![
+            vec![(0.1, 0.8), (0.65, 0.25)],
+            vec![(0.65, 0.25), (0.65, 0.8), (0.9, 0.8)],
+        ]),
+        // Odd curve with a jump at the origin: viscous slope plus Coulomb offset.
+        "Coulomb and Viscous Friction" | "Coulomb & Viscous Friction" => Icon::Strokes(vec![
+            vec![(0.1, 0.85), (0.5, 0.65), (0.5, 0.35), (0.9, 0.15)],
+            vec![(0.1, 0.5), (0.9, 0.5)],
+        ]),
         _ => Icon::Text(vec![source_type]),
     }
 }

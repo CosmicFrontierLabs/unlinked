@@ -1036,12 +1036,11 @@ fn check_name(name: &str) -> Result<(), EditError> {
     Ok(())
 }
 
-/// The catalog entry for a plain native block, whose ports follow from its
-/// parameters. Masked, linked and subsystem blocks declare their own.
+/// The catalog entry for a plain native block or a known library link, whose
+/// ports follow from its parameters. Masked, unknown linked and subsystem
+/// blocks declare their own.
 fn native_descriptor(block: &Block) -> Option<&'static catalog::BlockDescriptor> {
-    let native =
-        block.mask.is_none() && block.library_source.is_none() && block.subsystem.is_none();
-    catalog::find(&block.block_type).filter(|_| native)
+    catalog::descriptor_for(block)
 }
 
 fn add_block(
@@ -1053,7 +1052,7 @@ fn add_block(
     position: Rect,
 ) -> Result<(), EditError> {
     let descriptor = catalog::find(block_type)
-        .filter(|d| d.creatable && d.source_block.is_none())
+        .filter(|d| d.creatable)
         .ok_or_else(|| EditError::Invalid(format!("{block_type:?} is not in the block palette")))?;
     let next = next_sid(model).ok_or_else(|| EditError::Invalid("no SIDs left".into()))?;
     let sid =
@@ -1069,7 +1068,7 @@ fn add_block(
     if sys.blocks.iter().any(|b| b.name == name) {
         return Err(EditError::DuplicateName(name.into()));
     }
-    let parameters = descriptor
+    let mut parameters = descriptor
         .creation_parameters_in(sys)
         .map_err(EditError::Invalid)?;
     let PortResolution::Known(ports) = descriptor.resolve_ports(&parameters) else {
@@ -1077,9 +1076,14 @@ fn add_block(
             "the ports of a new {block_type} cannot be resolved"
         )));
     };
+    // Library links are `Reference` blocks labelled with their source type,
+    // as Simulink writes them; the link path itself is not a parameter.
+    if let Some(source_type) = descriptor.source_type() {
+        parameters.insert("SourceType".into(), source_type);
+    }
     sys.blocks.push(Block {
         id: id.clone(),
-        block_type: descriptor.type_key.into(),
+        block_type: descriptor.block_type().into(),
         name: name.into(),
         position,
         orientation: Orientation::Right,
@@ -1087,7 +1091,7 @@ fn add_block(
         ports,
         parameters,
         mask: None,
-        library_source: None,
+        library_source: descriptor.source_block.map(str::to_owned),
         subsystem: None,
         style: BlockStyle::default(),
         interface: None,
