@@ -833,6 +833,7 @@ pub fn simulate_with_observer_and_budget(
 
 mod adaptive;
 mod chart_lowering;
+pub mod commented;
 pub mod diagnose;
 mod flatten;
 mod import;

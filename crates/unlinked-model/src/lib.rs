@@ -164,6 +164,17 @@ impl Block {
             .filter(|t| !t.is_empty() && *t != "NONE")
     }
 
+    /// How the `Commented` parameter excludes this block from simulation.
+    /// Values other than `off`, `on` and `through` are returned unparsed.
+    pub fn commented(&self) -> Result<Commented, &str> {
+        match self.param("Commented").map(str::trim).unwrap_or("off") {
+            "" | "off" => Ok(Commented::Off),
+            "on" => Ok(Commented::Out),
+            "through" => Ok(Commented::Through),
+            other => Err(other),
+        }
+    }
+
     /// Mask type when masked, else the library source's final path element,
     /// else the block type. This is the best "what is this block" label.
     pub fn display_type(&self) -> &str {
@@ -179,6 +190,17 @@ impl Block {
         }
         &self.block_type
     }
+}
+
+/// A block's `Commented` setting. Simulink excludes commented blocks from
+/// simulation: `Out` (`Commented=on`) terminates the signals into the block
+/// and grounds the ones out of it; `Through` (`Commented=through`) passes
+/// input *i* straight to output *i*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Commented {
+    Off,
+    Out,
+    Through,
 }
 
 /// Axis-aligned rectangle in Simulink canvas coordinates (y grows downward).
