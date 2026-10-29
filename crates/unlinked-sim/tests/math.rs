@@ -707,10 +707,10 @@ fn running_minmax_library_block_is_rejected_explicitly() {
     m.root.blocks[0].library_source =
         Some("simulink/Math\nOperations/MinMax\nRunning\nResettable".into());
     let error = simulate_model(&m, &options()).unwrap_err().to_string();
-    // Library-sourced Reference blocks are rejected as a whole; no running
-    // min/max or reset-port semantics are approximated.
+    // Unregistered library-sourced Reference blocks are rejected as a whole;
+    // no running min/max or reset-port semantics are approximated.
     assert!(
-        error.contains("subject") && error.contains("unsupported block type Reference"),
+        error.contains("subject") && error.contains("library links require explicit lowering"),
         "{error}"
     );
 }

@@ -286,6 +286,14 @@ fn reference_icon(block: &Block) -> Icon {
             non_empty(p("const"), "3")
         )]),
         "Ramp" => Icon::Strokes(vec![vec![(0.1, 0.85), (0.9, 0.15)]]),
+        "Chirp Signal" | "chirp" => Icon::Strokes(vec![chirp()]),
+        "Repeating Sequence" | "Repeating table" => Icon::Strokes(vec![vec![
+            (0.1, 0.8),
+            (0.3, 0.2),
+            (0.5, 0.8),
+            (0.7, 0.2),
+            (0.9, 0.8),
+        ]]),
         "DocBlock" => Icon::Text(vec!["DOC".into(), "Text".into()]),
         "PID 1dof" | "PID 2dof" => Icon::Text(vec!["PID(s)".into()]),
         "Discrete PID Controller" => Icon::Text(vec!["PID(z)".into()]),
@@ -482,6 +490,17 @@ fn sine() -> Vec<(f64, f64)> {
         .map(|i| {
             let t = i as f64 / 24.0;
             (0.1 + 0.8 * t, 0.5 - 0.3 * (t * std::f64::consts::TAU).sin())
+        })
+        .collect()
+}
+
+/// A sine whose frequency rises across the icon.
+fn chirp() -> Vec<(f64, f64)> {
+    (0..=48)
+        .map(|i| {
+            let t = i as f64 / 48.0;
+            let phase = std::f64::consts::TAU * (0.5 * t + 1.5 * t * t);
+            (0.1 + 0.8 * t, 0.5 - 0.3 * phase.sin())
         })
         .collect()
 }

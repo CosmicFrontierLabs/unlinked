@@ -79,6 +79,56 @@ pub enum Kind {
         bias: f64,
     },
     Clock,
+    /// Time-based Pulse Generator: zero before `phase_delay`, then `amplitude`
+    /// for the first `width` seconds of every `period`. Edges follow the
+    /// parameter-effects figure of the
+    /// [block reference](https://www.mathworks.com/help/simulink/slref/pulsegenerator.html):
+    /// the rising edge at `phase_delay + k*period` takes the high value and
+    /// the falling edge `width` later the low one, like a Step.
+    PulseGenerator {
+        amplitude: f64,
+        period: f64,
+        /// `period * PulseWidth / 100`, in seconds.
+        width: f64,
+        phase_delay: f64,
+    },
+    /// Signal Generator driven by simulation time; `frequency` is in hertz
+    /// when `hertz`, else radians per second. Shapes follow the default-output
+    /// figures of the
+    /// [block reference](https://www.mathworks.com/help/simulink/slref/signalgenerator.html):
+    /// `sine` is `A sin(ωt)`, `square` is `-A` over the first half of each
+    /// period and `+A` over the second, and `sawtooth` falls linearly from
+    /// `+A` at the start of each period to `-A` at its end.
+    SignalGenerator {
+        waveform: String,
+        amplitude: f64,
+        frequency: f64,
+        hertz: bool,
+    },
+    /// Ramp: `initial` until `start`, then `initial + slope * (t - start)`
+    /// ([block reference](https://www.mathworks.com/help/simulink/slref/ramp.html)).
+    Ramp {
+        slope: f64,
+        start: f64,
+        initial: f64,
+    },
+    /// Chirp Signal: `sin(2π(f1 t + (f2 - f1) t² / (2T)))`, the sine whose
+    /// instantaneous frequency sweeps linearly from `f1` at time zero to
+    /// `f2` at `target_time` and keeps changing at that rate afterwards. The
+    /// block has no phase parameter
+    /// ([block reference](https://www.mathworks.com/help/simulink/slref/chirpsignal.html)).
+    Chirp {
+        initial_frequency: f64,
+        target_time: f64,
+        target_frequency: f64,
+    },
+    /// Repeating Sequence: linear interpolation of `values` over `times`
+    /// (strictly increasing from zero), repeated with period `times.last()`
+    /// ([block reference](https://www.mathworks.com/help/simulink/slref/repeatingsequence.html)).
+    RepeatingSequence {
+        times: Vec<f64>,
+        values: Vec<f64>,
+    },
     Gain {
         gain: f64,
     },
@@ -170,6 +220,11 @@ impl Kind {
             | Self::Step { .. }
             | Self::Sine { .. }
             | Self::Clock
+            | Self::PulseGenerator { .. }
+            | Self::SignalGenerator { .. }
+            | Self::Ramp { .. }
+            | Self::Chirp { .. }
+            | Self::RepeatingSequence { .. }
             | Self::DigitalClock { .. }
             | Self::RandomNumber { .. }
             | Self::UniformRandomNumber { .. } => 0,
@@ -396,6 +451,166 @@ fn block_error(id: &str, message: impl Into<String>) -> Error {
         message: message.into(),
     }
 }
+
+/// Whether `x` and `edge` differ only by rounding error at magnitude `scale`.
+/// Periodic edges are sums of grid-aligned spans, so a few ulps are allowed.
+fn near_edge(x: f64, edge: f64, scale: f64) -> bool {
+    let magnitude = scale
+        .abs()
+        .max(x.abs())
+        .max(edge.abs())
+        .max(f64::MIN_POSITIVE);
+    (x - edge).abs() <= 64.0 * f64::EPSILON * magnitude
+}
+/// Whether `x` lies before a transition at `edge`. At the transition itself
+/// the right-hand value applies unless `left_limit` asks for the value just
+/// before it, the convention Step uses when integrating the preceding interval.
+fn before_edge(x: f64, edge: f64, scale: f64, left_limit: bool) -> bool {
+    let near = near_edge(x, edge, scale);
+    (x < edge && !near) || (left_limit && near)
+}
+/// Offset of `t` into its cycle of `period` counted from `origin`, in
+/// `[0, period]`: exactly zero at a wrap and exactly `period` for the left
+/// limit there, so periodic waveforms treat wraps like Step transitions.
+fn cycle_offset(t: f64, origin: f64, period: f64, left_limit: bool) -> f64 {
+    let mut start = origin + ((t - origin) / period).floor() * period;
+    if !before_edge(t, start + period, t, left_limit) {
+        start += period;
+    } else if before_edge(t, start, t, left_limit) {
+        start -= period;
+    }
+    let offset = t - start;
+    if near_edge(offset, period, t) {
+        period
+    } else if near_edge(offset, 0.0, t) {
+        0.0
+    } else {
+        offset
+    }
+}
+/// Whether a pulse train high for `width` seconds from `phase + k*period`
+/// is high at `t`; zero before `phase`.
+fn pulse_high(t: f64, phase: f64, width: f64, period: f64, left_limit: bool) -> bool {
+    if before_edge(t, phase, t, left_limit) {
+        return false;
+    }
+    before_edge(
+        cycle_offset(t, phase, period, left_limit),
+        width,
+        t,
+        left_limit,
+    )
+}
+/// Piecewise-linear interpolation of `values` over strictly increasing
+/// `times`; `u` is clamped to the table's range.
+fn interpolate(times: &[f64], values: &[f64], u: f64) -> f64 {
+    let i = times.partition_point(|&x| x <= u).clamp(1, times.len() - 1);
+    let (t0, t1) = (times[i - 1], times[i]);
+    let a = ((u - t0) / (t1 - t0)).clamp(0.0, 1.0);
+    values[i - 1] + a * (values[i] - values[i - 1])
+}
+/// Period of a Signal Generator waveform in seconds (also maps a period back
+/// to a frequency, the relation being its own inverse).
+fn generator_period(frequency: f64, hertz: bool) -> f64 {
+    if hertz {
+        1.0 / frequency
+    } else {
+        std::f64::consts::TAU / frequency
+    }
+}
+
+/// Timing constraints of time-driven sources, checked both when compiling a
+/// model and when executing a graph. Discontinuities must fall on sample
+/// times so that no solver stage straddles a jump: this is the fixed-step
+/// requirement the Pulse Generator reference documents, applied to every
+/// source with edges. Smooth sources (sine, ramp, chirp) are unconstrained,
+/// except that the Chirp Signal reference requires a zero start time.
+pub(crate) fn source_timing(kind: &Kind, o: &Options) -> Result<(), &'static str> {
+    let aligned = |time: f64| on_grid(((time - o.start) / o.step).abs());
+    let spans = |span: f64| on_grid(span / o.step);
+    match kind {
+        Kind::Step { time, .. } if *time > o.start && *time < o.stop && !aligned(*time) => {
+            Err("Step transition must align with fixed-step grid")
+        }
+        // A non-positive Period is rejected as such by `Compiled::new`, not
+        // as a misaligned edge.
+        Kind::PulseGenerator {
+            period,
+            width,
+            phase_delay,
+            ..
+        } if *period > 0.0 && !(aligned(*phase_delay) && spans(*period) && spans(*width)) => {
+            Err("Pulse Generator edges must align with the fixed-step grid: PhaseDelay must fall on a sample time, and Period and Period*PulseWidth/100 must be whole numbers of steps")
+        }
+        // Non-positive frequencies are rejected by parameter validation.
+        Kind::SignalGenerator {
+            waveform,
+            frequency,
+            hertz,
+            ..
+        } if waveform != "sine" && *frequency > 0.0 => {
+            let period = generator_period(*frequency, *hertz);
+            let edge = if waveform == "square" {
+                period / 2.0
+            } else {
+                period
+            };
+            if aligned(0.0) && spans(edge) {
+                Ok(())
+            } else {
+                Err("square and sawtooth Signal Generator edges must align with the fixed-step grid: time zero must be a sample time and the half period (square) or period (sawtooth) a whole number of steps; choose Hertz units or a step dividing the period")
+            }
+        }
+        Kind::Chirp { .. } if o.start != 0.0 => {
+            Err("Chirp Signal requires the simulation start time to be 0")
+        }
+        Kind::RepeatingSequence { times, values }
+            if values.first() != values.last()
+                && !(aligned(0.0) && times.last().is_some_and(|p| spans(*p))) =>
+        {
+            Err("Repeating Sequence wraps discontinuously (first and last rep_seq_y differ), so its wraps must align with the fixed-step grid: time zero must be a sample time and the period a whole number of steps")
+        }
+        _ => Ok(()),
+    }
+}
+/// Snap accepted edge times onto the sample grid so transition and sample
+/// times are computed identically; see `source_timing`.
+fn snap_edges(kind: &mut Kind, o: &Options) {
+    let time = |t: f64| o.start + ((t - o.start) / o.step).round() * o.step;
+    let span = |d: f64| (d / o.step).round() * o.step;
+    match kind {
+        Kind::Step { time: t, .. } => {
+            if *t >= o.start && *t <= o.stop && on_grid((*t - o.start) / o.step) {
+                *t = time(*t);
+            }
+        }
+        Kind::PulseGenerator {
+            period,
+            width,
+            phase_delay,
+            ..
+        } => {
+            *phase_delay = time(*phase_delay);
+            *period = span(*period);
+            *width = span(*width);
+        }
+        Kind::SignalGenerator {
+            waveform,
+            frequency,
+            hertz,
+            ..
+        } if waveform != "sine" => {
+            let period = span(generator_period(*frequency, *hertz));
+            *frequency = generator_period(period, *hertz);
+        }
+        Kind::RepeatingSequence { times, values } if values.first() != values.last() => {
+            if let Some(last) = times.last_mut() {
+                *last = span(*last);
+            }
+        }
+        _ => {}
+    }
+}
 impl<'a> Compiled<'a> {
     fn new(graph: &'a Graph) -> Result<Self, Error> {
         let matlab = matlab_function::Runtime::prepare(graph)?;
@@ -443,6 +658,76 @@ impl<'a> Compiled<'a> {
                 Kind::Integrator { initial }
                 | Kind::UnitDelay { initial }
                 | Kind::RateDelay { initial, .. } => vec![*initial],
+                Kind::PulseGenerator {
+                    amplitude,
+                    period,
+                    width,
+                    phase_delay,
+                } => {
+                    if *period <= 0.0 {
+                        return Err(block_error(&node.id, "Period must be positive"));
+                    }
+                    if *width <= 0.0 || *width >= *period {
+                        return Err(block_error(&node.id, "Period*PulseWidth/100 must lie strictly between 0 and Period: Simulink rejects a time-based Pulse Generator with constant output"));
+                    }
+                    if *phase_delay < 0.0 {
+                        return Err(block_error(&node.id, "PhaseDelay must be nonnegative"));
+                    }
+                    vec![*amplitude, *period, *width, *phase_delay]
+                }
+                Kind::SignalGenerator {
+                    waveform,
+                    amplitude,
+                    frequency,
+                    ..
+                } => {
+                    if !["sine", "square", "sawtooth"].contains(&waveform.as_str()) {
+                        return Err(block_error(
+                            &node.id,
+                            format!("unsupported Signal Generator WaveForm={waveform}"),
+                        ));
+                    }
+                    if waveform != "sine" && *frequency <= 0.0 {
+                        return Err(block_error(
+                            &node.id,
+                            "square and sawtooth waveforms require a positive Frequency",
+                        ));
+                    }
+                    vec![*amplitude, *frequency]
+                }
+                Kind::Ramp {
+                    slope,
+                    start,
+                    initial,
+                } => vec![*slope, *start, *initial],
+                Kind::Chirp {
+                    initial_frequency,
+                    target_time,
+                    target_frequency,
+                } => {
+                    if *target_time <= 0.0 {
+                        return Err(block_error(&node.id, "T (target time) must be positive"));
+                    }
+                    vec![*initial_frequency, *target_time, *target_frequency]
+                }
+                Kind::RepeatingSequence { times, values } => {
+                    if times.len() < 2 || times.len() != values.len() || times.len() > 1024 {
+                        return Err(block_error(&node.id, "rep_seq_t and rep_seq_y must be vectors of equal length, with 2 to 1024 points"));
+                    }
+                    if times[0] != 0.0 {
+                        return Err(block_error(
+                            &node.id,
+                            "rep_seq_t must start at 0; a nonzero first time value is unsupported",
+                        ));
+                    }
+                    if !times.windows(2).all(|w| w[1] > w[0]) {
+                        return Err(block_error(
+                            &node.id,
+                            "rep_seq_t must be strictly increasing",
+                        ));
+                    }
+                    times.iter().chain(values).copied().collect()
+                }
                 _ => vec![],
             };
             if node.kind.period().is_some_and(|p| p == 0 || p > 1_000_000) {
@@ -634,6 +919,69 @@ impl<'a> Compiled<'a> {
                     bias,
                 } => amplitude * (frequency * t + phase).sin() + bias,
                 Kind::Clock => t,
+                Kind::PulseGenerator {
+                    amplitude,
+                    period,
+                    width,
+                    phase_delay,
+                } => {
+                    if pulse_high(t, *phase_delay, *width, *period, left_limit) {
+                        *amplitude
+                    } else {
+                        0.0
+                    }
+                }
+                Kind::SignalGenerator {
+                    waveform,
+                    amplitude,
+                    frequency,
+                    hertz,
+                } => match waveform.as_str() {
+                    "sine" => {
+                        let angle = if *hertz {
+                            std::f64::consts::TAU * frequency * t
+                        } else {
+                            frequency * t
+                        };
+                        amplitude * angle.sin()
+                    }
+                    "square" => {
+                        let period = generator_period(*frequency, *hertz);
+                        if pulse_high(t, period / 2.0, period / 2.0, period, left_limit) {
+                            *amplitude
+                        } else {
+                            -amplitude
+                        }
+                    }
+                    "sawtooth" => {
+                        let period = generator_period(*frequency, *hertz);
+                        amplitude * (1.0 - 2.0 * cycle_offset(t, 0.0, period, left_limit) / period)
+                    }
+                    _ => unreachable!(),
+                },
+                Kind::Ramp {
+                    slope,
+                    start,
+                    initial,
+                } => {
+                    if t < *start {
+                        *initial
+                    } else {
+                        initial + slope * (t - start)
+                    }
+                }
+                Kind::Chirp {
+                    initial_frequency,
+                    target_time,
+                    target_frequency,
+                } => {
+                    let sweep = (target_frequency - initial_frequency) / (2.0 * target_time);
+                    (std::f64::consts::TAU * (initial_frequency * t + sweep * t * t)).sin()
+                }
+                Kind::RepeatingSequence { times, values } => {
+                    let period = *times.last().unwrap();
+                    interpolate(times, values, cycle_offset(t, 0.0, period, left_limit))
+                }
                 Kind::Gain { gain } => gain * x(0),
                 Kind::Bias { bias } => x(0) + bias,
                 Kind::Sum { signs } => signs.iter().enumerate().map(|(p, s)| s * x(p)).sum(),
@@ -831,25 +1179,13 @@ pub fn simulate_with_observer_and_budget(
                 return Err(block_error(&node.id, "discrete sample period must be bounded and simulation start must align with its zero-phase grid"));
             }
         }
-        if let Kind::Step { time, .. } = node.kind {
-            let ticks = (time - o.start) / o.step;
-            if time > o.start && time < o.stop && !on_grid(ticks) {
-                return Err(block_error(
-                    &node.id,
-                    "Step transition must align with fixed-step grid",
-                ));
-            }
-        }
+        source_timing(&node.kind, o).map_err(|message| block_error(&node.id, message))?;
     }
     // Accepted decimal transition times are snapped to the same grid used for
     // samples; validation tolerance must not create inconsistent stage values.
     let mut normalized = graph.clone();
     for node in &mut normalized.nodes {
-        if let Kind::Step { time, .. } = &mut node.kind {
-            if *time >= o.start && *time <= o.stop && on_grid((*time - o.start) / o.step) {
-                *time = o.start + ((*time - o.start) / o.step).round() * o.step;
-            }
-        }
+        snap_edges(&mut node.kind, o);
     }
     let graph = &normalized;
     let compiled = Compiled::new(graph)?;
@@ -1026,6 +1362,7 @@ pub mod diagnose;
 mod flatten;
 mod import;
 mod inputs;
+mod library;
 mod matlab_function;
 mod random;
 pub use inputs::{

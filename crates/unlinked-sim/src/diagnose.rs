@@ -251,10 +251,14 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                 // and their contents never run.
                 continue;
             }
-            if block.mask.is_some() || block.library_source.is_some() {
+            // Registered library sources (Ramp, Chirp Signal, Repeating
+            // Sequence) lower like native blocks and are not flagged as links.
+            let library = crate::library::lowered_type(block);
+            if library.is_none() && (block.mask.is_some() || block.library_source.is_some()) {
                 report.emit(Severity::Warning, "simulation_link_or_mask", location.clone(),
                     "Masks and library links require supported explicit lowering before simulation.".into());
-            } else if block.subsystem.is_none()
+            } else if library.is_none()
+                && block.subsystem.is_none()
                 && !crate::vector::supported_native_type(&block.block_type)
             {
                 report.emit(
@@ -286,7 +290,7 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     }
                 }
             }
-            if let Some(descriptor) = catalog::find(&block.block_type) {
+            if let Some(descriptor) = catalog::descriptor_for(block) {
                 for p in descriptor.parameters {
                     if !matches!(
                         p.kind,
@@ -295,7 +299,8 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     ) {
                         continue;
                     }
-                    let Some(value) = block.param(p.name).map(str::trim) else {
+                    let key = p.key_in(&block.parameters);
+                    let Some(value) = block.param(key).map(str::trim) else {
                         continue;
                     };
                     if identifier(value)
@@ -303,7 +308,7 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                         && !model.workspace.contains_key(value)
                         && !context.workspace.contains_key(value)
                     {
-                        report.emit(Severity::Warning, "workspace_binding_missing", target(&path, block, Some(p.name)),
+                        report.emit(Severity::Warning, "workspace_binding_missing", target(&path, block, Some(key)),
                             format!("{value} is not in the supplied workspace. Supply its value or an explicitly evaluated init-script context; diagnostics never run callbacks."));
                     }
                 }

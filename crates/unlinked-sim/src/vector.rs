@@ -66,7 +66,8 @@ impl Shape {
 #[derive(Clone)]
 enum Operation {
     Source,
-    RandomSource,
+    /// Zero-input source whose waveform parameters expand elementwise.
+    ExpandedSource,
     Elementwise,
     State,
     Gain {
@@ -240,6 +241,8 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             | "DigitalClock"
             | "Step"
             | "Sin"
+            | "DiscretePulseGenerator"
+            | "SignalGenerator"
             | "RandomNumber"
             | "UniformRandomNumber"
             | "Gain"
@@ -288,19 +291,29 @@ fn describe(
     workspace: &Workspace,
     budget: &mut ArrayBudget,
 ) -> Result<Spec, Error> {
-    if !supported_native_type(&block.block_type) {
-        return Err(block_error(
-            &block.id.0,
-            format!("unsupported block type {}", block.block_type),
-        ));
-    }
-
+    // Registered library links become their lowering types (`Ramp`,
+    // `ChirpSignal`, `RepeatingSequence`), which are not native block types:
+    // Simulink never writes them, so a bare block of such a type is unknown.
+    let library = super::library::resolve(block);
     let id = &block.id.0;
     if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
         return Err(block_error(
             id,
             "subsystems, masks and library links require explicit lowering before simulation",
         ));
+    }
+    if !library && !supported_native_type(&block.block_type) {
+        return Err(block_error(
+            id,
+            format!("unsupported block type {}", block.block_type),
+        ));
+    }
+    // The Ramp mask's initial output is `X0` in files written by most
+    // releases; the current reference documents it as `InitialOutput`.
+    if block.block_type == "Ramp" && block.param("X0").is_none() {
+        if let Some(initial) = block.param("InitialOutput").map(str::to_owned) {
+            block.parameters.insert("X0".into(), initial);
+        }
     }
     if [
         block.ports.enable,
@@ -333,8 +346,15 @@ fn describe(
     let mut values = BTreeMap::new();
     let (operation, inputs, vector_parameter) = match block.block_type.as_str() {
         "Constant" => (Operation::Source, 0, Some(("Value", "1"))),
-        "RandomNumber" | "UniformRandomNumber" => (Operation::RandomSource, 0, None),
-        "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" => (Operation::Source, 0, None),
+        "RandomNumber"
+        | "UniformRandomNumber"
+        | "DiscretePulseGenerator"
+        | "SignalGenerator"
+        | "Ramp"
+        | "ChirpSignal" => (Operation::ExpandedSource, 0, None),
+        "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" | "RepeatingSequence" => {
+            (Operation::Source, 0, None)
+        }
         "Gain" => {
             let matrix = match block
                 .param("Multiplication")
@@ -552,11 +572,20 @@ fn describe(
             )?,
         );
     }
-    if matches!(operation, Operation::RandomSource) {
-        let parameters: &[(&str, &str)] = if block.block_type == "RandomNumber" {
-            &[("Mean", "0"), ("Variance", "1"), ("Seed", "0")]
-        } else {
-            &[("Minimum", "-1"), ("Maximum", "1"), ("Seed", "0")]
+    if matches!(operation, Operation::ExpandedSource) {
+        let parameters: &[(&str, &str)] = match block.block_type.as_str() {
+            "RandomNumber" => &[("Mean", "0"), ("Variance", "1"), ("Seed", "0")],
+            "UniformRandomNumber" => &[("Minimum", "-1"), ("Maximum", "1"), ("Seed", "0")],
+            "DiscretePulseGenerator" => &[
+                ("Amplitude", "1"),
+                ("Period", "10"),
+                ("PulseWidth", "5"),
+                ("PhaseDelay", "0"),
+            ],
+            "SignalGenerator" => &[("Amplitude", "1"), ("Frequency", "1")],
+            "Ramp" => &[("slope", "1"), ("start", "0"), ("X0", "0")],
+            "ChirpSignal" => &[("f1", "0.1"), ("T", "100"), ("f2", "1")],
+            _ => unreachable!(),
         };
         for &(key, default) in parameters {
             values.insert(
@@ -615,6 +644,7 @@ fn describe(
             ("D", "1"),
             ("InitialCondition", "0"),
         ],
+        "RepeatingSequence" => &[("rep_seq_t", "[0 2]"), ("rep_seq_y", "[0 2]")],
         "Polyval" => &[("coefs", unlinked_model::catalog::POLYVAL_DEFAULT_COEFS)],
         _ => &[],
     };
@@ -708,7 +738,7 @@ fn infer(
                 .map(|v| Shape::from_value(v, block.param("VectorParams1D") != Some("off")))
                 .unwrap_or(Shape::SCALAR),
         ),
-        Operation::RandomSource => broadcast(
+        Operation::ExpandedSource => broadcast(
             id,
             spec.values.values().map(|value| {
                 Some(Shape::from_value(

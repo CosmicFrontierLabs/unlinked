@@ -802,6 +802,9 @@ fn add_block(sys: &mut XElem, block: &Block) {
     b.set_attr("SID", &block.id.0);
     push_new_prop(&mut b, "Ports", &format_ports(&block.ports), &indent);
     push_new_prop(&mut b, "Position", &format_rect(&block.position), &indent);
+    if let Some(source) = &block.library_source {
+        push_new_prop(&mut b, "SourceBlock", source, &indent);
+    }
     for (key, value) in &block.parameters {
         push_new_prop(&mut b, key, value, &indent);
     }

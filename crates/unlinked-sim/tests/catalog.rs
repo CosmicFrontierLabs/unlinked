@@ -12,6 +12,7 @@ fn block(id: &str, key: &str) -> Block {
     Block {
         id: id.into(),
         name: id.into(),
+        // Library blocks are `Reference` blocks linked to their source.
         block_type: descriptor.mdl_block_type.into(),
         position: Rect::new(
             0.0,
@@ -24,7 +25,7 @@ fn block(id: &str, key: &str) -> Block {
         ports,
         parameters,
         mask: None,
-        library_source: None,
+        library_source: descriptor.source_block.map(str::to_owned),
         subsystem: None,
         style: Default::default(),
         interface: None,
@@ -83,6 +84,11 @@ fn control_palette_defaults_match_analytic_responses() {
         "Sin",
         "Clock",
         "Ground",
+        "DiscretePulseGenerator",
+        "SignalGenerator",
+        "Ramp",
+        "ChirpSignal",
+        "RepeatingSequence",
         "Saturate",
         "TransferFcn",
         "StateSpace",
@@ -116,9 +122,27 @@ fn control_palette_defaults_match_analytic_responses() {
                         1.0
                     }
                 }
-                "Sin" => t.sin(),
-                "Clock" => t,
+                "Sin" | "SignalGenerator" => t.sin(),
+                "Clock" | "Ramp" => t,
                 "Ground" => 0.0,
+                // Period 10 s, 5 % duty: high for the first 0.5 s.
+                "DiscretePulseGenerator" => {
+                    if t < 0.5 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                // 0.1 Hz to 1 Hz over 100 s.
+                "ChirpSignal" => (std::f64::consts::TAU * (0.1 * t + 0.9 / 200.0 * t * t)).sin(),
+                // [0 2] -> [0 2] wraps at the 2 s stop time.
+                "RepeatingSequence" => {
+                    if t < 2.0 {
+                        t
+                    } else {
+                        0.0
+                    }
+                }
                 "Saturate" => 0.5,
                 "TransferFcn" => 2.0 * (1.0 - (-t).exp()),
                 "StateSpace" => 2.0 * t.exp(),

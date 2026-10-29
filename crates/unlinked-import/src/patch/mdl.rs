@@ -1083,6 +1083,9 @@ fn add_block(sys: &mut Section, block: &Block) {
     b.set_prop("SID", &block.id.0, false);
     b.set_prop("Ports", &format_ports(&block.ports), true);
     b.set_prop("Position", &format_rect(&block.position), true);
+    if let Some(source) = &block.library_source {
+        b.set_prop("SourceBlock", source, false);
+    }
     for (key, value) in &block.parameters {
         b.set_prop(key, value, false);
     }
