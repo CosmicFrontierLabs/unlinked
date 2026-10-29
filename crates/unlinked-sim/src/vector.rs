@@ -230,9 +230,6 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             | "Sin"
             | "DiscretePulseGenerator"
             | "SignalGenerator"
-            | "Ramp"
-            | "ChirpSignal"
-            | "RepeatingSequence"
             | "RandomNumber"
             | "UniformRandomNumber"
             | "Gain"
@@ -274,7 +271,10 @@ fn describe(
     workspace: &Workspace,
     budget: &mut ArrayBudget,
 ) -> Result<Spec, Error> {
-    super::library::resolve(block);
+    // Registered library links become their lowering types (`Ramp`,
+    // `ChirpSignal`, `RepeatingSequence`), which are not native block types:
+    // Simulink never writes them, so a bare block of such a type is unknown.
+    let library = super::library::resolve(block);
     let id = &block.id.0;
     if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
         return Err(block_error(
@@ -282,7 +282,7 @@ fn describe(
             "subsystems, masks and library links require explicit lowering before simulation",
         ));
     }
-    if !supported_native_type(&block.block_type) {
+    if !library && !supported_native_type(&block.block_type) {
         return Err(block_error(
             id,
             format!("unsupported block type {}", block.block_type),
@@ -525,7 +525,7 @@ fn describe(
             ],
             "SignalGenerator" => &[("Amplitude", "1"), ("Frequency", "1")],
             "Ramp" => &[("slope", "1"), ("start", "0"), ("X0", "0")],
-            "ChirpSignal" => &[("f1", "0.1"), ("T", "100"), ("f2", "1"), ("phi", "0")],
+            "ChirpSignal" => &[("f1", "0.1"), ("T", "100"), ("f2", "1")],
             _ => unreachable!(),
         };
         for &(key, default) in parameters {

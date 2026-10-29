@@ -89,9 +89,28 @@ pub struct ParameterDescriptor {
     pub implicit_default: Option<&'static str>,
     pub affects_ports: bool,
     pub dialog: ParameterDialog,
+    /// A second key under which files store this parameter (the Ramp's
+    /// initial output is `X0` in most files and `InitialOutput` in the
+    /// current reference). The dialog, its checks and new blocks use `name`
+    /// unless a block carries only the alias; see [`Self::key_in`].
+    pub alias: Option<&'static str>,
 }
 
 impl ParameterDescriptor {
+    /// The key this parameter is stored under in `parameters`: `name`, or
+    /// `alias` when the block carries only the alias. Reading and editing
+    /// through this key never shadows the value the block actually uses.
+    pub fn key_in(&self, parameters: &BTreeMap<String, String>) -> &'static str {
+        match self.alias {
+            Some(alias)
+                if !parameters.contains_key(self.name) && parameters.contains_key(alias) =>
+            {
+                alias
+            }
+            _ => self.name,
+        }
+    }
+
     /// Friendly enum label, or the exact stored token when no label is known.
     pub fn label_for<'a>(&self, value: &'a str) -> &'a str {
         self.dialog
@@ -294,7 +313,10 @@ impl BlockDescriptor {
         {
             return Err("invalid parameter name or value exceeds 64 KiB".into());
         }
-        let descriptor = self.parameters.iter().find(|p| p.name == name);
+        let descriptor = self
+            .parameters
+            .iter()
+            .find(|p| p.name == name || p.alias == Some(name));
         if let Some(descriptor) = descriptor {
             validate_parameter(descriptor, value)?;
         }
@@ -616,6 +638,7 @@ const fn param(
         implicit_default: Some(default),
         affects_ports,
         dialog,
+        alias: None,
     }
 }
 const fn dialog(
@@ -1552,14 +1575,20 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 false,
                 dialog("Timing", "Time at which the output starts to change.", Some("s")),
             ),
-            param(
-                "X0",
-                "Initial output",
-                Expr,
-                "0",
-                false,
-                dialog("Signal", "Output value until the start time.", None),
-            ),
+            // Files written by most releases store the mask's initial
+            // output as `X0`; the current reference documents it as
+            // `InitialOutput`. The dialog edits whichever the block carries.
+            ParameterDescriptor {
+                alias: Some("InitialOutput"),
+                ..param(
+                    "X0",
+                    "Initial output",
+                    Expr,
+                    "0",
+                    false,
+                    dialog("Signal", "Output value until the start time.", None),
+                )
+            },
             VECTOR_PARAMS_1D,
         ],
         SOURCE,
@@ -2438,6 +2467,30 @@ mod tests {
         );
         block.block_type = "Gain".into();
         assert_eq!(descriptor_for(&block).unwrap().type_key, "Gain");
+    }
+    #[test]
+    fn ramp_initial_output_binds_to_the_key_the_block_carries() {
+        let ramp = find("Ramp").unwrap();
+        let initial = ramp.parameters.iter().find(|p| p.name == "X0").unwrap();
+        let entry = |key: &str, value: &str| (key.to_string(), value.to_string());
+        let x0 = BTreeMap::from([entry("X0", "1")]);
+        let documented = BTreeMap::from([entry("InitialOutput", "1")]);
+        let both = BTreeMap::from([entry("X0", "1"), entry("InitialOutput", "2")]);
+        assert_eq!(initial.key_in(&BTreeMap::new()), "X0");
+        assert_eq!(initial.key_in(&x0), "X0");
+        assert_eq!(initial.key_in(&documented), "InitialOutput");
+        assert_eq!(initial.key_in(&both), "X0", "the simulator prefers X0");
+        assert!(ramp.check_edit(&documented, "InitialOutput", "").is_err());
+        assert!(ramp.check_edit(&documented, "InitialOutput", "3").is_ok());
+        let created = ramp.creation_parameters();
+        assert_eq!(created.get("X0").map(String::as_str), Some("0"));
+        assert!(!created.contains_key("InitialOutput"));
+        // The Chirp Signal reference lists no phase parameter.
+        assert!(find("ChirpSignal")
+            .unwrap()
+            .parameters
+            .iter()
+            .all(|p| p.name != "phi"));
     }
     #[test]
     fn alternate_sine_and_trigonometry_modes_have_correct_arity() {

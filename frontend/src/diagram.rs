@@ -4877,7 +4877,12 @@ fn hover_card(props: &HoverCardProps) -> Html {
         Some(d) => d
             .parameters
             .iter()
-            .filter_map(|p| Some((p.label.to_string(), b.param(p.name)?.to_string())))
+            .filter_map(|p| {
+                Some((
+                    p.label.to_string(),
+                    b.param(p.key_in(&b.parameters))?.to_string(),
+                ))
+            })
             .take(SHOWN)
             .collect(),
         None => b
@@ -5444,7 +5449,13 @@ fn inspector(props: &InspectorProps) -> Html {
         .iter()
         .filter(|(k, _)| !HIDDEN_PARAMETERS.contains(&k.as_str()))
         .filter(|(k, _)| {
-            descriptor.is_none_or(|d| d.parameters.iter().all(|p| p.name != k.as_str()))
+            // A parameter the dialog shows under its alias (a Ramp's
+            // `InitialOutput`) is not an extra.
+            descriptor.is_none_or(|d| {
+                d.parameters
+                    .iter()
+                    .all(|p| p.key_in(&b.parameters) != k.as_str())
+            })
         })
         .collect();
     let shown_fields: Vec<&str> = descriptor

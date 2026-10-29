@@ -148,15 +148,18 @@ pub fn validate_structure(model: &Model) -> StructuralReport {
             };
             let native =
                 block.mask.is_none() && block.library_source.is_none() && block.subsystem.is_none();
-            if let Some(descriptor) = catalog::find(&block.block_type).filter(|_| native) {
+            // Native blocks and registered library blocks (`Reference` with a
+            // known `SourceBlock`) take the dialog's parameter and port checks.
+            if let Some(descriptor) = catalog::descriptor_for(block) {
                 for parameter in descriptor.parameters {
                     spend!();
-                    if let Some(value) = block.param(parameter.name) {
+                    let key = parameter.key_in(&block.parameters);
+                    if let Some(value) = block.param(key) {
                         if let Err(message) = catalog::validate_parameter(parameter, value) {
                             report.emit(
                                 Severity::Error,
                                 "invalid_parameter",
-                                parameter_target(parameter.name),
+                                parameter_target(key),
                                 &message,
                             );
                         }
@@ -394,6 +397,40 @@ mod tests {
             ..Default::default()
         }
     }
+    /// Registered library blocks take the catalog's parameter checks under
+    /// the key they store each parameter as; unknown links stay raw.
+    #[test]
+    fn library_blocks_take_catalog_parameter_checks() {
+        let mut m = model();
+        let ramp = &mut m.root.blocks[0];
+        ramp.block_type = "Reference".into();
+        ramp.library_source = Some("simulink/Sources/Ramp".into());
+        ramp.ports = PortCounts {
+            inputs: 0,
+            outputs: 1,
+            ..Default::default()
+        };
+        ramp.parameters.insert("slope".into(), "".into());
+        ramp.parameters.insert("InitialOutput".into(), "".into());
+        let invalid = |m: &Model| -> Vec<String> {
+            validate_structure(m)
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "invalid_parameter")
+                .map(|d| match &d.target {
+                    DiagnosticTarget::Block {
+                        parameter: Some(parameter),
+                        ..
+                    } => parameter.clone(),
+                    other => panic!("unexpected target {other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(invalid(&m), ["slope", "InitialOutput"]);
+        m.root.blocks[0].library_source = Some("simulink/Sources/Band-Limited White Noise".into());
+        assert!(invalid(&m).is_empty());
+    }
+
     #[test]
     fn unknown_blocks_and_disconnected_ports_are_preserved() {
         assert!(validate_structure(&model()).is_valid());

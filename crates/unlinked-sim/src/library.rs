@@ -30,10 +30,16 @@ pub(crate) fn lowered_type(block: &Block) -> Option<&'static str> {
 }
 
 /// Rewrite a registered library block as its lowering type, dropping the
-/// link so the native checks apply. Other blocks are left untouched.
-pub(crate) fn resolve(block: &mut Block) {
-    if let Some(kind) = lowered_type(block) {
-        block.block_type = kind.into();
-        block.library_source = None;
+/// link so the native checks apply, and say whether it did. Other blocks
+/// are left untouched. The lowering types are not block types Simulink
+/// writes, so resolving a link is the only way a block acquires one.
+pub(crate) fn resolve(block: &mut Block) -> bool {
+    match lowered_type(block) {
+        Some(kind) => {
+            block.block_type = kind.into();
+            block.library_source = None;
+            true
+        }
+        None => false,
     }
 }

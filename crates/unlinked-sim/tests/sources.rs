@@ -204,6 +204,8 @@ fn pulse_generator_rejects_other_modes_and_misaligned_or_constant_pulses() {
     assert!(error_of(pulse(&[("PulseWidth", "100")]), &o).contains("PulseWidth"));
     assert!(error_of(pulse(&[("PulseWidth", "120")]), &o).contains("PulseWidth"));
     assert!(error_of(pulse(&[("Period", "0")]), &o).contains("Period"));
+    // A negative period is a sign error, not a grid-alignment one.
+    assert!(error_of(pulse(&[("Period", "-4")]), &o).contains("Period must be positive"));
     assert!(error_of(pulse(&[("PhaseDelay", "-1")]), &o).contains("PhaseDelay"));
     // Period 4, width 3, delay 1 fit a 0.25 s step; a 0.3 s delay does not.
     let misaligned = pulse(&[("Period", "4"), ("PulseWidth", "75"), ("PhaseDelay", "0.3")]);
@@ -377,7 +379,9 @@ fn chirp_sweeps_linearly_and_keeps_sweeping_past_the_target_time() {
     check(&trace, "c", expected, 1e-9);
     // After T the instantaneous frequency is still f1 + (f2 - f1) t / T.
     assert!(trace.time.iter().any(|&t| t > 2.0));
-    let phased = library(
+    // A vector f1 expands elementwise; the block has no phase parameter, so
+    // a stray `phi` is kept as a raw parameter and does not shift the sweep.
+    let vector = library(
         "c",
         "simulink/Sources/Chirp Signal",
         &[
@@ -387,17 +391,17 @@ fn chirp_sweeps_linearly_and_keeps_sweeping_past_the_target_time() {
             ("phi", "pi/2"),
         ],
     );
-    let trace = run(phased, 4.0, 0.01);
+    let trace = run(vector, 4.0, 0.01);
     check(
         &trace,
         "c[1]",
-        |t| (std::f64::consts::TAU * (0.5 * t + 0.25 * t * t)).cos(),
+        |t| (std::f64::consts::TAU * (0.5 * t + 0.25 * t * t)).sin(),
         1e-9,
     );
     check(
         &trace,
         "c[2]",
-        |t| (std::f64::consts::TAU * (t + 0.125 * t * t)).cos(),
+        |t| (std::f64::consts::TAU * (t + 0.125 * t * t)).sin(),
         1e-9,
     );
     let late = Options {
@@ -512,4 +516,69 @@ fn library_registry_matches_the_catalog_and_other_links_still_reject() {
     let mut masked = library("m", "simulink/Sources/Ramp", &[]);
     masked.mask = Some(Mask::default());
     assert!(error_of(masked, &options(2.0, 0.01)).contains("masks"));
+}
+
+/// Simulink never writes `Ramp`, `ChirpSignal` or `RepeatingSequence` as a
+/// `BlockType`: those are the registry's lowering types, reached only
+/// through a registered `SourceBlock`. A bare block of such a type is unknown.
+#[test]
+fn bare_lowering_types_are_not_native_blocks() {
+    for kind in ["Ramp", "ChirpSignal", "RepeatingSequence"] {
+        let bare = block("b", kind, &[]);
+        assert!(
+            error_of(bare.clone(), &options(1.0, 0.01)).contains("unsupported block type"),
+            "{kind}"
+        );
+        let report = diagnose(
+            &model(vec![bare], vec![]),
+            &DiagnosticContext {
+                mode: CheckMode::Static,
+                ..Default::default()
+            },
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "simulation_block_type"),
+            "{kind}"
+        );
+    }
+}
+
+/// A library block added from the palette, saved through the MDL patcher
+/// and re-imported keeps its `SourceBlock` and mask parameters and simulates.
+#[test]
+fn palette_library_blocks_survive_an_mdl_round_trip_and_simulate() {
+    use unlinked_model::edit::{apply_batch, Edit};
+    let bytes = b"Model {\n Name \"m\"\n System {\n }\n}\n";
+    let edits = [
+        Edit::AddBlock {
+            system: vec![],
+            id: "1".into(),
+            block_type: "RepeatingSequence".into(),
+            name: "seq".into(),
+            position: Rect::new(0.0, 0.0, 30.0, 30.0),
+        },
+        Edit::SetParameter {
+            system: vec![],
+            id: "1".into(),
+            name: "rep_seq_y".into(),
+            value: "[0 3]".into(),
+        },
+    ];
+    let mut expected = unlinked_import::import("m.mdl", bytes).unwrap();
+    apply_batch(&mut expected, &edits).unwrap();
+    let patched = unlinked_import::patch::apply_edits("m.mdl", bytes, &edits).unwrap();
+    let actual = unlinked_import::import("m.mdl", &patched).unwrap();
+    assert_eq!(actual.root.blocks, expected.root.blocks);
+    let seq = &actual.root.blocks[0];
+    assert_eq!(seq.block_type, "Reference");
+    assert_eq!(
+        seq.library_source.as_deref().map(catalog::canonical_source),
+        Some("simulink/Sources/Repeating Sequence".into())
+    );
+    // Traces are keyed by block ID.
+    let trace = simulate_model(&actual, &options(2.0, 0.5)).unwrap();
+    assert_eq!(at(&trace, "1", 1.0), 1.5);
 }

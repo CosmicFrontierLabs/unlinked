@@ -295,7 +295,8 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     ) {
                         continue;
                     }
-                    let Some(value) = block.param(p.name).map(str::trim) else {
+                    let key = p.key_in(&block.parameters);
+                    let Some(value) = block.param(key).map(str::trim) else {
                         continue;
                     };
                     if identifier(value)
@@ -303,7 +304,7 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                         && !model.workspace.contains_key(value)
                         && !context.workspace.contains_key(value)
                     {
-                        report.emit(Severity::Warning, "workspace_binding_missing", target(&path, block, Some(p.name)),
+                        report.emit(Severity::Warning, "workspace_binding_missing", target(&path, block, Some(key)),
                             format!("{value} is not in the supplied workspace. Supply its value or an explicitly evaluated init-script context; diagnostics never run callbacks."));
                     }
                 }

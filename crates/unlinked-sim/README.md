@@ -183,11 +183,12 @@ expand scalar parameters against vector or matrix ones (`VectorParams1D`).
 
 Three library blocks are recognised by their `SourceBlock` path on `Reference`
 blocks and lowered from their mask parameters: `simulink/Sources/Ramp`
-(`slope`, `start`, `X0`, also read as `InitialOutput`; output `X0` until
-`start`, then `X0 + slope*(t - start)`;
+(`slope`, `start`, and the initial output as `X0` or, in files following the
+current reference, `InitialOutput`; the catalog dialog edits whichever key the
+block carries; output `X0` until `start`, then `X0 + slope*(t - start)`;
 [reference](https://www.mathworks.com/help/simulink/slref/ramp.html)),
-`simulink/Sources/Chirp Signal` (`f1`, `T`, `f2`, optional `phi` in radians;
-`sin(2π(f1 t + (f2 - f1) t²/(2T)) + phi)`, whose instantaneous frequency sweeps
+`simulink/Sources/Chirp Signal` (`f1`, `T`, `f2`; no phase parameter;
+`sin(2π(f1 t + (f2 - f1) t²/(2T)))`, whose instantaneous frequency sweeps
 linearly from `f1` to `f2` at `T` and keeps changing at that rate afterwards;
 the start time must be 0 as the
 [reference](https://www.mathworks.com/help/simulink/slref/chirpsignal.html)

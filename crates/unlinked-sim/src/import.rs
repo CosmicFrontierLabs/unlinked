@@ -416,7 +416,6 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 initial_frequency: p("f1", "0.1")?,
                 target_time: p("T", "100")?,
                 target_frequency: p("f2", "1")?,
-                phase: p("phi", "0")?,
             },
             "RepeatingSequence" => {
                 // Scalarization already replaced these expressions by literal

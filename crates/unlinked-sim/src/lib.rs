@@ -112,16 +112,15 @@ pub enum Kind {
         start: f64,
         initial: f64,
     },
-    /// Chirp Signal: `sin(2π(f1 t + (f2 - f1) t² / (2T)) + phase)`, the sine
-    /// whose instantaneous frequency sweeps linearly from `f1` at time zero
-    /// to `f2` at `target_time` and keeps changing at that rate afterwards
+    /// Chirp Signal: `sin(2π(f1 t + (f2 - f1) t² / (2T)))`, the sine whose
+    /// instantaneous frequency sweeps linearly from `f1` at time zero to
+    /// `f2` at `target_time` and keeps changing at that rate afterwards. The
+    /// block has no phase parameter
     /// ([block reference](https://www.mathworks.com/help/simulink/slref/chirpsignal.html)).
     Chirp {
         initial_frequency: f64,
         target_time: f64,
         target_frequency: f64,
-        /// Initial phase in radians (mask parameter `phi`, zero when absent).
-        phase: f64,
     },
     /// Repeating Sequence: linear interpolation of `values` over `times`
     /// (strictly increasing from zero), repeated with period `times.last()`
@@ -373,12 +372,14 @@ pub(crate) fn source_timing(kind: &Kind, o: &Options) -> Result<(), &'static str
         Kind::Step { time, .. } if *time > o.start && *time < o.stop && !aligned(*time) => {
             Err("Step transition must align with fixed-step grid")
         }
+        // A non-positive Period is rejected as such by `Compiled::new`, not
+        // as a misaligned edge.
         Kind::PulseGenerator {
             period,
             width,
             phase_delay,
             ..
-        } if !(aligned(*phase_delay) && spans(*period) && spans(*width)) => {
+        } if *period > 0.0 && !(aligned(*phase_delay) && spans(*period) && spans(*width)) => {
             Err("Pulse Generator edges must align with the fixed-step grid: PhaseDelay must fall on a sample time, and Period and Period*PulseWidth/100 must be whole numbers of steps")
         }
         // Non-positive frequencies are rejected by parameter validation.
@@ -543,12 +544,11 @@ impl<'a> Compiled<'a> {
                     initial_frequency,
                     target_time,
                     target_frequency,
-                    phase,
                 } => {
                     if *target_time <= 0.0 {
                         return Err(block_error(&node.id, "T (target time) must be positive"));
                     }
-                    vec![*initial_frequency, *target_time, *target_frequency, *phase]
+                    vec![*initial_frequency, *target_time, *target_frequency]
                 }
                 Kind::RepeatingSequence { times, values } => {
                     if times.len() < 2 || times.len() != values.len() || times.len() > 1024 {
@@ -790,10 +790,9 @@ impl<'a> Compiled<'a> {
                     initial_frequency,
                     target_time,
                     target_frequency,
-                    phase,
                 } => {
                     let sweep = (target_frequency - initial_frequency) / (2.0 * target_time);
-                    (std::f64::consts::TAU * (initial_frequency * t + sweep * t * t) + phase).sin()
+                    (std::f64::consts::TAU * (initial_frequency * t + sweep * t * t)).sin()
                 }
                 Kind::RepeatingSequence { times, values } => {
                     let period = *times.last().unwrap();
