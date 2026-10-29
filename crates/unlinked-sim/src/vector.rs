@@ -615,7 +615,7 @@ fn describe(
             ("D", "1"),
             ("InitialCondition", "0"),
         ],
-        "Polyval" => &[("coefs", "[1 0]")],
+        "Polyval" => &[("coefs", unlinked_model::catalog::POLYVAL_DEFAULT_COEFS)],
         _ => &[],
     };
     for &(key, default) in coefficients {
@@ -787,7 +787,9 @@ fn infer(
         Operation::DotProduct => {
             // https://www.mathworks.com/help/simulink/slref/dotproduct.html:
             // inputs are scalars, vectors or column vectors of equal length;
-            // y = sum(u1 .* u2) is always scalar.
+            // y = sum(u1 .* u2) is always scalar. Expanding a scalar against
+            // a vector is an Unlinked extension the reference does not
+            // describe.
             let mut length = None;
             for input in inputs.iter().flatten() {
                 if !input.vector && input.len() > 1 && input.cols != 1 {
@@ -956,6 +958,18 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
     let mut specs = Vec::new();
     let (mut input_ports, mut output_total, mut parameter_elements) = (0usize, 0usize, 0usize);
     for block in &mut blocks {
+        // Files omit parameters at their `BlockParameterDefaults` value, so a
+        // Polynomial block without `coefs` takes the file's per-type default
+        // before the library default.
+        if block.block_type == "Polyval" && block.param("coefs").is_none() {
+            if let Some(coefs) = model
+                .type_defaults
+                .get("Polyval")
+                .and_then(|defaults| defaults.get("coefs"))
+            {
+                block.parameters.insert("coefs".into(), coefs.clone());
+            }
+        }
         let spec = describe(block, &workspace, &mut budget)?;
         input_ports += spec.inputs;
         output_total += output_ports(&spec.operation);

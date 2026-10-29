@@ -263,6 +263,7 @@ pub const UNARY_OPERATIONS: &[&str] = &[
     "atanh",
     "exp",
     "log",
+    "2^u",
     "10^u",
     "log10",
     "magnitude^2",
@@ -308,6 +309,7 @@ fn unary(operation: &str, u: f64) -> f64 {
         "atanh" => u.atanh(),
         "exp" => u.exp(),
         "log" => u.ln(),
+        "2^u" => 2f64.powf(u),
         "10^u" => 10f64.powf(u),
         "log10" => u.log10(),
         "magnitude^2" | "square" => u * u,
@@ -330,15 +332,29 @@ fn binary(operation: &str, u: f64, v: f64) -> f64 {
     match operation {
         "atan2" => u.atan2(v),
         "pow" => u.powf(v),
+        // The Math Function reference defines Signed power as sign(u)*|u|^v
+        // for every exponent (so (-2)^2 is -4, unlike plain pow).
         "signedPow" => sign(u) * u.abs().powf(v),
         "hypot" => u.hypot(v),
-        "rem" => u % v,
+        // MATLAB rem/mod compensate for floating-point round-off so that
+        // mod(4*pi, 2*pi) is exactly 0: with a non-integer divisor, a quotient
+        // within eps of an integer yields 0 instead of a residual (Simulink's
+        // rt_remd_snf/rt_modd_snf do the same).
+        "rem" => {
+            if v != 0.0 && v != v.trunc() && quotient_is_integer(u, v) {
+                0.0
+            } else {
+                u % v
+            }
+        }
         "mod" => {
             if v == 0.0 {
                 u
             } else {
                 let r = u % v;
-                if r != 0.0 && (r < 0.0) != (v < 0.0) {
+                if r == 0.0 || (v != v.trunc() && quotient_is_integer(u, v)) {
+                    0.0
+                } else if (r < 0.0) != (v < 0.0) {
                     r + v
                 } else {
                     r
@@ -347,6 +363,12 @@ fn binary(operation: &str, u: f64, v: f64) -> f64 {
         }
         _ => unreachable!(),
     }
+}
+/// Whether `u / v` is an integer up to floating-point round-off, the test
+/// MATLAB's `rem`/`mod` use to produce exact zeros for non-integer divisors.
+fn quotient_is_integer(u: f64, v: f64) -> bool {
+    let q = (u / v).abs();
+    q.is_finite() && (q - q.round()).abs() <= f64::EPSILON * q
 }
 /// MATLAB `sign`: zero for zero, unlike `f64::signum`.
 fn sign(u: f64) -> f64 {

@@ -22,6 +22,11 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 pub const MAX_PORTS: u32 = 1024;
+/// Simulink's library default for the Polynomial block's `coefs`
+/// (https://www.mathworks.com/help/simulink/slref/polynomial.html). Files
+/// omit parameters left at their defaults, so an imported block without
+/// `coefs` evaluates this polynomial rather than the identity.
+pub const POLYVAL_DEFAULT_COEFS: &str = "[ +2.081618890e-019, -1.441693666e-014, +4.719686976e-010, -8.536869453e-006, +1.621573104e-001, -8.087801117e+001 ]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ParameterKind {
@@ -1922,8 +1927,9 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Polyval",
         "Polynomial",
         "Math",
-        &[
-            param(
+        &[ParameterDescriptor {
+            implicit_default: Some(POLYVAL_DEFAULT_COEFS),
+            ..param(
                 "coefs",
                 "Polynomial coefficients",
                 Expr,
@@ -1931,11 +1937,11 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                 false,
                 dialog(
                     "Operation",
-                    "Coefficients in descending powers of the input, as for MATLAB polyval; the last value is the constant term.",
+                    "Coefficients in descending powers of the input, as for MATLAB polyval; the last value is the constant term. New blocks start as the identity; an imported block without coefficients keeps the Simulink library polynomial.",
                     None,
                 ),
-            ),
-        ],
+            )
+        }],
         ONE,
         [40.0, 30.0],
     ),

@@ -139,6 +139,9 @@ fn math_function_unary_operators_match_closed_forms() {
     let cases: &[(&str, Unary)] = &[
         ("exp", f64::exp),
         ("log", f64::ln),
+        ("2^u", |u| 2f64.powf(u)),
+        ("2^u", |u| 2f64.powf(u)),
+        ("2^u", |u| 2f64.powf(u)),
         ("10^u", |u| 10f64.powf(u)),
         ("log10", f64::log10),
         ("magnitude^2", |u| u * u),
@@ -240,28 +243,57 @@ fn rem_and_mod_follow_matlab_sign_conventions() {
 }
 
 #[test]
-fn pow_signed_power_applies_only_to_real_output_type() {
-    // Math Function reference: with Signed power on and a real output type,
-    // pow is sign(u)*|u|^v; otherwise u^v, which is complex for a negative
-    // base with a fractional exponent and so rejects here.
-    let signed = run(
-        "Math",
-        &[("Operator", "pow"), ("OutputSignalType", "real")],
-        &["[-8 8 0]", "1/3"],
-    );
-    close(&vector(&signed, "subject", 3), &[-2.0, 2.0, 0.0]);
-    assert!(failure("Math", &[("Operator", "pow")], &["-8", "1/3"]).contains("non-finite"));
-    assert!(failure(
-        "Math",
-        &[
-            ("Operator", "pow"),
-            ("OutputSignalType", "real"),
-            ("SignedPower", "off")
-        ],
-        &["-8", "1/3"]
-    )
-    .contains("non-finite"));
-    // Integer exponents of negative bases are real either way.
+fn rem_and_mod_compensate_for_round_off_with_fractional_divisors() {
+    // MATLAB rem/mod produce exact zeros when the quotient is an integer up
+    // to floating-point round-off (mod(4*pi, 2*pi) is 0 in the mod
+    // reference); plain fmod would leave residuals near the divisor.
+    let dividends = "[0.3 1 -1 2.4 4*pi]";
+    let divisors = "[0.1 0.1 0.1 0.8 2*pi]";
+    let rem = run("Math", &[("Operator", "rem")], &[dividends, divisors]);
+    assert_eq!(vector(&rem, "subject", 5), vec![0.0; 5]);
+    let modulo = run("Math", &[("Operator", "mod")], &[dividends, divisors]);
+    assert_eq!(vector(&modulo, "subject", 5), vec![0.0; 5]);
+    let modulo = run("Math", &[("Operator", "mod")], &[dividends, "-0.1"]);
+    assert_eq!(vector(&modulo, "subject", 5)[..3], [0.0; 3]);
+    // Quotients that are not near an integer keep their fractional residue
+    // with the usual sign conventions.
+    let rem = run("Math", &[("Operator", "rem")], &["[0.35 -0.35]", "0.1"]);
+    close(&vector(&rem, "subject", 2), &[0.05, -0.05]);
+    let modulo = run("Math", &[("Operator", "mod")], &["[0.35 -0.35]", "0.1"]);
+    close(&vector(&modulo, "subject", 2), &[0.05, 0.05]);
+    let modulo = run("Math", &[("Operator", "mod")], &["5.5", "-2"]);
+    close(&[scalar(&modulo, "subject")], &[-0.5]);
+    // Integer divisors are exact already and are left to fmod: 1e17 / 3 is
+    // within eps of an integer but rem must still report the true remainder.
+    let rem = run("Math", &[("Operator", "rem")], &["1e17", "3"]);
+    assert_eq!(scalar(&rem, "subject"), 1e17 % 3.0);
+}
+
+#[test]
+fn pow_signed_power_applies_unless_switched_off() {
+    // Math Function reference: with Signed power on (the default) and a real
+    // output, pow is sign(u)*|u|^v; under the default `auto` output type the
+    // expression follows the compiled complexity, which is always real here.
+    // With Signed power off it is u^v, which is complex for a negative base
+    // with a fractional exponent and so rejects.
+    for output_type in [None, Some(("OutputSignalType", "real"))] {
+        let mut params = vec![("Operator", "pow")];
+        params.extend(output_type);
+        let signed = run("Math", &params, &["[-8 8 0]", "1/3"]);
+        close(&vector(&signed, "subject", 3), &[-2.0, 2.0, 0.0]);
+        // The reference formula applies the sign for every exponent, so an
+        // even power of a negative base is negative.
+        let even = run("Math", &params, &["[-2 2]", "2"]);
+        close(&vector(&even, "subject", 2), &[-4.0, 4.0]);
+    }
+    for output_type in [None, Some(("OutputSignalType", "real"))] {
+        let mut params = vec![("Operator", "pow"), ("SignedPower", "off")];
+        params.extend(output_type);
+        assert!(failure("Math", &params, &["-8", "1/3"]).contains("non-finite"));
+        let plain = run("Math", &params, &["[-2 2 -2]", "[2 2 3]"]);
+        close(&vector(&plain, "subject", 3), &[4.0, 4.0, -8.0]);
+    }
+    // Odd integer exponents of negative bases agree either way.
     close(
         &[scalar(
             &run("Math", &[("Operator", "pow")], &["-2", "3"]),
@@ -313,7 +345,6 @@ fn transpose_and_hermitian_swap_matrix_dimensions() {
 #[test]
 fn math_function_rejects_modes_outside_the_subset() {
     for (params, text) in [
-        (vec![("Operator", "2^u")], "Operator=2^u"),
         (
             vec![("OutputSignalType", "complex")],
             "OutputSignalType=complex",
@@ -495,6 +526,11 @@ fn sqrt_variants_match_definitions() {
             vec![("SqrtAlgorithmType", "Lookup")],
             "SqrtAlgorithmType=Lookup",
         ),
+        // Releases before R2026b name the Method parameter AlgorithmType.
+        (
+            vec![("Operator", "rSqrt"), ("AlgorithmType", "Newton-Raphson")],
+            "AlgorithmType=Newton-Raphson",
+        ),
     ] {
         let error = failure("Sqrt", &params, &["4"]);
         assert!(error.contains("subject") && error.contains(text), "{error}");
@@ -552,6 +588,34 @@ fn polynomial_evaluates_descending_coefficients_elementwise() {
     assert!(
         error.contains("subject") && error.contains("coefs"),
         "{error}"
+    );
+}
+
+#[test]
+fn polynomial_without_coefficients_uses_file_then_library_defaults() {
+    // Files omit parameters left at their defaults, so a bare block evaluates
+    // Simulink's library polynomial (Polynomial reference default), not the
+    // identity.
+    let library = [
+        2.081618890e-19,
+        -1.441693666e-14,
+        4.719686976e-10,
+        -8.536869453e-6,
+        1.621573104e-1,
+        -8.087801117e1,
+    ];
+    check_unary("Polyval", &[], &[0.0, 1.0, 250.0], |u| {
+        library.iter().fold(0.0, |acc, c| acc * u + c)
+    });
+    // A file's BlockParameterDefaults for Polyval win over the library value.
+    let mut m = subject("Polyval", &[], &["2"]);
+    m.type_defaults.insert(
+        "Polyval".into(),
+        BTreeMap::from([("coefs".to_string(), "[2 1]".to_string())]),
+    );
+    assert_eq!(
+        scalar(&simulate_model(&m, &options()).unwrap(), "subject"),
+        5.0
     );
 }
 

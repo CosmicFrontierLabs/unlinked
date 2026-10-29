@@ -154,31 +154,40 @@ between two inputs. Results that leave the reals (log or sqrt of a negative,
 `reciprocal` of zero, `rem(x, 0)`, `acosh` below one) are non-finite signal
 errors, never substituted values; complex output types reject.
 
-- **Math Function** (`Operator`): `exp`, `log`, `10^u`, `log10`, `magnitude^2`,
-  `square`, `conj` (identity on reals), `reciprocal` (exact division only), the
-  two-input `pow`, `hypot`, `rem`, `mod`, and `transpose`/`hermitian`.
-  `rem` takes the sign of the dividend and `mod` the sign of the divisor with
-  `mod(x, 0) = x`, following MATLAB. `pow` is `u^v`; with
-  `OutputSignalType=real` and *Signed power* on it is `sign(u)*|u|^v` as the
+- **Math Function** (`Operator`): `exp`, `log`, `2^u`, `10^u`, `log10`,
+  `magnitude^2`, `square`, `conj` (identity on reals), `reciprocal` (exact
+  division only), the two-input `pow`, `hypot`, `rem`, `mod`, and
+  `transpose`/`hermitian`. `rem` takes the sign of the dividend and `mod` the
+  sign of the divisor with `mod(x, 0) = x`, and both compensate for
+  floating-point round-off as MATLAB does (`mod(4*pi, 2*pi)` and `rem(1, 0.1)`
+  are exactly 0). `pow` with *Signed power* on (the default) is `sign(u)*|u|^v`
+  for both the `auto` and `real` output types, since every signal here is
+  real, as the
   [block reference](https://www.mathworks.com/help/simulink/slref/mathfunction.html)
-  specifies. `transpose` and `hermitian` (equal on reals) swap the rows and
-  columns of a matrix signal; a 1-D vector has no orientation and rejects, so
-  use an oriented `1xN`/`Nx1` Constant (`VectorParams1D=off`). `2^u`,
-  `OutputSignalType=complex` and Newton-Raphson reciprocals reject.
+  specifies; with *Signed power* off it is `u^v`. `transpose` and `hermitian`
+  (equal on reals) swap the rows and columns of a matrix signal; a 1-D vector
+  has no orientation and rejects, so use an oriented `1xN`/`Nx1` Constant
+  (`VectorParams1D=off`). `OutputSignalType=complex` and Newton-Raphson
+  reciprocals reject.
 - **Trigonometric Function** (`Operator`): `sin`, `cos`, `tan`, `asin`, `acos`,
   `atan`, `atan2` (y on port 1, x on port 2), `sinh`, `cosh`, `tanh`, `asinh`,
   `acosh`, `atanh`, and `sincos` with separate sine (port 1) and cosine (port 2)
   outputs traced as `id:out:1` / `id:out:2`. `cos + jsin`, CORDIC/Lookup
   approximations and complex outputs reject.
 - **Sqrt** (`Operator`): `sqrt`, `signedSqrt` (`sign(u)*sqrt(|u|)`, defined for
-  negatives) and `rSqrt` (`1/sqrt(u)`); exact algorithms only.
+  negatives) and `rSqrt` (`1/sqrt(u)`); exact algorithms only, so the
+  Newton-Raphson and Lookup methods reject under both the pre-R2026b
+  `AlgorithmType` name and `SqrtAlgorithmType`/`RSqrtAlgorithmType`.
 - **Sign**, **Unary Minus**, **Rounding Function** (`floor`, `ceil`, `round`
   with halves away from zero, `fix` toward zero).
 - **Polynomial** (`coefs` in descending powers, as `polyval`), evaluated
-  elementwise by Horner's rule with up to 1,024 coefficients.
+  elementwise by Horner's rule with up to 1,024 coefficients. A block without
+  `coefs` uses the file's `BlockParameterDefaults`, else Simulink's library
+  default polynomial; palette blocks are created with an explicit `[1 0]`.
 - **Dot Product**: `sum(u1 .* u2)` of two scalars, 1-D vectors or column
-  vectors of equal length (a scalar expands), lowered to Product terms
-  `id:$dot:k` and a Sum; other matrices reject.
+  vectors of equal length, lowered to Product terms `id:$dot:k` and a Sum;
+  other matrices reject. Expanding a scalar against a vector is an Unlinked
+  extension that the block reference does not describe.
 - **MinMax** (`Function`, `Inputs`): one input reduces a scalar or 1-D vector
   to a scalar; several inputs compare elementwise with scalar expansion.
   Matrix reduction, `CollapseMode=Specified dimension` and the library

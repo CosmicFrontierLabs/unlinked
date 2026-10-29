@@ -1,4 +1,5 @@
 use super::*;
+use unlinked_model::catalog::POLYVAL_DEFAULT_COEFS;
 use unlinked_model::{Block, Model, PortKind};
 
 fn parameter(
@@ -51,16 +52,20 @@ pub(crate) fn literal_requirements(
             ("ApproximationMethod", &["None"]),
             ("OutputSignalType", &["auto", "real"]),
         ],
-        // Math Function: `2^u` and complex outputs are outside the supported
-        // subset; `reciprocal` uses exact division only.
+        // Math Function: complex outputs are outside the supported subset;
+        // `reciprocal` uses exact division only.
         "Math" => &[
             ("Operator", MATH_OPERATORS),
             ("OutputSignalType", &["auto", "real"]),
             ("AlgorithmType", &["Exact"]),
         ],
+        // Sqrt: `AlgorithmType` named the Method parameter before R2026b split
+        // it into `SqrtAlgorithmType`/`RSqrtAlgorithmType`; all three must be
+        // exact, since Newton-Raphson/Lookup approximations are not reproduced.
         "Sqrt" => &[
             ("Operator", &["sqrt", "signedSqrt", "rSqrt"]),
             ("OutputSignalType", &["auto", "real"]),
+            ("AlgorithmType", &["Exact"]),
             ("SqrtAlgorithmType", &["Exact"]),
             ("RSqrtAlgorithmType", &["Exact"]),
         ],
@@ -82,6 +87,7 @@ pub(crate) const TRIGONOMETRY_OPERATORS: &[&str] = &[
 pub(crate) const MATH_OPERATORS: &[&str] = &[
     "exp",
     "log",
+    "2^u",
     "10^u",
     "log10",
     "magnitude^2",
@@ -572,12 +578,15 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             "Math" => {
                 let operation = block.param("Operator").unwrap_or("exp");
                 // pow follows the Math Function reference: with Signed power
-                // (default on) and a real output type it is sign(u)*|u|^v;
-                // with the default auto output type it is u^v, whose complex
-                // results for negative bases surface as non-finite errors.
+                // (default on) and a real output it is sign(u)*|u|^v, and under
+                // the default `auto` output type the expression follows the
+                // compiled complexity, which is always real here. Only Signed
+                // power off (or a complex output, rejected above) gives the
+                // plain u^v, whose complex results for negative bases surface
+                // as non-finite errors.
                 // https://www.mathworks.com/help/simulink/slref/mathfunction.html
                 let signed = operation == "pow"
-                    && block.param("OutputSignalType") == Some("real")
+                    && block.param("OutputSignalType") != Some("complex")
                     && block.param("SignedPower") != Some("off");
                 if binary_operator("Math", operation) {
                     Kind::Binary {
@@ -602,7 +611,7 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 operation: "negate".into(),
             },
             "Polyval" => {
-                let value = array_parameter(block, "coefs", "[1 0]", &ws)?;
+                let value = array_parameter(block, "coefs", POLYVAL_DEFAULT_COEFS, &ws)?;
                 if value.rows != 1 && value.cols != 1 {
                     return Err(block_error(
                         id,
