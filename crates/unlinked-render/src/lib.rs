@@ -21,12 +21,13 @@ pub use chart::{render_chart_svg, render_chart_view_svg};
 pub use theme::Theme;
 
 use glyph::{appearance, draw_icon, draw_shape, subsystem_port_labels};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use svg::{num, points_attr, Svg};
 use theme::Palette;
 use unlinked_model::geometry::{port_anchor, port_on_outline, port_outward, port_side, Side};
 use unlinked_model::{
-    Annotation, Block, Model, NamePlacement, Orientation, PortKind, PortRef, Rect, System,
+    Annotation, Block, Commented, Endpoint, Line, Model, NamePlacement, Orientation, PortKind,
+    PortRef, Rect, System,
 };
 
 #[derive(Debug, Clone)]
@@ -150,12 +151,40 @@ impl TextBox {
 /// the lines of blocks being dragged this way. Unknown indices are skipped.
 pub fn render_lines_svg(sys: &System, indices: &[usize], opts: &RenderOptions) -> String {
     let pal = opts.theme.palette();
+    let commented = commented_blocks(sys);
     let mut s = Svg::new();
     for line in indices.iter().filter_map(|&i| sys.lines.get(i)) {
         let routed = route::route_line(sys, line);
-        draw_line(&mut s, &routed, label_layout(&routed).as_ref(), pal);
+        draw_line(
+            &mut s,
+            &routed,
+            label_layout(&routed).as_ref(),
+            pal,
+            line,
+            &commented,
+        );
     }
     s.finish()
+}
+
+/// Commented blocks by ID: their lines are greyed like the blocks.
+fn commented_blocks(sys: &System) -> HashMap<String, Commented> {
+    sys.blocks
+        .iter()
+        .filter_map(|b| match b.commented() {
+            Ok(Commented::Off) | Err(_) => None,
+            Ok(setting) => Some((b.id.0.clone(), setting)),
+        })
+        .collect()
+}
+
+/// The `Commented` value a setting is written as, for `data-commented`.
+fn commented_value(setting: Commented) -> &'static str {
+    match setting {
+        Commented::Off => "off",
+        Commented::Out => "on",
+        Commented::Through => "through",
+    }
 }
 
 pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, RenderError> {
@@ -250,6 +279,7 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
     }
 
     let connected = connected_ports(sys);
+    let commented = commented_blocks(sys);
     let mut order: Vec<usize> = (0..sys.blocks.len()).collect();
     order.sort_by_key(|&i| {
         sys.blocks[i]
@@ -277,7 +307,7 @@ pub fn render_system_svg(sys: &System, opts: &RenderOptions) -> Result<String, R
         if opts.hit_targets {
             s.open("g", &[("data-line", i.to_string())]);
         }
-        draw_line(&mut s, r, label.as_ref(), pal);
+        draw_line(&mut s, r, label.as_ref(), pal, &sys.lines[i], &commented);
         if opts.hit_targets {
             s.close("g");
         }
@@ -365,13 +395,26 @@ fn draw_block(
     opts: &RenderOptions,
     pal: &Palette,
 ) {
-    let bg = pal.block_bg(b.style.background.as_deref());
-    let fg = color::readable(
-        &pal.block_fg(b.style.foreground.as_deref()),
-        &bg,
-        "#1a1b26",
-        "#c0caf5",
-    );
+    // Commented blocks are greyed the way Simulink shows them: muted outline
+    // and text on the plain block fill, whatever colours the model set.
+    let commented = b.commented().ok().filter(|c| *c != Commented::Off);
+    let (fg, bg) = if commented.is_some() {
+        (pal.muted.to_string(), pal.block_fill.to_string())
+    } else {
+        let bg = pal.block_bg(b.style.background.as_deref());
+        let fg = color::readable(
+            &pal.block_fg(b.style.foreground.as_deref()),
+            &bg,
+            "#1a1b26",
+            "#c0caf5",
+        );
+        (fg, bg)
+    };
+    let text = if commented.is_some() {
+        pal.muted
+    } else {
+        pal.text
+    };
     let mut attrs = vec![
         ("class", "block".to_string()),
         ("data-sid", b.id.0.clone()),
@@ -380,6 +423,9 @@ fn draw_block(
     ];
     if b.subsystem.is_some() {
         attrs.push(("data-subsystem", "true".into()));
+    }
+    if let Some(setting) = commented {
+        attrs.push(("data-commented", commented_value(setting).into()));
     }
     s.open("g", &attrs);
     s.open("title", &[]);
@@ -423,10 +469,51 @@ fn draw_block(
         }
     }
 
+    if let Some(setting) = commented {
+        draw_commented_badge(s, b, setting, pal);
+    }
+
     if let Some(name) = name {
-        name.draw(s, &[("fill", pal.text.into()), ("class", "name".into())]);
+        name.draw(s, &[("fill", text.into()), ("class", "name".into())]);
     }
     s.close("g");
+}
+
+/// Simulink's badge in the block's top-left corner: `%` for a commented-out
+/// block, `%%` for a commented-through one.
+fn draw_commented_badge(s: &mut Svg, b: &Block, setting: Commented, pal: &Palette) {
+    let label = match setting {
+        Commented::Through => "%%",
+        _ => "%",
+    };
+    let size = 9.0;
+    let (w, h) = (label.len() as f64 * size * 0.65 + 4.0, size + 3.0);
+    let (x, y) = (b.position.left - 2.0, b.position.top - 2.0);
+    s.leaf(
+        "rect",
+        &[
+            ("x", num(x)),
+            ("y", num(y)),
+            ("width", num(w)),
+            ("height", num(h)),
+            ("fill", pal.canvas.into()),
+            ("stroke", pal.muted.into()),
+            ("class", "commented-badge".into()),
+        ],
+    );
+    s.text(
+        x + w / 2.0,
+        y + h / 2.0,
+        &[label],
+        size,
+        "middle",
+        true,
+        &[
+            ("fill", pal.muted.into()),
+            ("font-weight", "bold".into()),
+            ("class", "commented-badge".into()),
+        ],
+    );
 }
 
 /// Bus element ports (`In Bus Element` / `Out Bus Element`) show the
@@ -730,16 +817,43 @@ fn draw_hit_targets(
     Ok(())
 }
 
-fn draw_line(s: &mut Svg, r: &route::RoutedLine, label: Option<&TextBox>, pal: &Palette) {
+/// Draw a routed line. Wires touching a commented block are greyed like the
+/// block, and dashed when the block is commented through, so the path the
+/// signal takes around it reads as such.
+fn draw_line(
+    s: &mut Svg,
+    r: &route::RoutedLine,
+    label: Option<&TextBox>,
+    pal: &Palette,
+    line: &Line,
+    commented: &HashMap<String, Commented>,
+) {
+    let lookup = |ep: Option<&Endpoint>| ep.and_then(|ep| commented.get(&ep.block.0).copied());
+    let from_src = lookup(line.src.as_ref());
+    let junction_color = if from_src.is_some() {
+        pal.muted
+    } else {
+        pal.line
+    };
     for w in &r.wires {
         let pts: Vec<(f64, f64)> = w.points.iter().map(|p| (p.x, p.y)).collect();
-        let color = if w.dangling { pal.error } else { pal.line };
+        let tone = from_src.or_else(|| lookup(w.dst.as_ref()));
+        let color = if w.dangling {
+            pal.error
+        } else if tone.is_some() {
+            pal.muted
+        } else {
+            pal.line
+        };
         let mut attrs = vec![
             ("points", points_attr(&pts)),
             ("stroke", color.to_string()),
             ("class", "signal".to_string()),
         ];
-        if w.dangling {
+        if let Some(tone) = tone {
+            attrs.push(("data-commented", commented_value(tone).into()));
+        }
+        if w.dangling || tone == Some(Commented::Through) {
             attrs.push(("stroke-dasharray", "4 3".into()));
         }
         s.leaf("polyline", &attrs);
@@ -770,7 +884,7 @@ fn draw_line(s: &mut Svg, r: &route::RoutedLine, label: Option<&TextBox>, pal: &
                 ("cx", num(j.x)),
                 ("cy", num(j.y)),
                 ("r", "2.5".into()),
-                ("fill", pal.line.into()),
+                ("fill", junction_color.into()),
             ],
         );
     }
@@ -983,6 +1097,94 @@ mod tests {
         assert!(svg.contains("fill=\"#1a1b26\""));
         assert!(svg.contains("stroke=\"#c0caf5\""));
         assert!(!svg.contains("#ffffff"));
+    }
+
+    #[test]
+    fn commented_blocks_are_greyed_with_a_badge() {
+        let ep = |id: &str, kind| unlinked_model::Endpoint {
+            block: id.into(),
+            port: PortRef { kind, index: 1 },
+        };
+        let mut out = block("out", Rect::new(0.0, 0.0, 40.0, 40.0));
+        out.parameters.insert("Commented".into(), "on".into());
+        let mut through = block("through", Rect::new(100.0, 0.0, 140.0, 40.0));
+        through.id = "2".into();
+        through
+            .parameters
+            .insert("Commented".into(), "through".into());
+        let mut plain = block("plain", Rect::new(200.0, 0.0, 240.0, 40.0));
+        plain.id = "3".into();
+        let wire = |from: &str, to: &str| unlinked_model::Line {
+            src: Some(ep(from, PortKind::Out)),
+            dst: Some(ep(to, PortKind::In)),
+            ..Default::default()
+        };
+        let sys = System {
+            blocks: vec![out, through, plain],
+            lines: vec![wire("1", "2"), wire("2", "3")],
+            ..Default::default()
+        };
+        let svg = render_system_svg(&sys, &RenderOptions::default()).unwrap();
+        // Simulink's badges: % for commented out, %% for commented through.
+        assert_eq!(svg.matches("class=\"commented-badge\"").count(), 4, "{svg}");
+        assert!(
+            svg.contains(">%</text>") && svg.contains(">%%</text>"),
+            "{svg}"
+        );
+        // Commented blocks are muted; the plain block keeps the theme colour.
+        let group = |sid: &str| {
+            svg.split(&format!("data-sid=\"{sid}\""))
+                .nth(1)
+                .unwrap()
+                .split("</g>")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let out = group("1");
+        assert!(
+            out.starts_with(" data-type=\"Gain\" data-name=\"out\" data-commented=\"on\">"),
+            "{out}"
+        );
+        assert!(
+            out.contains("stroke=\"#555555\"") && !out.contains("stroke=\"#000000\""),
+            "{out}"
+        );
+        assert!(group("2").contains("data-commented=\"through\""));
+        let plain = group("3");
+        assert!(
+            !plain.contains("data-commented") && plain.contains("stroke=\"#000000\""),
+            "{plain}"
+        );
+        // The line out of the commented-out block is grey; the commented-through
+        // path is grey and dashed.
+        let lines: Vec<&str> = svg
+            .split("<polyline")
+            .skip(1)
+            .filter(|l| l.contains("class=\"signal\""))
+            .collect();
+        assert_eq!(lines.len(), 2, "{svg}");
+        assert!(
+            lines[0].contains("stroke=\"#555555\"") && lines[0].contains("data-commented=\"on\""),
+            "{}",
+            lines[0]
+        );
+        assert!(!lines[0].contains("stroke-dasharray"), "{}", lines[0]);
+        assert!(
+            lines[1].contains("stroke=\"#555555\"")
+                && lines[1].contains("data-commented=\"through\""),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("stroke-dasharray=\"4 3\""),
+            "{}",
+            lines[1]
+        );
+        // A previewed line keeps the same look.
+        assert!(
+            render_lines_svg(&sys, &[1], &RenderOptions::default()).contains("stroke-dasharray")
+        );
     }
 
     #[test]
