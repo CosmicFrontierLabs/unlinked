@@ -139,8 +139,22 @@ pub enum Kind {
         inputs: usize,
     },
     Abs,
+    /// One-input elementwise function; see [`UNARY_OPERATIONS`].
     Unary {
         operation: String,
+    },
+    /// Two-input elementwise function; see [`BINARY_OPERATIONS`].
+    Binary {
+        operation: String,
+    },
+    /// Polynomial in descending powers, evaluated by Horner's rule.
+    Polyval {
+        coefficients: Vec<f64>,
+    },
+    /// Elementwise minimum or maximum over `inputs` scalar inputs.
+    MinMax {
+        maximum: bool,
+        inputs: usize,
     },
     /// Pure, stateless function with scalar inputs and exactly one scalar output.
     MatlabFunction {
@@ -160,8 +174,10 @@ impl Kind {
             | Self::RandomNumber { .. }
             | Self::UniformRandomNumber { .. } => 0,
             Self::Switch => 3,
-            Self::Relational { .. } => 2,
-            Self::Logic { inputs, .. } | Self::MatlabFunction { inputs, .. } => *inputs,
+            Self::Relational { .. } | Self::Binary { .. } => 2,
+            Self::Logic { inputs, .. }
+            | Self::MatlabFunction { inputs, .. }
+            | Self::MinMax { inputs, .. } => *inputs,
             Self::Sum { signs } => signs.len(),
             Self::Product { divide } => divide.len(),
             _ => 1,
@@ -217,6 +233,150 @@ pub struct Trace {
     /// Stable block IDs, including sinks, mapped to samples at `time`.
     pub signals: BTreeMap<String, Vec<f64>>,
     pub solver: Solver,
+}
+
+/// Scalar one-input operations accepted by [`Kind::Unary`]. Trigonometric and
+/// hyperbolic names follow the MathWorks
+/// [Trigonometric Function](https://www.mathworks.com/help/simulink/slref/trigonometricfunction.html)
+/// reference, the remaining names the
+/// [Math Function](https://www.mathworks.com/help/simulink/slref/mathfunction.html),
+/// [Sqrt](https://www.mathworks.com/help/simulink/slref/sqrt.html) and
+/// [Rounding Function](https://www.mathworks.com/help/simulink/slref/roundingfunction.html)
+/// references. `sign` is the Signum block, `negate` the Unary Minus block, and
+/// `transpose`/`hermitian` are the per-element identities left after the shape
+/// permutation performed during lowering. `conj` is the identity on real
+/// signals. Results that leave the reals (sqrt or log of a negative, acosh
+/// below one, reciprocal of zero) surface as the engine's non-finite signal
+/// error; nothing is substituted.
+pub const UNARY_OPERATIONS: &[&str] = &[
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "sinh",
+    "cosh",
+    "tanh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "exp",
+    "log",
+    "2^u",
+    "10^u",
+    "log10",
+    "magnitude^2",
+    "square",
+    "conj",
+    "reciprocal",
+    "transpose",
+    "hermitian",
+    "sqrt",
+    "signedSqrt",
+    "rSqrt",
+    "sign",
+    "floor",
+    "ceil",
+    "round",
+    "fix",
+    "negate",
+];
+/// Scalar two-input operations accepted by [`Kind::Binary`]. `atan2(y, x)`
+/// takes the y component on the first port as in the Trigonometric Function
+/// reference. `signedPow` is the Math Function `pow` with *Signed power* on
+/// and a real output type, `sign(u)*|u|^v`; plain `pow` is `u^v`. `rem` and
+/// `mod` use MATLAB's conventions: `rem(x, y) = x - fix(x/y)*y` takes the sign
+/// of `x` and `rem(x, 0)` is NaN (a non-finite signal error here);
+/// `mod(x, y) = x - floor(x/y)*y` takes the sign of `y` and `mod(x, 0) = x`
+/// ([mod](https://www.mathworks.com/help/matlab/ref/double.mod.html),
+/// [rem](https://www.mathworks.com/help/matlab/ref/double.rem.html)).
+pub const BINARY_OPERATIONS: &[&str] = &["atan2", "pow", "signedPow", "hypot", "rem", "mod"];
+
+fn unary(operation: &str, u: f64) -> f64 {
+    match operation {
+        "sin" => u.sin(),
+        "cos" => u.cos(),
+        "tan" => u.tan(),
+        "asin" => u.asin(),
+        "acos" => u.acos(),
+        "atan" => u.atan(),
+        "sinh" => u.sinh(),
+        "cosh" => u.cosh(),
+        "tanh" => u.tanh(),
+        "asinh" => u.asinh(),
+        "acosh" => u.acosh(),
+        "atanh" => u.atanh(),
+        "exp" => u.exp(),
+        "log" => u.ln(),
+        "2^u" => 2f64.powf(u),
+        "10^u" => 10f64.powf(u),
+        "log10" => u.log10(),
+        "magnitude^2" | "square" => u * u,
+        "conj" | "transpose" | "hermitian" => u,
+        "reciprocal" => 1.0 / u,
+        "sqrt" => u.sqrt(),
+        "signedSqrt" => sign(u) * u.abs().sqrt(),
+        "rSqrt" => 1.0 / u.sqrt(),
+        "sign" => sign(u),
+        "floor" => u.floor(),
+        "ceil" => u.ceil(),
+        // MATLAB rounds halves away from zero, as `f64::round` does.
+        "round" => u.round(),
+        "fix" => u.trunc(),
+        "negate" => -u,
+        _ => unreachable!(),
+    }
+}
+fn binary(operation: &str, u: f64, v: f64) -> f64 {
+    match operation {
+        "atan2" => u.atan2(v),
+        "pow" => u.powf(v),
+        // The Math Function reference defines Signed power as sign(u)*|u|^v
+        // for every exponent (so (-2)^2 is -4, unlike plain pow).
+        "signedPow" => sign(u) * u.abs().powf(v),
+        "hypot" => u.hypot(v),
+        // MATLAB rem/mod compensate for floating-point round-off so that
+        // mod(4*pi, 2*pi) is exactly 0: with a non-integer divisor, a quotient
+        // within eps of an integer yields 0 instead of a residual (Simulink's
+        // rt_remd_snf/rt_modd_snf do the same).
+        "rem" => {
+            if v != 0.0 && v != v.trunc() && quotient_is_integer(u, v) {
+                0.0
+            } else {
+                u % v
+            }
+        }
+        "mod" => {
+            if v == 0.0 {
+                u
+            } else {
+                let r = u % v;
+                if r == 0.0 || (v != v.trunc() && quotient_is_integer(u, v)) {
+                    0.0
+                } else if (r < 0.0) != (v < 0.0) {
+                    r + v
+                } else {
+                    r
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+/// Whether `u / v` is an integer up to floating-point round-off, the test
+/// MATLAB's `rem`/`mod` use to produce exact zeros for non-integer divisors.
+fn quotient_is_integer(u: f64, v: f64) -> bool {
+    let q = (u / v).abs();
+    q.is_finite() && (q - q.round()).abs() <= f64::EPSILON * q
+}
+/// MATLAB `sign`: zero for zero, unlike `f64::signum`.
+fn sign(u: f64) -> f64 {
+    if u == 0.0 {
+        0.0
+    } else {
+        u.signum()
+    }
 }
 
 struct Compiled<'a> {
@@ -312,11 +472,35 @@ impl<'a> Compiled<'a> {
                 }
             }
             if let Kind::Unary { operation } = &node.kind {
-                if !["sin", "cos", "tan", "exp", "log", "sqrt"].contains(&operation.as_str()) {
+                if !UNARY_OPERATIONS.contains(&operation.as_str()) {
                     return Err(block_error(
                         &node.id,
                         format!("unsupported unary operation {operation}"),
                     ));
+                }
+            }
+            if let Kind::Binary { operation } = &node.kind {
+                if !BINARY_OPERATIONS.contains(&operation.as_str()) {
+                    return Err(block_error(
+                        &node.id,
+                        format!("unsupported binary operation {operation}"),
+                    ));
+                }
+            }
+            if let Kind::Polyval { coefficients } = &node.kind {
+                if coefficients.is_empty()
+                    || coefficients.len() > 1024
+                    || coefficients.iter().any(|c| !c.is_finite())
+                {
+                    return Err(block_error(
+                        &node.id,
+                        "Polyval requires 1 to 1024 finite coefficients",
+                    ));
+                }
+            }
+            if let Kind::MinMax { inputs, .. } = &node.kind {
+                if *inputs == 0 || *inputs > 1024 {
+                    return Err(block_error(&node.id, "MinMax requires 1 to 1024 inputs"));
                 }
             }
         }
@@ -490,15 +674,19 @@ impl<'a> Compiled<'a> {
                     })
                 }
                 Kind::Abs => x(0).abs(),
-                Kind::Unary { operation } => match operation.as_str() {
-                    "sin" => x(0).sin(),
-                    "cos" => x(0).cos(),
-                    "tan" => x(0).tan(),
-                    "exp" => x(0).exp(),
-                    "log" => x(0).ln(),
-                    "sqrt" => x(0).sqrt(),
-                    _ => unreachable!(),
-                },
+                Kind::Unary { operation } => unary(operation, x(0)),
+                Kind::Binary { operation } => binary(operation, x(0), x(1)),
+                Kind::Polyval { coefficients } => coefficients
+                    .iter()
+                    .fold(0.0_f64, |acc, c| acc.mul_add(x(0), *c)),
+                Kind::MinMax { maximum, inputs } => {
+                    let values = (0..*inputs).map(x);
+                    if *maximum {
+                        values.fold(f64::NEG_INFINITY, f64::max)
+                    } else {
+                        values.fold(f64::INFINITY, f64::min)
+                    }
+                }
                 Kind::MatlabFunction { inputs, .. } => self.matlab.evaluate(
                     i,
                     &self.graph.nodes[i].id,
