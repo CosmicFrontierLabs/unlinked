@@ -420,12 +420,28 @@ fn selector(
             return Err(block_error(id, message));
         }
     };
-    let cells = |key: &str, fallback: Option<&str>, default: &str| -> Result<Vec<String>, Error> {
-        let raw = block
-            .param(key)
-            .or_else(|| fallback.and_then(|k| block.param(k)))
-            .unwrap_or(default);
-        cell_items(raw).map_err(|e| block_error(id, format!("{key}: {e}")))
+    // Files store the comma-separated `IndexOptions`/`Indices`/`OutputSizes`
+    // (every corpus Selector, R2018b-R2020); `IndexOptionArray`/
+    // `IndexParamArray`/`OutputSizeArray` are the programmatic names. Both are
+    // read. Merged file defaults cannot be told from the instance's own
+    // values, so a block carrying both spellings must agree. Returns the
+    // items with the spelling they came from, for diagnostics.
+    let cells = |file: &'static str,
+                 programmatic: &'static str,
+                 default: &str|
+     -> Result<(Vec<String>, &'static str), Error> {
+        let parse = |key: &'static str, raw: &str| {
+            cell_items(raw).map_err(|e| block_error(id, format!("{key}: {e}")))
+        };
+        let stored = |key: &'static str| block.param(key).map(|raw| parse(key, raw)).transpose();
+        match (stored(file)?, stored(programmatic)?) {
+            (Some(a), Some(b)) if a.iter().map(|s| s.trim()).ne(b.iter().map(|s| s.trim())) => Err(
+                block_error(id, format!("Selector {file} and {programmatic} disagree")),
+            ),
+            (Some(items), _) => Ok((items, file)),
+            (None, Some(items)) => Ok((items, programmatic)),
+            (None, None) => Ok((parse(file, default)?, file)),
+        }
     };
     // Legacy spelling of pre-R2007 files: Elements/InputPortWidth/ElementSrc.
     if block.param("IndexOptionArray").is_none() && block.param("IndexOptions").is_none() {
@@ -452,18 +468,18 @@ fn selector(
             });
         }
     }
-    let options = cells(
+    let (options, options_key) = cells(
+        "IndexOptions",
         "IndexOptionArray",
-        Some("IndexOptions"),
         "{'Index vector (dialog)'}",
     )?;
-    let params = cells("IndexParamArray", Some("Indices"), "{'[1 3]'}")?;
-    let sizes = cells("OutputSizeArray", Some("OutputSizes"), "{'1'}")?;
+    let (params, params_key) = cells("Indices", "IndexParamArray", "{'[1 3]'}")?;
+    let (sizes, sizes_key) = cells("OutputSizes", "OutputSizeArray", "{'1'}")?;
     if options.len() != dimensions {
         return Err(block_error(
             id,
             format!(
-                "Selector IndexOptionArray lists {} options for {dimensions} dimension(s)",
+                "Selector {options_key} lists {} options for {dimensions} dimension(s)",
                 options.len()
             ),
         ));
@@ -482,23 +498,42 @@ fn selector(
             "Select all" => DimensionSelect::All,
             "Index vector (dialog)" => DimensionSelect::Indices(index_list(
                 block,
-                &format!("IndexParamArray[{}]", d + 1),
-                &param(&params, "IndexParamArray")?,
+                &format!("{params_key}[{}]", d + 1),
+                &param(&params, params_key)?,
                 min,
                 workspace,
                 budget,
             )?),
             "Starting index (dialog)" => {
-                let key = format!("IndexParamArray[{}]", d + 1);
-                let start = index_list(block, &key, &param(&params, "IndexParamArray")?, min, workspace, budget)?;
+                let key = format!("{params_key}[{}]", d + 1);
+                let start = index_list(
+                    block,
+                    &key,
+                    &param(&params, params_key)?,
+                    min,
+                    workspace,
+                    budget,
+                )?;
                 let [start] = start[..] else {
-                    return Err(block_error(id, format!("{key} must be a single starting index")));
+                    return Err(block_error(
+                        id,
+                        format!("{key} must be a single starting index"),
+                    ));
                 };
-                let size_key = format!("OutputSizeArray[{}]", d + 1);
-                let size = eval(block, &size_key, &param(&sizes, "OutputSizeArray")?, workspace, budget)?;
+                let size_key = format!("{sizes_key}[{}]", d + 1);
+                let size = eval(
+                    block,
+                    &size_key,
+                    &param(&sizes, sizes_key)?,
+                    workspace,
+                    budget,
+                )?;
                 let n = size.data[0];
                 if size.data.len() != 1 || n.fract() != 0.0 || n < 1.0 || n > MAX_ELEMENTS as f64 {
-                    return Err(block_error(id, format!("{size_key} must be a positive integer output size")));
+                    return Err(block_error(
+                        id,
+                        format!("{size_key} must be a positive integer output size"),
+                    ));
                 }
                 let n = n as usize;
                 if start + n > MAX_ELEMENTS {
@@ -506,16 +541,20 @@ fn selector(
                 }
                 DimensionSelect::Indices((start..start + n).collect())
             }
-            other @ ("Index vector (port)" | "Starting index (port)" | "Starting and ending indices (port)") => {
+            other @ ("Index vector (port)"
+            | "Starting index (port)"
+            | "Starting and ending indices (port)") => {
                 return Err(block_error(
                     id,
-                    format!("Selector IndexOptionArray entry {other:?} (port-driven indices) is unsupported"),
+                    format!(
+                    "Selector {options_key} entry {other:?} (port-driven indices) is unsupported"
+                ),
                 ))
             }
             other => {
                 return Err(block_error(
                     id,
-                    format!("unsupported Selector IndexOptionArray entry {other:?}"),
+                    format!("unsupported Selector {options_key} entry {other:?}"),
                 ))
             }
         };
@@ -837,24 +876,30 @@ fn describe(
             (operation, inputs, None)
         }
         "ManualSwitch" => {
-            // sw=1 connects the first input, sw=0 the second (reference page).
-            // There is no documented default, so an absent value rejects.
-            let port = match block.param("sw").map(str::trim) {
-                Some("1") => 0,
-                Some("0") => 1,
-                Some(other) => {
-                    return Err(block_error(
-                        id,
-                        format!("ManualSwitch sw={other} must be 0 or 1"),
-                    ))
-                }
-                None => {
-                    return Err(block_error(
-                        id,
-                        "ManualSwitch requires an explicit sw position (0 or 1)",
-                    ))
-                }
+            // Position 1 connects the first input, 0 the second (reference
+            // page). Files store the position as `CurrentSetting` (the corpus
+            // instance and its BlockParameterDefaults use nothing else); `sw`
+            // is the programmatic name and wins when both are present. There
+            // is no documented default, so an absent value rejects.
+            let (key, position) = match (block.param("sw"), block.param("CurrentSetting")) {
+                (Some(sw), _) => ("sw", Some(sw)),
+                (None, setting) => ("CurrentSetting", setting),
             };
+            let port =
+                match position.map(str::trim) {
+                    Some("1") => 0,
+                    Some("0") => 1,
+                    Some(other) => {
+                        return Err(block_error(
+                            id,
+                            format!("ManualSwitch {key}={other} must be 0 or 1"),
+                        ))
+                    }
+                    None => return Err(block_error(
+                        id,
+                        "ManualSwitch requires an explicit position, sw or CurrentSetting (0 or 1)",
+                    )),
+                };
             if block.param("varsize").is_some_and(|v| v.trim() != "off") {
                 return Err(block_error(
                     id,

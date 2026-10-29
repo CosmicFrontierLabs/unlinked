@@ -170,16 +170,20 @@ and parameter; nothing is approximated.
   nonzero control; `u2 >= Threshold` and `u2 > Threshold` compare the control
   and the scalar `Threshold` (default 0; not evaluated for the nonzero
   criterion) as doubles, so the boundary value passes for `>=` and not for `>`.
-  An imported block without `Criteria` uses the documented default
-  `u2 >= Threshold`. Simulink gives boolean controls special treatment when a
+  An imported block without `Criteria` uses `u2 >= Threshold`, the built-in
+  default Simulink writes to `BlockParameterDefaults` (the reference page's
+  `u2 > Threshold` default is the library block's, whose copies store the
+  criterion explicitly). Simulink gives boolean controls special treatment when a
   threshold is "improper" (ignoring it with a warning); that depends on signal
   datatype propagation and still follows #149, so a boolean control is compared
   as its exact 0/1 value. [Reference](https://www.mathworks.com/help/simulink/slref/switch.html).
 - **Selector** supports `NumberOfDimensions` 1 and 2, both `IndexMode`s, and per
   dimension `Select all`, `Index vector (dialog)` (any order, repeats allowed)
-  and `Starting index (dialog)` with `OutputSizeArray`, read from the
-  `IndexOptionArray`/`IndexParamArray`/`OutputSizeArray` cell arrays or the
-  older comma-separated `IndexOptions`/`Indices`/`OutputSizes`, plus the legacy
+  and `Starting index (dialog)` with an output size, read from the
+  comma-separated `IndexOptions`/`Indices`/`OutputSizes` that files store or
+  the programmatic `IndexOptionArray`/`IndexParamArray`/`OutputSizeArray` cell
+  arrays (a block carrying both spellings must agree, since merged file
+  defaults cannot be told from the block's own values), plus the legacy
   `Elements`/`InputPortWidth`/`ElementSrc` spelling. A 1-D selection of one
   element is a scalar; otherwise a 1-D vector. A 2-D selection requires a
   matrix input (orientation-less vectors reject) and keeps two dimensions, so
@@ -203,11 +207,16 @@ and parameter; nothing is approximated.
   [Reference](https://www.mathworks.com/help/simulink/slref/multiportswitch.html).
 - **Index Vector** (`simulink/Signal Routing/Index Vector`, a linked `Reference`)
   lowers onto the Multiport Switch with the library's one zero-based data port;
-  parameters the link overrides take precedence.
+  parameters the link overrides take precedence. Simulink saves copies of this
+  unmasked built-in as plain `MultiPortSwitch` blocks, which is also what the
+  palette creates; the link form is an import convenience.
   [Reference](https://www.mathworks.com/help/simulink/slref/indexvector.html).
-- **Manual Switch** passes its first input for `sw=1` and its second for
-  `sw=0`, with scalar expansion between the inputs. The reference page gives no
-  default, so an absent `sw` rejects, as does `varsize=on`.
+- **Manual Switch** passes its first input for position 1 and its second for
+  position 0, with scalar expansion between the inputs. Files store the
+  position as `CurrentSetting` (the corpus instance and its file defaults use
+  nothing else); the programmatic `sw` is also read and wins when both are
+  present. The reference page gives no default, so an absent position rejects,
+  as does `varsize=on`.
   [Reference](https://www.mathworks.com/help/simulink/slref/manualswitch.html).
 - **Environment Controller** (`simulink/Signal Routing/Environment Controller`,
   a linked `Reference`) passes its Sim input (port 1); both inputs must have

@@ -182,9 +182,16 @@ pub fn appearance(block: &Block) -> Appearance {
         ]),
         "MultiPortSwitch" => text("*"),
         "ManualSwitch" => {
-            // The arm shows the connected input: sw=1 the first (upper),
-            // sw=0 the second. https://www.mathworks.com/help/simulink/slref/manualswitch.html
-            let from = if p("sw") == "0" { 0.7 } else { 0.3 };
+            // The arm shows the connected input: position 1 the first (upper),
+            // 0 the second. Files store `CurrentSetting`; the programmatic `sw`
+            // wins when present. https://www.mathworks.com/help/simulink/slref/manualswitch.html
+            let sw = p("sw");
+            let position = if sw.is_empty() {
+                p("CurrentSetting")
+            } else {
+                sw
+            };
+            let from = if position == "0" { 0.7 } else { 0.3 };
             Icon::Strokes(vec![
                 vec![(0.1, 0.3), (0.3, 0.3)],
                 vec![(0.1, 0.7), (0.3, 0.7)],
@@ -692,6 +699,40 @@ pub fn draw_icon(svg: &mut Svg, icon: &Icon, inner: Rect, fg: &str, max_font: f6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_switch_arm_follows_the_stored_position() {
+        let arm = |params: &[(&str, &str)]| {
+            let block = Block {
+                id: "1".into(),
+                block_type: "ManualSwitch".into(),
+                name: "sw".into(),
+                position: Rect::default(),
+                orientation: Orientation::Right,
+                mirrored: false,
+                ports: Default::default(),
+                parameters: params
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                mask: None,
+                library_source: None,
+                subsystem: None,
+                style: Default::default(),
+                interface: None,
+            };
+            match appearance(&block).icon {
+                Icon::Strokes(strokes) => strokes[2][0].1,
+                _ => panic!("the Manual Switch icon is drawn with strokes"),
+            }
+        };
+        // Files store CurrentSetting (0 selects the lower input); the
+        // programmatic sw wins when both are present.
+        assert_eq!(arm(&[("CurrentSetting", "0")]), 0.7);
+        assert_eq!(arm(&[("CurrentSetting", "1")]), 0.3);
+        assert_eq!(arm(&[("sw", "0")]), 0.7);
+        assert_eq!(arm(&[("sw", "1"), ("CurrentSetting", "0")]), 0.3);
+    }
 
     #[test]
     fn long_values_show_placeholders() {

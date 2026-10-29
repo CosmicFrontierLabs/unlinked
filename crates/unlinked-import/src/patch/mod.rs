@@ -472,15 +472,15 @@ mod tests {
         let edits = [Edit::AddBlock {
             system: vec![],
             id: sid.as_str().into(),
-            block_type: "IndexVector".into(),
-            name: "iv".into(),
+            block_type: "EnvironmentController".into(),
+            name: "ec".into(),
             position: Rect::new(100.0, 10.0, 130.0, 40.0),
         }];
         let out = apply_edits("m.mdl", src.as_bytes(), &edits).unwrap();
         let text = String::from_utf8(out.clone()).unwrap();
         assert!(
             text.contains(
-                "      BlockType\tReference\n      Name\t\"iv\"\n      SID\t\"8\"\n      Ports\t[2, 1]\n      Position\t[100, 10, 130, 40]\n      SourceBlock\t\"simulink/Signal Routing/Index Vector\"\n"
+                "      BlockType\tReference\n      Name\t\"ec\"\n      SID\t\"8\"\n      Ports\t[2, 1]\n      Position\t[100, 10, 130, 40]\n      SourceBlock\t\"simulink/Signal Routing/Environment Controller\"\n"
             ),
             "{text}"
         );
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(reimported.root, expected.root);
         assert_eq!(
             reimported.root.blocks[1].library_source.as_deref(),
-            Some("simulink/Signal Routing/Index Vector")
+            Some("simulink/Signal Routing/Environment Controller")
         );
     }
 

@@ -1678,6 +1678,9 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Routing",
         &[
             ParameterDescriptor {
+                // The built-in default Simulink writes to BlockParameterDefaults
+                // (seen in the corpus). The reference page's `u2 > Threshold`
+                // is the library block's default; its copies store Criteria.
                 implicit_default: Some("u2 >= Threshold"),
                 ..param(
                     "Criteria",
@@ -1924,9 +1927,11 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Routing",
         &[ParameterDescriptor {
             // The reference page documents no default; imports must be explicit.
+            // Files store the position as `CurrentSetting`; `sw` is the
+            // programmatic name, which the simulator and glyph also read.
             implicit_default: None,
             ..param(
-                "sw",
+                "CurrentSetting",
                 "Position",
                 Enum(&["1", "0"]),
                 "1",
@@ -1954,11 +1959,46 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         },
         [30.0, 30.0],
     ),
-    // Library-linked Reference blocks: Index Vector is a one-port, zero-based
-    // Multiport Switch; Environment Controller passes its Sim input.
+    // Index Vector is the library's unmasked built-in Multiport Switch with
+    // one zero-based data port. Simulink saves copies as plain MultiPortSwitch
+    // blocks, so the palette creates that preset; the non-creatable entry
+    // after it describes imported library links.
     // https://www.mathworks.com/help/simulink/slref/indexvector.html
     BlockDescriptor {
         type_key: "IndexVector",
+        label: "Index Vector",
+        category: "Routing",
+        slx_block_type: "MultiPortSwitch",
+        mdl_block_type: "MultiPortSwitch",
+        source_block: None,
+        parameters: &[
+            param(
+                "Inputs",
+                "Number of data ports",
+                Int,
+                "1",
+                true,
+                dialog(
+                    "Ports",
+                    "The single data port whose elements the control input indexes.",
+                    None,
+                ),
+            ),
+            param(
+                "DataPortOrder",
+                "Data port order",
+                Enum(&["Zero-based contiguous"]),
+                "Zero-based contiguous",
+                false,
+                dialog("Selection", "Elements are indexed from zero.", None),
+            ),
+        ],
+        ports: PortRule::MultiPortSwitch,
+        default_size: [30.0, 30.0],
+        creatable: true,
+    },
+    BlockDescriptor {
+        type_key: "IndexVectorReference",
         label: "Index Vector",
         category: "Routing",
         slx_block_type: "Reference",
@@ -1970,8 +2010,9 @@ pub static BLOCKS: &[BlockDescriptor] = &[
             outputs: 1,
         },
         default_size: [30.0, 30.0],
-        creatable: true,
+        creatable: false,
     },
+    // Environment Controller is a masked library block, saved as a link.
     // https://www.mathworks.com/help/simulink/slref/environmentcontroller.html
     BlockDescriptor {
         type_key: "EnvironmentController",
@@ -2346,7 +2387,10 @@ mod tests {
             style: Default::default(),
             interface: None,
         };
-        assert_eq!(descriptor_for(&block).unwrap().type_key, "IndexVector");
+        assert_eq!(
+            descriptor_for(&block).unwrap().type_key,
+            "IndexVectorReference"
+        );
         block.library_source = Some("simulink/Signal Routing/Merge".into());
         assert!(descriptor_for(&block).is_none());
         block.library_source = None;

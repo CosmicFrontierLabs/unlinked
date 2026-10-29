@@ -171,8 +171,12 @@ pub(crate) enum SwitchCriteria {
 }
 
 impl SwitchCriteria {
-    /// Imported blocks without `Criteria` use the documented default
-    /// `u2 >= Threshold`; see the Switch reference page.
+    /// Imported blocks without `Criteria` use `u2 >= Threshold`, the built-in
+    /// default Simulink writes to `BlockParameterDefaults` (seen in the
+    /// corpus, e.g. spaaro `sig_kadet.slx`). The reference page's
+    /// `Default: 'u2 > Threshold'` describes the library block, whose copies
+    /// store `Criteria` explicitly; the two route the boundary value
+    /// differently, so the file-level default is the one that applies here.
     pub(crate) fn parse(value: Option<&str>) -> Result<Self, String> {
         match value.map(str::trim).unwrap_or("u2 >= Threshold") {
             "u2 ~= 0" => Ok(Self::Nonzero),

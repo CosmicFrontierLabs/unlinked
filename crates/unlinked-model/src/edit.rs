@@ -1075,14 +1075,11 @@ fn add_block(
             "the ports of a new {block_type} cannot be resolved"
         )));
     };
-    // Library blocks are written as linked `Reference` blocks naming their source.
+    // Library blocks are written as linked `Reference` blocks naming their
+    // source; presets such as Index Vector create their native block type.
     sys.blocks.push(Block {
         id: id.clone(),
-        block_type: if descriptor.source_block.is_some() {
-            descriptor.mdl_block_type.into()
-        } else {
-            descriptor.type_key.into()
-        },
+        block_type: descriptor.mdl_block_type.into(),
         name: name.into(),
         position,
         orientation: Orientation::Right,

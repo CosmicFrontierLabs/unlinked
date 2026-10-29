@@ -155,6 +155,53 @@ fn selector_picks_three_then_one_from_a_vector() {
 }
 
 #[test]
+fn selector_spellings_must_agree_when_both_are_stored() {
+    // BlockParameterDefaults merge into the block, so a programmatic spelling
+    // beside the file's own must not win silently when they differ.
+    let e = select(
+        "[10 20 30]",
+        &[
+            ("IndexOptions", "Index vector (dialog)"),
+            ("Indices", "[2 3]"),
+            ("IndexParamArray", "{'[1 3]'}"),
+        ],
+    )
+    .unwrap_err();
+    assert!(e.contains("Indices and IndexParamArray disagree"), "{e}");
+    // Equal items in either quoting agree.
+    let s = select(
+        "[10 20 30]",
+        &[
+            ("IndexOptions", "Index vector (dialog)"),
+            ("IndexOptionArray", "{'Index vector (dialog)'}"),
+            ("Indices", "[2 3]"),
+            ("IndexParamArray", "{'[2 3]'}"),
+        ],
+    )
+    .unwrap();
+    assert_eq!((s["o[1]"][0], s["o[2]"][0]), (20.0, 30.0));
+    // Diagnostics name the spelling the block stores (0 is outside one-based).
+    let e = select(
+        "[1 2]",
+        &[
+            ("IndexOptions", "Index vector (dialog)"),
+            ("Indices", "[0]"),
+        ],
+    )
+    .unwrap_err();
+    assert!(e.contains("Indices[1]"), "{e}");
+    let e = select(
+        "[1 2]",
+        &[
+            ("IndexOptionArray", "{'Index vector (dialog)'}"),
+            ("IndexParamArray", "{'[0]'}"),
+        ],
+    )
+    .unwrap_err();
+    assert!(e.contains("IndexParamArray[1]"), "{e}");
+}
+
+#[test]
 fn legacy_selector_elements_follow_the_same_rules() {
     let s = select(
         "[10 20 30]",
@@ -513,8 +560,19 @@ fn manual_switch_passes_either_input_by_position() {
     assert_eq!((t.signals["sw[1]"][0], t.signals["sw[2]"][0]), (5.0, 5.0));
     let t = simulate_model(&switch(&[("sw", "0")]), &once()).unwrap();
     assert_eq!((t.signals["sw[1]"][0], t.signals["sw[2]"][0]), (7.0, 8.0));
-    assert!(error(&switch(&[])).contains("explicit sw position"));
+    // Files store the position as CurrentSetting (the corpus instance, mavlink
+    // test_messages_local.slx SID 55, stores 0 with no sw anywhere); the
+    // programmatic sw wins when both are present.
+    let t = simulate_model(&switch(&[("CurrentSetting", "0")]), &once()).unwrap();
+    assert_eq!((t.signals["sw[1]"][0], t.signals["sw[2]"][0]), (7.0, 8.0));
+    let t = simulate_model(&switch(&[("CurrentSetting", "1")]), &once()).unwrap();
+    assert_eq!((t.signals["sw[1]"][0], t.signals["sw[2]"][0]), (5.0, 5.0));
+    let both = switch(&[("sw", "1"), ("CurrentSetting", "0")]);
+    let t = simulate_model(&both, &once()).unwrap();
+    assert_eq!((t.signals["sw[1]"][0], t.signals["sw[2]"][0]), (5.0, 5.0));
+    assert!(error(&switch(&[])).contains("sw or CurrentSetting"));
     assert!(error(&switch(&[("sw", "2")])).contains("sw=2"));
+    assert!(error(&switch(&[("CurrentSetting", "2")])).contains("CurrentSetting=2"));
     assert!(error(&switch(&[("sw", "1"), ("varsize", "on")])).contains("varsize"));
 }
 

@@ -208,12 +208,23 @@ fn library_palette_blocks_are_linked_references_that_simulate() {
         .apply(&mut m)
         .unwrap_or_else(|e| panic!("{key}: {e}"));
         let added = m.root.blocks.last().unwrap().clone();
-        assert_eq!(added.block_type, "Reference");
-        assert_eq!(
-            added.library_source.as_deref(),
-            catalog::find(key).unwrap().source_block
-        );
-        assert_eq!(catalog::descriptor_for(&added).unwrap().type_key, key);
+        let descriptor = catalog::find(key).unwrap();
+        assert_eq!(added.block_type, descriptor.mdl_block_type);
+        assert_eq!(added.library_source.as_deref(), descriptor.source_block);
+        if key == "IndexVector" {
+            // Simulink saves the unmasked built-in library block as a plain
+            // one-port, zero-based Multiport Switch; so does the palette.
+            assert_eq!(added.block_type, "MultiPortSwitch");
+            assert_eq!(added.parameters["Inputs"], "1");
+            assert_eq!(added.parameters["DataPortOrder"], "Zero-based contiguous");
+            assert_eq!(
+                catalog::descriptor_for(&added).unwrap().type_key,
+                "MultiPortSwitch"
+            );
+        } else {
+            assert_eq!(added.block_type, "Reference");
+            assert_eq!(catalog::descriptor_for(&added).unwrap().type_key, key);
+        }
         assert_eq!(added.ports.inputs, 2);
         m.root.lines = vec![wire("source", &sid, 1), wire("other", &sid, 2)];
         assert!(unlinked_model::validation::validate_structure(&m).is_valid());
