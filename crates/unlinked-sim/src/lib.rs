@@ -181,6 +181,22 @@ pub enum Kind {
     },
     /// Scalar numeric switch. All three inputs are evaluated; no lazy branch execution.
     Switch,
+    /// Switch with `u2 >= Threshold` (`inclusive`) or `u2 > Threshold`, compared
+    /// as doubles. Boolean controls follow the same comparison (see README).
+    SwitchThreshold {
+        threshold: f64,
+        inclusive: bool,
+    },
+    /// Multiport Switch: input 0 is the control, inputs 1..=data_ports the data
+    /// ports. The control is truncated toward zero and matched against
+    /// `indices`; unmatched values use `default_port` (zero-based among the
+    /// data ports) or stop the run when it is `None`.
+    /// <https://www.mathworks.com/help/simulink/slref/multiportswitch.html>
+    MultiPortSwitch {
+        indices: Vec<Vec<i64>>,
+        default_port: Option<usize>,
+        data_ports: usize,
+    },
     Relational {
         operation: String,
     },
@@ -228,7 +244,8 @@ impl Kind {
             | Self::DigitalClock { .. }
             | Self::RandomNumber { .. }
             | Self::UniformRandomNumber { .. } => 0,
-            Self::Switch => 3,
+            Self::Switch | Self::SwitchThreshold { .. } => 3,
+            Self::MultiPortSwitch { data_ports, .. } => 1 + data_ports,
             Self::Relational { .. } | Self::Binary { .. } => 2,
             Self::Logic { inputs, .. }
             | Self::MatlabFunction { inputs, .. }
@@ -658,6 +675,28 @@ impl<'a> Compiled<'a> {
                 Kind::Integrator { initial }
                 | Kind::UnitDelay { initial }
                 | Kind::RateDelay { initial, .. } => vec![*initial],
+                Kind::SwitchThreshold { threshold, .. } => vec![*threshold],
+                Kind::MultiPortSwitch {
+                    indices,
+                    default_port,
+                    data_ports,
+                } => {
+                    let extra = *data_ports - indices.len().min(*data_ports);
+                    if *data_ports == 0
+                        || *data_ports > 1024
+                        || indices.len() > *data_ports
+                        || extra > 1
+                        || default_port.is_some_and(|p| p >= *data_ports)
+                        || (extra == 1 && *default_port != Some(indices.len()))
+                        || indices.iter().any(Vec::is_empty)
+                    {
+                        return Err(block_error(
+                            &node.id,
+                            "Multiport Switch data ports, indices and default port disagree",
+                        ));
+                    }
+                    vec![]
+                }
                 Kind::PulseGenerator {
                     amplitude,
                     period,
@@ -998,6 +1037,45 @@ impl<'a> Compiled<'a> {
                     } else {
                         x(2)
                     }
+                }
+                Kind::SwitchThreshold {
+                    threshold,
+                    inclusive,
+                } => {
+                    let pass = if *inclusive {
+                        x(1) >= *threshold
+                    } else {
+                        x(1) > *threshold
+                    };
+                    if pass {
+                        x(0)
+                    } else {
+                        x(2)
+                    }
+                }
+                Kind::MultiPortSwitch {
+                    indices,
+                    default_port,
+                    ..
+                } => {
+                    // Non-integer controls truncate toward zero (reference page).
+                    let control = x(0).trunc();
+                    let port = indices
+                        .iter()
+                        .position(|port| {
+                            port.iter().any(|&index| index as f64 == control)
+                        })
+                        .or(*default_port)
+                        .ok_or_else(|| {
+                            block_error(
+                                &self.graph.nodes[i].id,
+                                format!(
+                                    "control value {} at time {t} selects no data port and the default case is an error",
+                                    x(0)
+                                ),
+                            )
+                        })?;
+                    x(1 + port)
                 }
                 Kind::Relational { operation } => f64::from(match operation.as_str() {
                     "==" => x(0) == x(1),
@@ -1365,6 +1443,7 @@ mod inputs;
 mod library;
 mod matlab_function;
 mod random;
+mod selection;
 pub use inputs::{
     compile_with_inputs, evaluate_inputs, evaluate_inputs_with_budget, simulate_model_with_inputs,
     InputValues,

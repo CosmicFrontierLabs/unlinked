@@ -169,6 +169,9 @@ pub enum PortRule {
     Display,
     Integrator,
     Scope,
+    /// Control input, `Inputs` data ports, plus one when the default case has
+    /// its own port.
+    MultiPortSwitch,
     Fixed {
         inputs: u32,
         outputs: u32,
@@ -460,6 +463,26 @@ impl PortRule {
                 );
             }
             Self::Display => return known(u32::from(value("Floating") != Some("on")), 0),
+            Self::MultiPortSwitch => {
+                let Some(raw) = value("Inputs") else {
+                    return PortResolution::Unresolved {
+                        parameter: "Inputs",
+                    };
+                };
+                let Ok(n) = raw.parse::<f64>() else {
+                    return PortResolution::Unresolved {
+                        parameter: "Inputs",
+                    };
+                };
+                if !n.is_finite() || n < 1.0 || n > MAX_PORTS as f64 || n.fract() != 0.0 {
+                    return PortResolution::Invalid {
+                        parameter: "Inputs",
+                        message: format!("expected a data port count from 1 to {MAX_PORTS}"),
+                    };
+                }
+                let extra = u32::from(value("DataPortForDefault") == Some("Additional data port"));
+                return known(1 + n as u32 + extra, 1);
+            }
             Self::Integrator => {
                 for parameter in [
                     "ExternalReset",
@@ -717,7 +740,7 @@ const fn library_block(
         creatable: true,
     }
 }
-use ParameterKind::{Boolean, Enum, Expression as Expr, IntegerExpression as Int};
+use ParameterKind::{Boolean, Enum, Expression as Expr, IntegerExpression as Int, Text};
 const ONE: PortRule = PortRule::Fixed {
     inputs: 1,
     outputs: 1,
@@ -2049,6 +2072,9 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Routing",
         &[
             ParameterDescriptor {
+                // The built-in default Simulink writes to BlockParameterDefaults
+                // (seen in the corpus). The reference page's `u2 > Threshold`
+                // is the library block's default; its copies store Criteria.
                 implicit_default: Some("u2 >= Threshold"),
                 ..param(
                     "Criteria",
@@ -2117,6 +2143,286 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         },
         [30.0, 50.0],
     ),
+    // Signal Routing selection blocks. Dialog-driven indices only; the
+    // simulator rejects port-driven index options explicitly.
+    // https://www.mathworks.com/help/simulink/slref/selector.html
+    block(
+        "Selector",
+        "Selector",
+        "Routing",
+        &[
+            param(
+                "NumberOfDimensions",
+                "Number of input dimensions",
+                Enum(&["1", "2"]),
+                "1",
+                false,
+                dialog(
+                    "Selection",
+                    "Dimensionality of the input signal; the index settings below hold one entry per dimension.",
+                    None,
+                ),
+            ),
+            param(
+                "IndexMode",
+                "Index mode",
+                Enum(&["One-based", "Zero-based"]),
+                "One-based",
+                false,
+                dialog(
+                    "Selection",
+                    "Whether the first element of each dimension has index 1 or 0.",
+                    None,
+                ),
+            ),
+            param(
+                "IndexOptionArray",
+                "Index options",
+                Text,
+                "{'Index vector (dialog)'}",
+                false,
+                dialog(
+                    "Selection",
+                    "Cell array with one option per dimension: 'Select all', 'Index vector (dialog)' or 'Starting index (dialog)'. Port-driven options are not simulated.",
+                    None,
+                ),
+            ),
+            param(
+                "IndexParamArray",
+                "Indices",
+                Text,
+                "{'[1 3]'}",
+                false,
+                dialog(
+                    "Selection",
+                    "Cell array with one expression per dimension: the elements to select, or the starting index of a contiguous range.",
+                    None,
+                ),
+            ),
+            param(
+                "OutputSizeArray",
+                "Output sizes",
+                Text,
+                "{'1'}",
+                false,
+                dialog(
+                    "Selection",
+                    "Cell array with one output size per dimension, used by starting-index selection.",
+                    None,
+                ),
+            ),
+            ParameterDescriptor {
+                implicit_default: Some("3"),
+                ..param(
+                    "InputPortWidth",
+                    "Input port size",
+                    Expr,
+                    "-1",
+                    false,
+                    dialog(
+                        "Selection",
+                        "Width of a one-dimensional input signal; -1 inherits it from the driving block.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "NumberOfDimensions",
+                        value: "1",
+                    }),
+                )
+            },
+        ],
+        ONE,
+        [30.0, 50.0],
+    ),
+    // https://www.mathworks.com/help/simulink/slref/multiportswitch.html
+    block(
+        "MultiPortSwitch",
+        "Multiport Switch",
+        "Routing",
+        &[
+            param(
+                "Inputs",
+                "Number of data ports",
+                Int,
+                "3",
+                true,
+                dialog(
+                    "Ports",
+                    "Data input ports following the control input; a single data port indexes the elements of its vector. Changes the input port count.",
+                    None,
+                ),
+            ),
+            param(
+                "DataPortOrder",
+                "Data port order",
+                Enum(
+                    &[
+                        "Zero-based contiguous",
+                        "One-based contiguous",
+                        "Specify indices",
+                    ],
+                ),
+                "One-based contiguous",
+                false,
+                dialog(
+                    "Selection",
+                    "How control values map to data ports: counting from 0, counting from 1, or the explicit indices below.",
+                    None,
+                ),
+            ),
+            param(
+                "DataPortIndices",
+                "Data port indices",
+                Expr,
+                "{1,2,3}",
+                false,
+                dialog(
+                    "Selection",
+                    "Cell array listing the control values that select each data port, for example {[3 5],0,18}.",
+                    None,
+                )
+                .when(Visibility::Equals {
+                    parameter: "DataPortOrder",
+                    value: "Specify indices",
+                }),
+            ),
+            param(
+                "DataPortForDefault",
+                "Data port for default case",
+                Enum(&["Last data port", "Additional data port"]),
+                "Last data port",
+                true,
+                dialog(
+                    "Ports",
+                    "Which data port answers a control value matching no index; an additional port adds a trailing input.",
+                    None,
+                ),
+            ),
+            param(
+                "DiagnosticForDefault",
+                "Diagnostic for default case",
+                Enum(&["None", "Warning", "Error"]),
+                "Error",
+                false,
+                dialog(
+                    "Selection",
+                    "Whether an unmatched control value stops the simulation or silently uses the default data port.",
+                    None,
+                ),
+            ),
+        ],
+        PortRule::MultiPortSwitch,
+        [30.0, 60.0],
+    ),
+    // https://www.mathworks.com/help/simulink/slref/manualswitch.html
+    block(
+        "ManualSwitch",
+        "Manual Switch",
+        "Routing",
+        &[ParameterDescriptor {
+            // The reference page documents no default; imports must be explicit.
+            // Files store the position as `CurrentSetting`; `sw` is the
+            // programmatic name, which the simulator and glyph also read.
+            implicit_default: None,
+            ..param(
+                "CurrentSetting",
+                "Position",
+                Enum(&["1", "0"]),
+                "1",
+                false,
+                dialog(
+                    "Selection",
+                    "Which input reaches the output: 1 passes the first (upper) input, 0 the second.",
+                    None,
+                )
+                .with_enum_labels(&[
+                    EnumLabel {
+                        value: "1",
+                        label: "First input",
+                    },
+                    EnumLabel {
+                        value: "0",
+                        label: "Second input",
+                    },
+                ]),
+            )
+        }],
+        PortRule::Fixed {
+            inputs: 2,
+            outputs: 1,
+        },
+        [30.0, 30.0],
+    ),
+    // Index Vector is the library's unmasked built-in Multiport Switch with
+    // one zero-based data port. Simulink saves copies as plain MultiPortSwitch
+    // blocks, so the palette creates that preset; the non-creatable entry
+    // after it describes imported library links.
+    // https://www.mathworks.com/help/simulink/slref/indexvector.html
+    BlockDescriptor {
+        type_key: "IndexVector",
+        label: "Index Vector",
+        category: "Routing",
+        slx_block_type: "MultiPortSwitch",
+        mdl_block_type: "MultiPortSwitch",
+        source_block: None,
+        parameters: &[
+            param(
+                "Inputs",
+                "Number of data ports",
+                Int,
+                "1",
+                true,
+                dialog(
+                    "Ports",
+                    "The single data port whose elements the control input indexes.",
+                    None,
+                ),
+            ),
+            param(
+                "DataPortOrder",
+                "Data port order",
+                Enum(&["Zero-based contiguous"]),
+                "Zero-based contiguous",
+                false,
+                dialog("Selection", "Elements are indexed from zero.", None),
+            ),
+        ],
+        ports: PortRule::MultiPortSwitch,
+        default_size: [30.0, 30.0],
+        creatable: true,
+    },
+    BlockDescriptor {
+        type_key: "IndexVectorReference",
+        label: "Index Vector",
+        category: "Routing",
+        slx_block_type: "Reference",
+        mdl_block_type: "Reference",
+        source_block: Some("simulink/Signal Routing/Index Vector"),
+        parameters: &[],
+        ports: PortRule::Fixed {
+            inputs: 2,
+            outputs: 1,
+        },
+        default_size: [30.0, 30.0],
+        creatable: false,
+    },
+    // Environment Controller is a masked library block, saved as a link.
+    // https://www.mathworks.com/help/simulink/slref/environmentcontroller.html
+    BlockDescriptor {
+        type_key: "EnvironmentController",
+        label: "Environment Controller",
+        category: "Routing",
+        slx_block_type: "Reference",
+        mdl_block_type: "Reference",
+        source_block: Some("simulink/Signal Routing/Environment Controller"),
+        parameters: &[],
+        ports: PortRule::Fixed {
+            inputs: 2,
+            outputs: 1,
+        },
+        default_size: [30.0, 40.0],
+        creatable: true,
+    },
     block("Abs", "Absolute Value", "Math", &[], ONE, [30.0, 30.0]),
     block(
         "Trigonometry",
@@ -2752,5 +3058,58 @@ mod tests {
             known(1, 1)
         );
         assert_eq!(ports("Display", "Floating", "on"), known(0, 0));
+    }
+    #[test]
+    fn multiport_switch_ports_count_the_control_and_default_ports() {
+        assert_eq!(ports("MultiPortSwitch", "Inputs", "3"), known(4, 1));
+        assert_eq!(ports("MultiPortSwitch", "Inputs", "1"), known(2, 1));
+        let extra = BTreeMap::from([
+            ("Inputs".into(), "2".into()),
+            ("DataPortForDefault".into(), "Additional data port".into()),
+        ]);
+        assert_eq!(
+            find("MultiPortSwitch").unwrap().resolve_ports(&extra),
+            known(4, 1)
+        );
+        assert!(matches!(
+            ports("MultiPortSwitch", "Inputs", "n"),
+            PortResolution::Unresolved {
+                parameter: "Inputs"
+            }
+        ));
+        assert!(matches!(
+            ports("MultiPortSwitch", "Inputs", "0"),
+            PortResolution::Invalid { .. }
+        ));
+    }
+    #[test]
+    fn library_blocks_are_described_by_their_source_path() {
+        let mut block = Block {
+            id: crate::BlockId("1".into()),
+            block_type: "Reference".into(),
+            name: "iv".into(),
+            position: crate::Rect::default(),
+            orientation: crate::Orientation::Right,
+            mirrored: false,
+            ports: PortCounts::default(),
+            parameters: BTreeMap::new(),
+            mask: None,
+            library_source: Some("simulink/Signal\nRouting/Index\nVector".into()),
+            subsystem: None,
+            style: Default::default(),
+            interface: None,
+        };
+        assert_eq!(
+            descriptor_for(&block).unwrap().type_key,
+            "IndexVectorReference"
+        );
+        block.library_source = Some("simulink/Signal Routing/Merge".into());
+        assert!(descriptor_for(&block).is_none());
+        block.library_source = None;
+        assert!(descriptor_for(&block).is_none());
+        block.block_type = "ManualSwitch".into();
+        assert_eq!(descriptor_for(&block).unwrap().type_key, "ManualSwitch");
+        block.mask = Some(Default::default());
+        assert!(descriptor_for(&block).is_none());
     }
 }

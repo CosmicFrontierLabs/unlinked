@@ -172,7 +172,9 @@ CI. Per-model import, render and simulation coverage is tracked in
   Saturation, Integrator, UnitDelay, Abs, Math Function and Trigonometric
   Function (real operators, including two-input and `sincos`), Sqrt, Sign,
   Rounding, Unary Minus, Polynomial, Dot Product, MinMax, relational and
-  logical operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
+  logical operators, Switch (nonzero and threshold criteria), Selector, Multiport
+  Switch and the library Index Vector, Manual Switch, Environment Controller,
+  Mux/Demux, virtual subsystems, proper SISO
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
   matrix signals lowered to scalars; blocks commented out (grounded) or
   commented through (wired input to output) at any level. The authoritative

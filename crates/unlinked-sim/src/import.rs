@@ -1,3 +1,4 @@
+use super::selection::{MultiPortConfig, SwitchCriteria};
 use super::*;
 use unlinked_model::catalog::POLYVAL_DEFAULT_COEFS;
 use unlinked_model::{Block, Model, PortKind};
@@ -613,14 +614,54 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 period_ticks: period,
             },
             "Switch" => {
-                // Nonzero criteria agrees for both numeric and boolean controls.
-                // Threshold criteria need signal datatype propagation: Simulink
-                // treats boolean controls specially, so do not guess here.
-                if block.param("Criteria") != Some("u2 ~= 0") {
-                    return Err(block_error(id, "Switch currently requires Criteria=u2 ~= 0; threshold criteria need datatype propagation"));
+                // Threshold criteria compare doubles. Simulink's special-casing
+                // of boolean controls with improper thresholds waits on signal
+                // datatype propagation (#149); the README records this.
+                match SwitchCriteria::parse(block.param("Criteria"))
+                    .map_err(|e| block_error(id, e))?
+                {
+                    SwitchCriteria::Nonzero => Kind::Switch,
+                    SwitchCriteria::AtLeast => Kind::SwitchThreshold {
+                        threshold: p("Threshold", "0")?,
+                        inclusive: true,
+                    },
+                    SwitchCriteria::Above => Kind::SwitchThreshold {
+                        threshold: p("Threshold", "0")?,
+                        inclusive: false,
+                    },
                 }
-
-                Kind::Switch
+            }
+            "MultiPortSwitch" => {
+                // Scalarization writes the canonical explicit-index form.
+                if block.param("DataPortOrder") != Some("Specify indices") {
+                    return Err(block_error(
+                        id,
+                        "MultiPortSwitch requires dimensional lowering before compilation",
+                    ));
+                }
+                let indices = MultiPortConfig::parse_indices_literal(
+                    block.param("DataPortIndices").unwrap_or(""),
+                )
+                .map_err(|e| block_error(id, format!("DataPortIndices: {e}")))?;
+                let config = MultiPortConfig {
+                    indices,
+                    additional_default_port: block.param("DataPortForDefault")
+                        == Some("Additional data port"),
+                    error_on_default: block.param("DiagnosticForDefault") == Some("Error"),
+                };
+                if block.param("Inputs").and_then(|n| n.parse::<usize>().ok())
+                    != Some(config.indices.len())
+                {
+                    return Err(block_error(
+                        id,
+                        "MultiPortSwitch Inputs does not match its data port indices",
+                    ));
+                }
+                Kind::MultiPortSwitch {
+                    default_port: config.default_port(),
+                    data_ports: config.data_ports(),
+                    indices: config.indices,
+                }
             }
             "RelationalOperator" => Kind::Relational {
                 operation: block.param("Operator").unwrap_or(">=").into(),

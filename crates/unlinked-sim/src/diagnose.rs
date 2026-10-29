@@ -253,7 +253,15 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
             }
             // Registered library sources (Ramp, Chirp Signal, Repeating
             // Sequence) lower like native blocks and are not flagged as links.
-            let library = crate::library::lowered_type(block);
+            // Index Vector and Environment Controller lower natively too.
+            let supported_link = block.mask.is_none()
+                && block.subsystem.is_none()
+                && block.block_type == "Reference"
+                && block
+                    .library_source
+                    .as_deref()
+                    .is_some_and(|src| crate::vector::supported_library_source(src).is_some());
+            let library = crate::library::lowered_type(block).or(supported_link.then_some("link"));
             if library.is_none() && (block.mask.is_some() || block.library_source.is_some()) {
                 report.emit(Severity::Warning, "simulation_link_or_mask", location.clone(),
                     "Masks and library links require supported explicit lowering before simulation.".into());

@@ -168,11 +168,11 @@ fn logical_import_accepts_boolean_outputs_and_rejects_unsupported_modes() {
         &[("Operator", "OR"), ("Inputs", "4294967295")],
     );
     assert!(compile(&m, &Options::default()).is_err());
-    m.root.blocks[1] = block("g", "Switch", &[("Criteria", "u2 > Threshold")]);
+    m.root.blocks[1] = block("g", "Switch", &[("Criteria", "u2 < Threshold")]);
     assert!(compile(&m, &Options::default())
         .unwrap_err()
         .to_string()
-        .contains("datatype propagation"));
+        .contains("unsupported Switch Criteria"));
     m.root.blocks[1] = block("g", "RelationalOperator", &[("ZeroCross", "on")]);
     assert!(compile(&m, &Options::default())
         .unwrap_err()

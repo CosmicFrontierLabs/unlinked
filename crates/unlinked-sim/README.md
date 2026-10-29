@@ -11,10 +11,10 @@ Generator, Signal Generator (sine/square/sawtooth), Ramp, Chirp Signal,
 Repeating Sequence, Gain, Bias, Sum/Add,
 Product/division, Saturation, Integrator, UnitDelay, Abs, the stateless Math
 Operations blocks listed under "Math operations" below, scalar relational
-comparisons, logical operators, nonzero Switch routing, and single-input sinks. Logic and relational outputs use exact
-0/1 scalar values, including declared boolean outputs. Switch currently accepts
-only `Criteria=u2 ~= 0`; threshold criteria require signal datatype propagation
-to reproduce boolean-control behavior and therefore reject. Explicit zero-crossing
+comparisons, logical operators, Switch routing, the Signal Routing selection
+blocks (Selector, Multiport Switch and Index Vector, Manual Switch, Environment
+Controller; see below), and single-input sinks. Logic and relational outputs
+use exact 0/1 scalar values, including declared boolean outputs. Explicit zero-crossing
 detection on Switch/RelationalOperator rejects; no event root finding is implied. Ordinary virtual subsystems lower
 to identity boundary nodes with qualified block IDs. Raw block parameters and model
 workspace expressions use the pure `unlinked-matlab::eval_array_expr` evaluator. Workspace dependencies
@@ -230,6 +230,74 @@ inherited (`-1`) sample times reject until rate inference is supported. Periods
 must be positive integer multiples of the observation step; offsets and continuous
 sample times reject. Sampling is direct-feedthrough at hits, so an algebraic
 feedback loop still rejects. See the [block reference](https://www.mathworks.com/help/simulink/slref/zeroorderhold.html).
+
+### Signal routing selection
+
+Selection is resolved during dimensional lowering on the scalar wires, so no
+block here adds runtime state except the Multiport Switch's per-step index.
+Anything outside the subsets below rejects with a diagnostic naming the block
+and parameter; nothing is approximated.
+
+- **Switch** accepts all three criteria. `u2 ~= 0` passes the first input for a
+  nonzero control; `u2 >= Threshold` and `u2 > Threshold` compare the control
+  and the scalar `Threshold` (default 0; not evaluated for the nonzero
+  criterion) as doubles, so the boundary value passes for `>=` and not for `>`.
+  An imported block without `Criteria` uses `u2 >= Threshold`, the built-in
+  default Simulink writes to `BlockParameterDefaults` (the reference page's
+  `u2 > Threshold` default is the library block's, whose copies store the
+  criterion explicitly). Simulink gives boolean controls special treatment when a
+  threshold is "improper" (ignoring it with a warning); that depends on signal
+  datatype propagation and still follows #149, so a boolean control is compared
+  as its exact 0/1 value. [Reference](https://www.mathworks.com/help/simulink/slref/switch.html).
+- **Selector** supports `NumberOfDimensions` 1 and 2, both `IndexMode`s, and per
+  dimension `Select all`, `Index vector (dialog)` (any order, repeats allowed)
+  and `Starting index (dialog)` with an output size, read from the
+  comma-separated `IndexOptions`/`Indices`/`OutputSizes` that files store or
+  the programmatic `IndexOptionArray`/`IndexParamArray`/`OutputSizeArray` cell
+  arrays (a block carrying both spellings must agree, since merged file
+  defaults cannot be told from the block's own values), plus the legacy
+  `Elements`/`InputPortWidth`/`ElementSrc` spelling. A 1-D selection of one
+  element is a scalar; otherwise a 1-D vector. A 2-D selection requires a
+  matrix input (orientation-less vectors reject) and keeps two dimensions, so
+  one selected row is a 1-by-N matrix. Indices are bounds-checked against the
+  input at compile time; `InputPortWidth` other than -1 must match the input.
+  Every port-driven index option, more than two dimensions and an index port
+  reject. [Reference](https://www.mathworks.com/help/simulink/slref/selector.html).
+- **Multiport Switch** reads `Inputs`, `DataPortOrder` (`Zero-based contiguous`,
+  `One-based contiguous`, `Specify indices` with a `DataPortIndices` cell array;
+  the legacy `zeroidx` flag is honored when `DataPortOrder` is absent),
+  `DataPortForDefault` (`Last data port` or `Additional data port`) and
+  `DiagnosticForDefault`. The control must be scalar and is truncated toward
+  zero before matching, as the reference page states. An unmatched control
+  value stops the run when the diagnostic is `Error` (the documented default)
+  and otherwise selects the default port; `Warning` produces no output
+  difference from `None` and no warning is surfaced. Data ports broadcast
+  scalars against matching shapes. With one data port the block is an index
+  vector: the control selects an element of that scalar or 1-D vector by the
+  contiguous order (`Specify indices` and an additional default port reject
+  there). `AllowDiffInputSizes=on` rejects.
+  [Reference](https://www.mathworks.com/help/simulink/slref/multiportswitch.html).
+- **Index Vector** (`simulink/Signal Routing/Index Vector`, a linked `Reference`)
+  lowers onto the Multiport Switch with the library's one zero-based data port;
+  parameters the link overrides take precedence. Simulink saves copies of this
+  unmasked built-in as plain `MultiPortSwitch` blocks, which is also what the
+  palette creates; the link form is an import convenience.
+  [Reference](https://www.mathworks.com/help/simulink/slref/indexvector.html).
+- **Manual Switch** passes its first input for position 1 and its second for
+  position 0, with scalar expansion between the inputs. Files store the
+  position as `CurrentSetting` (the corpus instance and its file defaults use
+  nothing else); the programmatic `sw` is also read and wins when both are
+  present. The reference page gives no default, so an absent position rejects,
+  as does `varsize=on`.
+  [Reference](https://www.mathworks.com/help/simulink/slref/manualswitch.html).
+- **Environment Controller** (`simulink/Signal Routing/Environment Controller`,
+  a linked `Reference`) passes its Sim input (port 1); both inputs must have
+  identical dimensions. MathWorks has retired the block in favor of Variant
+  Source, which is not implemented.
+  [Reference](https://www.mathworks.com/help/simulink/slref/environmentcontroller.html).
+
+Variant Source/Sink, Vector Concatenate, Signal Conversion and other library
+links remain unsupported and reject.
 
 ### Time-based sources
 
