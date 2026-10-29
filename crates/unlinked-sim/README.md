@@ -153,27 +153,32 @@ removal/bypass semantics are implemented, including nested and routing blocks.
 
 Native `DeadZone` (`LowerValue`/`UpperValue`, defaults -0.5/0.5) outputs zero
 inside the zone and the input minus the exceeded edge outside it; `LowerValue`
-above `UpperValue` and `ZeroCross=on` reject. `Quantizer` outputs
-`q * round(u / q)` with MATLAB's half-away-from-zero rounding and requires a
-positive `QuantizationInterval` (default 0.5). Coulomb & Viscous Friction
+above `UpperValue` and an explicit `ZeroCross=on` reject; an omitted
+`ZeroCross` (Simulink's unwritten default, `on`) is accepted without locating
+the edge crossings, as for Switch. `Quantizer` outputs `q * round(u / q)` with
+MATLAB's half-away-from-zero rounding and requires a nonzero
+`QuantizationInterval` (default 0.5; the reference allows any real value, and a
+negative interval quantizes like its magnitude). Coulomb & Viscous Friction
 outputs `sign(u) .* (gain .* |u| + offset)` with `sign(0) = 0`; `gain` defaults
-to 1 and `offset` to the library's `[1 3 2 0]`. It is accepted both as the
-library link `simulink/Discontinuities/Coulomb & Viscous Friction` (how Simulink
-saves it) and as an Unlinked-internal native `CoulombFriction` block type. Zone
-edges, interval, gain and offset may be arrays: they expand a scalar input and
-must otherwise match the signal shape elementwise.
+to 1 and `offset` to the library's `[1 3 2 0]`. It is accepted only as the
+library link `simulink/Discontinuities/Coulomb & Viscous Friction`, the form
+Simulink saves; the palette creates that link too. Zone edges, interval, gain
+and offset may be arrays: they expand a scalar input and must otherwise match
+the signal shape elementwise.
 
 Library links (`Reference` blocks, matched by their `SourceBlock` path with
-line breaks collapsed) are lowered for Wrap To Zero, Saturation Dynamic and
-Dead Zone Dynamic; parameter values are read from the block, falling back to
+line breaks collapsed) are lowered for exactly the links the block catalog
+describes: Coulomb & Viscous Friction, Wrap To Zero, Saturation Dynamic and
+Dead Zone Dynamic. Parameter values are read from the block, falling back to
 mask values when the file keeps the mask. Wrap To Zero outputs zero when the
 input is strictly above `Threshold` (default 255) and the input otherwise; a
 vector threshold must match the input size. Saturation Dynamic takes `up`, `u`,
 `lo` on inputs 1 to 3 and outputs `max(lo, min(u, up))`, so a lower limit above
 the upper one wins as in the library's switch chain. Dead Zone Dynamic takes
 the same inputs and outputs `u - max(lo, min(u, up))`: zero inside the limits,
-`u - up` above and `u - lo` below; limits that cross are a runtime error naming
-the block rather than a guess. None of these blocks registers zero crossings.
+`u - up` above and `u - lo` below; since the library block is `u` minus a
+Saturation Dynamic of the same inputs, crossed limits give `u - lo` just as
+that block gives `lo`. None of these blocks registers zero crossings.
 Every other library link, and the stateful Backlash, Rate Limiter, Relay and
 Hit Crossing blocks, still reject. References: [Dead Zone](https://www.mathworks.com/help/simulink/slref/deadzone.html),
 [Quantizer](https://www.mathworks.com/help/simulink/slref/quantizer.html),

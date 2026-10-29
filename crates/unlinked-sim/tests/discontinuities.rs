@@ -275,28 +275,42 @@ fn quantizer_ramp_is_a_staircase_with_half_away_from_zero_rounding() {
     let t = simulate_model(&vector_interval, &instant()).unwrap();
     assert_eq!(t.signals["subject[1]"], vec![-1.0]);
     assert_eq!(t.signals["subject[2]"], vec![-1.25]);
-    for bad in ["0", "-0.5"] {
-        let m = model(
-            vec![
-                block("u", "Constant", &[("Value", "1")]),
-                block("subject", "Quantizer", &[("QuantizationInterval", bad)]),
-            ],
-            vec![line("u", "subject", 1)],
-        );
-        let message = error(&m, &instant());
-        assert!(
-            message.contains("subject") && message.contains("QuantizationInterval"),
-            "{message}"
-        );
-    }
+    // The reference allows any real interval; MATLAB's symmetric round makes
+    // a negative one quantize like its magnitude.
+    let negative_interval = model(
+        vec![
+            block("u", "Constant", &[("Value", "[-0.3 -0.2 -1.26 0.3 0.75]")]),
+            block("subject", "Quantizer", &[("QuantizationInterval", "-0.5")]),
+        ],
+        vec![line("u", "subject", 1)],
+    );
+    let t = simulate_model(&negative_interval, &instant()).unwrap();
+    assert_eq!(t.signals["subject[1]"], vec![-0.5]);
+    assert_eq!(t.signals["subject[2]"], vec![0.0]);
+    assert_eq!(t.signals["subject[3]"], vec![-1.5]);
+    assert_eq!(t.signals["subject[4]"], vec![0.5]);
+    assert_eq!(t.signals["subject[5]"], vec![1.0]);
+    // A zero interval divides by zero and is refused by name.
+    let zero = model(
+        vec![
+            block("u", "Constant", &[("Value", "1")]),
+            block("subject", "Quantizer", &[("QuantizationInterval", "0")]),
+        ],
+        vec![line("u", "subject", 1)],
+    );
+    let message = error(&zero, &instant());
+    assert!(
+        message.contains("subject") && message.contains("QuantizationInterval"),
+        "{message}"
+    );
 }
 
 #[test]
 fn coulomb_friction_is_odd_with_an_offset_jump_and_zero_at_rest() {
     let m = ramp_through(
-        block(
+        link(
             "subject",
-            "CoulombFriction",
+            "simulink/Discontinuities/Coulomb &\nViscous Friction",
             &[("gain", "2"), ("offset", "1")],
         ),
         vec![],
@@ -310,11 +324,17 @@ fn coulomb_friction_is_odd_with_an_offset_jump_and_zero_at_rest() {
             u.signum() * (2.0 * u.abs() + 1.0)
         }
     });
-    // The library default offset is the vector [1 3 2 0], applied elementwise.
+    // The library default offset is the vector [1 3 2 0], applied elementwise
+    // when the file stores no `offset` (the line break in the library name is
+    // how Simulink saves it; a collapsed one resolves to the same block).
     let vector = model(
         vec![
             block("u", "Constant", &[("Value", "[-1 0 2 -3]")]),
-            block("subject", "CoulombFriction", &[]),
+            link(
+                "subject",
+                "simulink/Discontinuities/Coulomb & Viscous Friction",
+                &[],
+            ),
         ],
         vec![line("u", "subject", 1)],
     );
@@ -323,8 +343,8 @@ fn coulomb_friction_is_odd_with_an_offset_jump_and_zero_at_rest() {
     assert_eq!(t.signals["subject[2]"], vec![0.0]);
     assert_eq!(t.signals["subject[3]"], vec![4.0]);
     assert_eq!(t.signals["subject[4]"], vec![-3.0]);
-    // Simulink saves the block as a library link; both forms agree.
-    let linked = model(
+    // Explicit vector parameters agree with the defaults.
+    let explicit = model(
         vec![
             block("u", "Constant", &[("Value", "[-1 0 2 -3]")]),
             link(
@@ -335,8 +355,8 @@ fn coulomb_friction_is_odd_with_an_offset_jump_and_zero_at_rest() {
         ],
         vec![line("u", "subject", 1)],
     );
-    let linked = simulate_model(&linked, &instant()).unwrap();
-    assert_eq!(linked.signals, t.signals);
+    let explicit = simulate_model(&explicit, &instant()).unwrap();
+    assert_eq!(explicit.signals, t.signals);
 }
 
 #[test]
@@ -459,7 +479,7 @@ fn saturation_dynamic_follows_time_varying_limits_in_up_u_lo_port_order() {
 }
 
 #[test]
-fn dead_zone_dynamic_follows_time_varying_limits_and_rejects_crossed_ones() {
+fn dead_zone_dynamic_follows_time_varying_limits_and_lets_crossed_lower_win() {
     // up = t, lo = -t, u = 1: y = 1 - min(1, t).
     let m = model(
         vec![
@@ -501,7 +521,9 @@ fn dead_zone_dynamic_follows_time_varying_limits_and_rejects_crossed_ones() {
     assert_eq!(t.signals["subject[1]"], vec![-1.0]);
     assert_eq!(t.signals["subject[2]"], vec![0.0]);
     assert_eq!(t.signals["subject[3]"], vec![-3.0]);
-    // Limits that cross after one second are an explicit runtime error.
+    // up = -t, lo = t, u = 0: the library block is u minus a Saturation
+    // Dynamic of the same inputs, whose switch chain lets `lo` win once the
+    // limits cross, so y = 0 - max(t, min(0, -t)) = -t throughout.
     let crossing = model(
         vec![
             block("clock", "Clock", &[]),
@@ -512,19 +534,32 @@ fn dead_zone_dynamic_follows_time_varying_limits_and_rejects_crossed_ones() {
                 "simulink/Discontinuities/Dead Zone\nDynamic",
                 &[],
             ),
+            link(
+                "saturation",
+                "simulink/Discontinuities/Saturation\nDynamic",
+                &[],
+            ),
         ],
         vec![
             line("clock", "subject", 3),
             line("u", "subject", 2),
             line("clock", "neg", 1),
             line("neg", "subject", 1),
+            line("clock", "saturation", 3),
+            line("u", "saturation", 2),
+            line("neg", "saturation", 1),
         ],
     );
-    let message = error(&crossing, &ramp_options());
-    assert!(
-        message.contains("subject") && message.contains("exceeds upper limit"),
-        "{message}"
-    );
+    let t = simulate_model(&crossing, &ramp_options()).unwrap();
+    for ((&time, &y), &sat) in t
+        .time
+        .iter()
+        .zip(&t.signals["subject"])
+        .zip(&t.signals["saturation"])
+    {
+        assert_eq!(y, -time, "at t={time}");
+        assert_eq!(y, 0.0 - sat, "at t={time}");
+    }
 }
 
 #[test]
@@ -547,6 +582,27 @@ fn unsupported_links_and_native_names_of_links_still_reject() {
         vec![line("u", "subject", 1)],
     );
     assert!(error(&unnamed, &instant()).contains("unsupported block type Reference"));
+    // The internal type keys of links are not file block types: Simulink
+    // only ever saves these blocks as links, so a native spelling rejects.
+    for native in [
+        "CoulombFriction",
+        "WrapToZero",
+        "SaturationDynamic",
+        "DeadZoneDynamic",
+    ] {
+        let m = model(
+            vec![
+                block("u", "Constant", &[("Value", "1")]),
+                block("subject", native, &[]),
+            ],
+            vec![line("u", "subject", 1)],
+        );
+        let message = error(&m, &instant());
+        assert!(
+            message.contains(&format!("unsupported block type {native}")),
+            "{message}"
+        );
+    }
     // Dynamic blocks need all three inputs wired.
     let partial = model(
         vec![

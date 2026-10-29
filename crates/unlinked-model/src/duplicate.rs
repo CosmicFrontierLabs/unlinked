@@ -1,4 +1,4 @@
-//! Conservative copy/paste of native palette blocks.
+//! Conservative copy/paste of palette blocks, native or library-linked.
 //!
 //! External connections are deliberately omitted. Internal connections are
 //! rerouted, not translated; names of internal signal trees are preserved.
@@ -26,7 +26,9 @@ pub(crate) fn copy_name(name: &str, mut claim: impl FnMut(&str) -> bool) -> Stri
 /// Build an atomic duplicate action without modifying `model`.
 ///
 /// Until the edit vocabulary can preserve their metadata, styled,
-/// masked, linked, hierarchical, interface and chart-owning blocks are refused.
+/// masked, hierarchical, interface and chart-owning blocks are refused, as are
+/// links to library blocks the catalog does not know; known links copy as
+/// links, keeping their `SourceBlock` and `SourceType`.
 /// Implicit catalog defaults are materialized to avoid substituting the palette's
 /// creation profile (notably Switch and ZeroOrderHold) for imported behavior.
 pub fn duplicate(
@@ -83,14 +85,12 @@ pub fn duplicate(
             .ok_or_else(|| EditError::NoBlock(id.clone()))?;
         let reject =
             |reason: &str| EditError::Invalid(format!("cannot copy {:?}: {reason}", block.name));
-        let descriptor = catalog::find(&block.block_type)
+        let descriptor = catalog::descriptor_for(block)
             .filter(|d| d.creatable)
-            .ok_or_else(|| reject("not a native palette block"))?;
+            .ok_or_else(|| reject("not a palette block or a known library link"))?;
         if block.mask.is_some()
-            || block.library_source.is_some()
             || block.subsystem.is_some()
             || block.interface.is_some()
-            || descriptor.source_block.is_some()
             || matches!(
                 block.block_type.as_str(),
                 "Inport"
@@ -103,7 +103,7 @@ pub fn duplicate(
             )
         {
             return Err(reject(
-                "masked, linked, subsystem or interface blocks are not supported",
+                "masked, subsystem or interface blocks are not supported",
             ));
         }
         let chart_path: Vec<_> = path
@@ -142,6 +142,11 @@ pub fn duplicate(
                 parameters.insert(parameter.name.into(), value.into());
             }
         }
+        // `AddBlock` labels a new link with its library type, as Simulink
+        // does; a link whose file omitted the label gets it on the copy.
+        if let Some(source_type) = descriptor.source_type() {
+            parameters.entry("SourceType".into()).or_insert(source_type);
+        }
         let PortResolution::Known(ports) = descriptor.resolve_ports(&parameters) else {
             return Err(reject("port counts must be resolved before copying"));
         };
@@ -159,7 +164,7 @@ pub fn duplicate(
         edits.push(Edit::AddBlock {
             system: system.clone(),
             id: new_id.clone(),
-            block_type: block.block_type.clone(),
+            block_type: descriptor.type_key.into(),
             name,
             position,
         });
@@ -418,7 +423,91 @@ mod tests {
         // External labels belong to the excluded external connection.
         assert!(copy(&source, &["1"]).is_ok());
         source.root.blocks[0].library_source = Some("library/source".into());
-        assert!(copy(&source, &["1"]).is_err());
+        assert!(copy(&source, &["1"])
+            .unwrap_err()
+            .to_string()
+            .contains("known library link"));
+    }
+    #[test]
+    fn known_library_links_copy_as_links() {
+        let mut source = model();
+        Edit::AddBlock {
+            system: vec![],
+            id: "4".into(),
+            block_type: "WrapToZero".into(),
+            name: "wrap".into(),
+            position: Rect {
+                left: 100.,
+                top: 20.,
+                right: 130.,
+                bottom: 50.,
+            },
+        }
+        .apply(&mut source)
+        .unwrap();
+        Edit::SetParameter {
+            system: vec![],
+            id: "4".into(),
+            name: "Threshold".into(),
+            value: "7".into(),
+        }
+        .apply(&mut source)
+        .unwrap();
+        Edit::Connect {
+            system: vec![],
+            src: endpoint("1", PortKind::Out),
+            dst: endpoint("4", PortKind::In),
+        }
+        .apply(&mut source)
+        .unwrap();
+        let edits = duplicate(
+            &source,
+            &vec![],
+            &["1".into(), "4".into()],
+            Point { x: 50., y: 0. },
+            5,
+        )
+        .unwrap();
+        apply_batch(&mut source, &edits).unwrap();
+        let original = source.root.block(&"4".into()).unwrap().clone();
+        let copied = source.root.block(&"6".into()).unwrap();
+        assert_eq!(copied.block_type, "Reference");
+        assert_eq!(copied.name, "wrap1");
+        assert_eq!(copied.library_source, original.library_source);
+        assert_eq!(copied.parameters, original.parameters);
+        assert_eq!(copied.parameters["SourceType"], "Wrap To Zero");
+        assert_eq!(copied.parameters["Threshold"], "7");
+        assert_eq!(copied.ports, original.ports);
+        assert!(source
+            .root
+            .connections()
+            .iter()
+            .any(|c| c.src.block.0 == "5" && c.dst.block.0 == "6"));
+        // An imported link saved without its `SourceType` label gains it.
+        let mut unlabeled = source.clone();
+        unlabeled.root.blocks[3].parameters.remove("SourceType");
+        let edits = duplicate(
+            &unlabeled,
+            &vec![],
+            &["4".into()],
+            Point { x: 50., y: 0. },
+            7,
+        )
+        .unwrap();
+        apply_batch(&mut unlabeled, &edits).unwrap();
+        assert_eq!(
+            unlabeled.root.block(&"7".into()).unwrap().parameters["SourceType"],
+            "Wrap To Zero"
+        );
+        // Masked links still refuse.
+        let mut masked = source.clone();
+        masked.root.blocks[3].mask = Some(Default::default());
+        assert!(
+            duplicate(&masked, &vec![], &["4".into()], Point { x: 0., y: 0. }, 7)
+                .unwrap_err()
+                .to_string()
+                .contains("masked")
+        );
     }
     #[test]
     fn copies_are_numbered_as_simulink_numbers_them() {

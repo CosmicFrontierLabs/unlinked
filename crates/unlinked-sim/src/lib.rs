@@ -102,7 +102,9 @@ pub enum Kind {
         lower: f64,
         upper: f64,
     },
-    /// `interval * round(u / interval)` with MATLAB's round-half-away-from-zero
+    /// `interval * round(u / interval)` with MATLAB's round-half-away-from-zero;
+    /// the reference allows any real interval, and a negative one quantizes
+    /// like its magnitude since `round` is odd
     /// (<https://www.mathworks.com/help/simulink/slref/quantizer.html>).
     Quantizer {
         interval: f64,
@@ -124,8 +126,9 @@ pub enum Kind {
     /// (<https://www.mathworks.com/help/simulink/slref/saturationdynamic.html>).
     SaturationDynamic,
     /// Inputs `up`, `u`, `lo` in port order: `u - max(lo, min(u, up))`, which
-    /// is the documented zero/`u - up`/`u - lo` regions for `lo <= up`; limits
-    /// that cross are a runtime error rather than a guess
+    /// is the documented zero/`u - up`/`u - lo` regions for `lo <= up`. The
+    /// library block is `u` minus a Saturation Dynamic of the same inputs, so
+    /// crossed limits resolve to `u - lo` exactly as that block resolves to `lo`
     /// (<https://www.mathworks.com/help/simulink/slref/deadzonedynamic.html>).
     DeadZoneDynamic,
     Integrator {
@@ -303,10 +306,10 @@ impl<'a> Compiled<'a> {
                 }
                 Kind::Quantizer { interval } => {
                     // A NaN interval falls through to the non-finite check.
-                    if *interval <= 0.0 {
+                    if *interval == 0.0 {
                         return Err(block_error(
                             &node.id,
-                            "QuantizationInterval must be positive",
+                            "QuantizationInterval must be nonzero",
                         ));
                     }
                     vec![*interval]
@@ -536,16 +539,7 @@ impl<'a> Compiled<'a> {
                     }
                 }
                 Kind::SaturationDynamic => x(1).min(x(0)).max(x(2)),
-                Kind::DeadZoneDynamic => {
-                    let (up, u, lo) = (x(0), x(1), x(2));
-                    if lo > up {
-                        return Err(block_error(
-                            &self.graph.nodes[i].id,
-                            format!("Dead Zone Dynamic lower limit {lo} exceeds upper limit {up} at time {t}"),
-                        ));
-                    }
-                    u - u.min(up).max(lo)
-                }
+                Kind::DeadZoneDynamic => x(1) - x(1).min(x(0)).max(x(2)),
                 Kind::Switch => {
                     if x(1) != 0.0 {
                         x(0)

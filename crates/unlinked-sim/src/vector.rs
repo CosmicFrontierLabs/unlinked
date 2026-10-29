@@ -243,10 +243,6 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             | "Saturation"
             | "DeadZone"
             | "Quantizer"
-            | "CoulombFriction"
-            | "WrapToZero"
-            | "SaturationDynamic"
-            | "DeadZoneDynamic"
             | "TransferFcn"
             | "DiscreteTransferFcn"
             | "StateSpace"
@@ -271,19 +267,14 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
     )
 }
 
-/// The internal block type implementing a Simulink library link, by its
-/// `SourceBlock` path with whitespace (including the line breaks Simulink
-/// keeps in library block names) collapsed. Only the stateless
-/// Discontinuities links are lowered; every other link still rejects.
+/// The internal block type implementing a Simulink library link: the
+/// catalog's type key for its `SourceBlock` path (compared with line breaks
+/// collapsed, as `catalog::find_library` does). The catalog's library
+/// descriptors are exactly the links the simulator lowers, so a palette tile
+/// and its simulation support are added together; every other link rejects.
+/// These type keys are internal: a file's `BlockType` is never one of them.
 pub(crate) fn library_block_type(source: &str) -> Option<&'static str> {
-    let path = source.split_whitespace().collect::<Vec<_>>().join(" ");
-    match path.as_str() {
-        "simulink/Discontinuities/Wrap To Zero" => Some("WrapToZero"),
-        "simulink/Discontinuities/Saturation Dynamic" => Some("SaturationDynamic"),
-        "simulink/Discontinuities/Dead Zone Dynamic" => Some("DeadZoneDynamic"),
-        "simulink/Discontinuities/Coulomb & Viscous Friction" => Some("CoulombFriction"),
-        _ => None,
-    }
+    catalog::find_library(source).map(|d| d.type_key)
 }
 /// Whether a block is a `Reference` to a library block the simulator lowers.
 pub(crate) fn supported_library(block: &Block) -> bool {
@@ -293,16 +284,17 @@ pub(crate) fn supported_library(block: &Block) -> bool {
             .as_deref()
             .is_some_and(|s| library_block_type(s).is_some())
 }
-/// Turn a supported library link into its native internal block. Mask
-/// parameter values (when the file carries the mask) become ordinary
-/// parameters unless the block already stores a value of that name; the
-/// link path and mask are then dropped so the block compiles like any other.
-fn resolve_library(block: &mut Block) {
+/// Turn a supported library link into its internal block type, returning
+/// whether it was one. Mask parameter values (when the file carries the mask)
+/// become ordinary parameters unless the block already stores a value of that
+/// name; the link path and mask are then dropped so the block compiles like
+/// any other.
+fn resolve_library(block: &mut Block) -> bool {
     if !supported_library(block) {
-        return;
+        return false;
     }
     let Some(kind) = block.library_source.as_deref().and_then(library_block_type) else {
-        return;
+        return false;
     };
     if let Some(mask) = block.mask.take() {
         for p in mask.parameters {
@@ -311,6 +303,7 @@ fn resolve_library(block: &mut Block) {
     }
     block.block_type = kind.into();
     block.library_source = None;
+    true
 }
 
 fn describe(
@@ -318,14 +311,14 @@ fn describe(
     workspace: &Workspace,
     budget: &mut ArrayBudget,
 ) -> Result<Spec, Error> {
-    resolve_library(block);
+    let linked = resolve_library(block);
     if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
         return Err(block_error(
             &block.id.0,
             "subsystems, masks and library links require explicit lowering before simulation",
         ));
     }
-    if !supported_native_type(&block.block_type) {
+    if !linked && !supported_native_type(&block.block_type) {
         return Err(block_error(
             &block.id.0,
             format!("unsupported block type {}", block.block_type),

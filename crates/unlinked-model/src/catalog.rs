@@ -1650,7 +1650,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
             false,
             dialog(
                 "Quantization",
-                "Positive step of the output staircase; the output is the input rounded to the nearest multiple of it.",
+                "Nonzero step of the output staircase; the output is the input rounded to the nearest multiple of it (a negative step quantizes like its magnitude).",
                 None,
             ),
         )],
@@ -1662,6 +1662,11 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Coulomb & Viscous Friction",
         "simulink/Discontinuities/Coulomb &\nViscous Friction",
         &[
+            // The library block ships with `offset = [1 3 2 0]`, which turns a
+            // scalar input into four outputs; that stays the implicit default
+            // so imported blocks behave as in Simulink, but a palette block is
+            // deliberately created with a scalar offset so that it keeps the
+            // width of whatever signal it is dropped onto. The dialog says so.
             ParameterDescriptor {
                 implicit_default: Some("[1 3 2 0]"),
                 ..param(
@@ -1672,7 +1677,7 @@ pub static BLOCKS: &[BlockDescriptor] = &[
                     false,
                     dialog(
                         "Friction",
-                        "Offset added to the output magnitude; a scalar or a vector matching the input width. The library default is [1 3 2 0].",
+                        "Offset added to the output magnitude; a scalar or a vector matching the input width. The Simulink library default is [1 3 2 0], which widens a scalar input to four outputs; palette blocks start scalar.",
                         None,
                     ),
                 )

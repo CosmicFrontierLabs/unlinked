@@ -43,6 +43,9 @@ pub(crate) fn literal_requirements(
             ("SineType", &["Time based"]),
             ("TimeSource", &["Use simulation time"]),
         ],
+        // An omitted `ZeroCross` (Simulink's default, `on`, is not written to
+        // files) is accepted without locating crossings, as for Switch; only
+        // an explicit `on` is refused until zero-crossing support lands.
         "Switch" | "RelationalOperator" | "DeadZone" => &[("ZeroCross", &["off"])],
         _ => &[],
     }
@@ -442,8 +445,10 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             "Quantizer" => Kind::Quantizer {
                 interval: p("QuantizationInterval", "0.5")?,
             },
-            // Scalarization has already expanded the library's vector default
-            // `[1 3 2 0]` for `offset` into one literal per element.
+            // The internal type of the Coulomb & Viscous Friction library
+            // link, assigned during scalarization (which has also expanded
+            // the library's vector default `[1 3 2 0]` for `offset` into one
+            // literal per element). A file's `BlockType` is never this.
             "CoulombFriction" => Kind::CoulombFriction {
                 gain: p("gain", "1")?,
                 offset: p("offset", "[1 3 2 0]")?,
