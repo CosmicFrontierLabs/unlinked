@@ -4872,12 +4872,17 @@ fn hover_card(props: &HoverCardProps) -> Html {
     else {
         return html! {};
     };
-    let descriptor = catalog::find(&b.block_type).filter(|_| b.mask.is_none());
+    let descriptor = catalog::descriptor_for(b);
     let parameters: Vec<(String, String)> = match descriptor {
         Some(d) => d
             .parameters
             .iter()
-            .filter_map(|p| Some((p.label.to_string(), b.param(p.name)?.to_string())))
+            .filter_map(|p| {
+                Some((
+                    p.label.to_string(),
+                    b.param(p.key_in(&b.parameters))?.to_string(),
+                ))
+            })
             .take(SHOWN)
             .collect(),
         None => b
@@ -5435,15 +5440,22 @@ fn inspector(props: &InspectorProps) -> Html {
         });
     let kind = b.stateflow_type().unwrap_or_else(|| b.display_type());
     let script = props.chart.as_ref().and_then(|c| c.script.clone());
-    // Native catalog blocks get their dialog; any other stored parameters,
-    // and every parameter of other blocks, are listed raw.
+    // Native catalog blocks, and library blocks the catalog knows, get their
+    // dialog; any other stored parameters, and every parameter of other
+    // blocks, are listed raw.
     let descriptor = catalog::descriptor_for(b);
     let others: Vec<(&String, &String)> = b
         .parameters
         .iter()
         .filter(|(k, _)| !HIDDEN_PARAMETERS.contains(&k.as_str()))
         .filter(|(k, _)| {
-            descriptor.is_none_or(|d| d.parameters.iter().all(|p| p.name != k.as_str()))
+            // A parameter the dialog shows under its alias (a Ramp's
+            // `InitialOutput`) is not an extra.
+            descriptor.is_none_or(|d| {
+                d.parameters
+                    .iter()
+                    .all(|p| p.key_in(&b.parameters) != k.as_str())
+            })
         })
         .collect();
     let shown_fields: Vec<&str> = descriptor

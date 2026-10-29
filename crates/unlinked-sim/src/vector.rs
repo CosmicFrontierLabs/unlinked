@@ -67,7 +67,8 @@ impl Shape {
 #[derive(Clone)]
 enum Operation {
     Source,
-    RandomSource,
+    /// Zero-input source whose waveform parameters expand elementwise.
+    ExpandedSource,
     Elementwise,
     State,
     Gain {
@@ -100,6 +101,19 @@ enum Operation {
         port: usize,
         expand: bool,
     },
+    /// Trigonometric `sincos`: one input, separate sine and cosine outputs.
+    SinCos,
+    /// Math `transpose`/`hermitian`: a 2-D shape swap, elementwise identity.
+    Transpose,
+    /// Two vector inputs reduced to one scalar.
+    DotProduct,
+}
+fn output_ports(operation: &Operation) -> usize {
+    match operation {
+        Operation::Demux { ports, .. } => *ports,
+        Operation::SinCos => 2,
+        _ => 1,
+    }
 }
 struct Spec {
     operation: Operation,
@@ -245,6 +259,8 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             | "DigitalClock"
             | "Step"
             | "Sin"
+            | "DiscretePulseGenerator"
+            | "SignalGenerator"
             | "RandomNumber"
             | "UniformRandomNumber"
             | "Gain"
@@ -266,6 +282,13 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             | "Abs"
             | "Trigonometry"
             | "Math"
+            | "Sqrt"
+            | "Signum"
+            | "Rounding"
+            | "UnaryMinus"
+            | "Polyval"
+            | "DotProduct"
+            | "MinMax"
             | "Mux"
             | "Demux"
             | "Scope"
@@ -744,6 +767,12 @@ fn describe(
     workspace: &Workspace,
     budget: &mut ArrayBudget,
 ) -> Result<Spec, Error> {
+    // Registered library links become their lowering types (`Ramp`,
+    // `ChirpSignal`, `RepeatingSequence`), which are not native block types:
+    // Simulink never writes them, so a bare block of such a type is unknown.
+    let library = super::library::resolve(block);
+    // Index Vector and Environment Controller links rewrite into their
+    // native equivalents (`lower_library_block`).
     lower_library_block(block);
     let id = &block.id.0;
     if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
@@ -752,11 +781,18 @@ fn describe(
             "subsystems, masks and library links require explicit lowering before simulation",
         ));
     }
-    if !supported_native_type(&block.block_type) {
+    if !library && !supported_native_type(&block.block_type) {
         return Err(block_error(
             id,
             format!("unsupported block type {}", block.block_type),
         ));
+    }
+    // The Ramp mask's initial output is `X0` in files written by most
+    // releases; the current reference documents it as `InitialOutput`.
+    if block.block_type == "Ramp" && block.param("X0").is_none() {
+        if let Some(initial) = block.param("InitialOutput").map(str::to_owned) {
+            block.parameters.insert("X0".into(), initial);
+        }
     }
     if [
         block.ports.enable,
@@ -791,8 +827,15 @@ fn describe(
     let mut values = BTreeMap::new();
     let (operation, inputs, vector_parameter) = match block.block_type.as_str() {
         "Constant" => (Operation::Source, 0, Some(("Value", "1"))),
-        "RandomNumber" | "UniformRandomNumber" => (Operation::RandomSource, 0, None),
-        "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" => (Operation::Source, 0, None),
+        "RandomNumber"
+        | "UniformRandomNumber"
+        | "DiscretePulseGenerator"
+        | "SignalGenerator"
+        | "Ramp"
+        | "ChirpSignal" => (Operation::ExpandedSource, 0, None),
+        "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" | "RepeatingSequence" => {
+            (Operation::Source, 0, None)
+        }
         "Gain" => {
             let matrix = match block
                 .param("Multiplication")
@@ -997,16 +1040,55 @@ fn describe(
             (Operation::MatlabFunction, block.ports.inputs as usize, None)
         }
         "TransferFcn" | "DiscreteTransferFcn" | "StateSpace" => (Operation::Transfer, 1, None),
-        "Bias" | "Saturate" | "Saturation" | "Abs" | "Trigonometry" | "Math" | "Scope"
-        | "Display" | "Outport" | "Terminator" | "ToWorkspace" | "ZeroOrderHold" => {
-            (Operation::Elementwise, 1, None)
+        "Trigonometry" => {
+            let operator = block.param("Operator").unwrap_or("sin");
+            if operator == "sincos" {
+                (Operation::SinCos, 1, None)
+            } else {
+                let inputs = if super::import::binary_operator("Trigonometry", operator) {
+                    2
+                } else {
+                    1
+                };
+                (Operation::Elementwise, inputs, None)
+            }
         }
+        "Math" => {
+            let operator = block.param("Operator").unwrap_or("exp");
+            if matches!(operator, "transpose" | "hermitian") {
+                (Operation::Transpose, 1, None)
+            } else {
+                let inputs = if super::import::binary_operator("Math", operator) {
+                    2
+                } else {
+                    1
+                };
+                (Operation::Elementwise, inputs, None)
+            }
+        }
+        "DotProduct" => (Operation::DotProduct, 2, None),
+        "MinMax" => {
+            let n = count(block, "Inputs", "1", workspace, budget)?;
+            block.parameters.insert("Inputs".into(), n.to_string());
+            (
+                if n == 1 {
+                    Operation::Reduce
+                } else {
+                    Operation::Elementwise
+                },
+                n,
+                None,
+            )
+        }
+        "Bias" | "Saturate" | "Saturation" | "Abs" | "Sqrt" | "Signum" | "Rounding"
+        | "UnaryMinus" | "Polyval" | "Scope" | "Display" | "Outport" | "Terminator"
+        | "ToWorkspace" | "ZeroOrderHold" => (Operation::Elementwise, 1, None),
         other => return Err(block_error(id, format!("unsupported block type {other}"))),
     };
-    if !matches!(operation, Operation::Demux { .. }) && block.ports.outputs > 1 {
+    if output_ports(&operation) == 1 && block.ports.outputs > 1 {
         return Err(block_error(
             id,
-            "multiple output ports are supported only for Demux",
+            "multiple output ports are supported only for Demux and sincos",
         ));
     }
     if let Some((key, default)) = vector_parameter {
@@ -1021,11 +1103,20 @@ fn describe(
             )?,
         );
     }
-    if matches!(operation, Operation::RandomSource) {
-        let parameters: &[(&str, &str)] = if block.block_type == "RandomNumber" {
-            &[("Mean", "0"), ("Variance", "1"), ("Seed", "0")]
-        } else {
-            &[("Minimum", "-1"), ("Maximum", "1"), ("Seed", "0")]
+    if matches!(operation, Operation::ExpandedSource) {
+        let parameters: &[(&str, &str)] = match block.block_type.as_str() {
+            "RandomNumber" => &[("Mean", "0"), ("Variance", "1"), ("Seed", "0")],
+            "UniformRandomNumber" => &[("Minimum", "-1"), ("Maximum", "1"), ("Seed", "0")],
+            "DiscretePulseGenerator" => &[
+                ("Amplitude", "1"),
+                ("Period", "10"),
+                ("PulseWidth", "5"),
+                ("PhaseDelay", "0"),
+            ],
+            "SignalGenerator" => &[("Amplitude", "1"), ("Frequency", "1")],
+            "Ramp" => &[("slope", "1"), ("start", "0"), ("X0", "0")],
+            "ChirpSignal" => &[("f1", "0.1"), ("T", "100"), ("f2", "1")],
+            _ => unreachable!(),
         };
         for &(key, default) in parameters {
             values.insert(
@@ -1088,6 +1179,8 @@ fn describe(
             ("D", "1"),
             ("InitialCondition", "0"),
         ],
+        "RepeatingSequence" => &[("rep_seq_t", "[0 2]"), ("rep_seq_y", "[0 2]")],
+        "Polyval" => &[("coefs", unlinked_model::catalog::POLYVAL_DEFAULT_COEFS)],
         _ => &[],
     };
     for &(key, default) in coefficients {
@@ -1180,7 +1273,7 @@ fn infer(
                 .map(|v| Shape::from_value(v, block.param("VectorParams1D") != Some("off")))
                 .unwrap_or(Shape::SCALAR),
         ),
-        Operation::RandomSource => broadcast(
+        Operation::ExpandedSource => broadcast(
             id,
             spec.values.values().map(|value| {
                 Some(Shape::from_value(
@@ -1280,6 +1373,57 @@ fn infer(
             }
         }
         Operation::Transfer | Operation::MatlabFunction => Some(Shape::SCALAR),
+        Operation::SinCos => return Ok(vec![inputs[0]; 2]),
+        Operation::Transpose => match inputs[0] {
+            // A 1-D vector has no orientation to swap, and the Math Function
+            // reference does not say whether the result stays 1-D. Require an
+            // oriented 1xN/Nx1 matrix rather than guess.
+            Some(input) if input.vector => {
+                return Err(block_error(
+                    id,
+                    format!(
+                        "Operator={} of an unoriented 1-D vector is ambiguous; use a 1xN or Nx1 matrix signal",
+                        block.param("Operator").unwrap_or("transpose")
+                    ),
+                ))
+            }
+            Some(input) => Some(Shape {
+                rows: input.cols,
+                cols: input.rows,
+                vector: false,
+            }),
+            None => None,
+        },
+        Operation::DotProduct => {
+            // https://www.mathworks.com/help/simulink/slref/dotproduct.html:
+            // inputs are scalars, vectors or column vectors of equal length;
+            // y = sum(u1 .* u2) is always scalar. Expanding a scalar against
+            // a vector is an Unlinked extension the reference does not
+            // describe.
+            let mut length = None;
+            for input in inputs.iter().flatten() {
+                if !input.vector && input.len() > 1 && input.cols != 1 {
+                    return Err(block_error(
+                        id,
+                        "DotProduct inputs must be scalars, vectors or column vectors",
+                    ));
+                }
+                if input.len() > 1 {
+                    if length.is_some_and(|n| n != input.len()) {
+                        return Err(block_error(
+                            id,
+                            "DotProduct inputs must have equal lengths",
+                        ));
+                    }
+                    length = Some(input.len());
+                }
+            }
+            if inputs.iter().any(Option::is_none) {
+                None
+            } else {
+                Some(Shape::SCALAR)
+            }
+        }
         Operation::Mux { .. } => {
             if inputs.iter().any(Option::is_none) {
                 None
@@ -1502,16 +1646,25 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
         ));
     }
     let mut specs = Vec::new();
-    let (mut input_ports, mut output_ports, mut parameter_elements) = (0usize, 0usize, 0usize);
+    let (mut input_ports, mut output_total, mut parameter_elements) = (0usize, 0usize, 0usize);
     for block in &mut blocks {
+        // Files omit parameters at their `BlockParameterDefaults` value, so a
+        // Polynomial block without `coefs` takes the file's per-type default
+        // before the library default.
+        if block.block_type == "Polyval" && block.param("coefs").is_none() {
+            if let Some(coefs) = model
+                .type_defaults
+                .get("Polyval")
+                .and_then(|defaults| defaults.get("coefs"))
+            {
+                block.parameters.insert("coefs".into(), coefs.clone());
+            }
+        }
         let spec = describe(block, &workspace, &mut budget)?;
         input_ports += spec.inputs;
-        output_ports += match spec.operation {
-            Operation::Demux { ports, .. } => ports,
-            _ => 1,
-        };
+        output_total += output_ports(&spec.operation);
         parameter_elements += spec.values.values().map(|v| v.data.len()).sum::<usize>();
-        if input_ports > MAX_WIRES || output_ports > MAX_NODES || parameter_elements > 1_000_000 {
+        if input_ports > MAX_WIRES || output_total > MAX_NODES || parameter_elements > 1_000_000 {
             return Err(Error::Options(
                 "scalarization port/parameter budget exceeded".into(),
             ));
@@ -1541,10 +1694,7 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
         let target = *ids
             .get(&connection.dst.block)
             .ok_or_else(|| Error::Connection("unknown target block".into()))?;
-        let outputs = match specs[source].operation {
-            Operation::Demux { ports, .. } => ports,
-            _ => 1,
-        };
+        let outputs = output_ports(&specs[source].operation);
         let port = connection.src.port.index as usize - 1;
         if port >= outputs {
             return Err(Error::Connection(
@@ -1575,15 +1725,7 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
         .collect::<Result<_, _>>()?;
     let mut shapes: Vec<Vec<Option<Shape>>> = specs
         .iter()
-        .map(|s| {
-            vec![
-                None;
-                match s.operation {
-                    Operation::Demux { ports, .. } => ports,
-                    _ => 1,
-                }
-            ]
-        })
+        .map(|s| vec![None; output_ports(&s.operation)])
         .collect();
     // Revisit consumers only when their input dimensions change. Delay errors
     // from provisional dimensions until all feedback constraints have settled.
@@ -1640,6 +1782,14 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
         let mut copies = shapes[i].iter().map(|s| s.len()).sum::<usize>();
         if matches!(specs[i].operation, Operation::Gain { matrix: true }) {
             copies = copies.saturating_mul(specs[i].values["Gain"].cols.saturating_add(1));
+        }
+        if matches!(specs[i].operation, Operation::DotProduct) {
+            let length = inputs[i]
+                .iter()
+                .map(|&(b, p)| shapes[b][p].len())
+                .max()
+                .unwrap_or(1);
+            copies = copies.saturating_mul(length.saturating_add(1));
         }
         expanded_text = expanded_text.saturating_add(bytes.saturating_mul(copies));
         if expanded_text > 64 * 1024 * 1024 {
@@ -1790,13 +1940,13 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
                         "single-input reduction currently requires a one-dimensional vector",
                     ));
                 }
-                if block
+                if let Some(mode) = block
                     .param("CollapseMode")
-                    .is_some_and(|v| v != "All dimensions")
+                    .filter(|v| *v != "All dimensions")
                 {
                     return Err(block_error(
                         &block.id.0,
-                        "only all-dimensions vector reduction is supported",
+                        format!("unsupported CollapseMode={mode}; only all-dimensions vector reduction is supported"),
                     ));
                 }
                 let n = input_shapes[0].len();
@@ -1814,7 +1964,7 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
                     } else {
                         "*".repeat(n)
                     }
-                } else if block.block_type == "Logic" {
+                } else if matches!(block.block_type.as_str(), "Logic" | "MinMax") {
                     n.to_string()
                 } else if operator == "-" {
                     "-".repeat(n)
@@ -1893,6 +2043,48 @@ pub(super) fn scalarize(model: &Model) -> Result<Model, Error> {
                 for (j, id) in lowered[i][0].iter().enumerate() {
                     builder.block(identity(block), id.clone(), name(0, j), 1)?;
                     builder.wire(source(*port, j), id, 0)?;
+                }
+            }
+            Operation::SinCos => {
+                for (p, operator) in ["sin", "cos"].into_iter().enumerate() {
+                    for (j, id) in lowered[i][p].iter().enumerate() {
+                        let mut scalar = block.clone();
+                        scalar.parameters.insert("Operator".into(), operator.into());
+                        builder.block(scalar, id.clone(), name(p, j), 1)?;
+                        builder.wire(source(0, j), id, 0)?;
+                    }
+                }
+            }
+            Operation::Transpose => {
+                let input = input_shapes[0];
+                for (j, id) in lowered[i][0].iter().enumerate() {
+                    // Output (r, c) is input (c, r); both are column-major.
+                    let (row, col) = (j % shape.rows, j / shape.rows);
+                    builder.block(block.clone(), id.clone(), name(0, j), 1)?;
+                    builder.wire(&input_ids[0][col + row * input.rows], id, 0)?;
+                }
+            }
+            Operation::DotProduct if input_shapes.iter().any(|input| input.len() > 1) => {
+                let n = input_shapes.iter().map(|input| input.len()).max().unwrap();
+                let id = &lowered[i][0][0];
+                let mut sum = block.clone();
+                sum.block_type = "Sum".into();
+                sum.parameters.insert("Inputs".into(), "+".repeat(n));
+                builder.block(sum, id.clone(), name(0, 0), n)?;
+                for k in 0..n {
+                    let term = builder.id(format!("{}:$dot:{}", id.0, k + 1), false);
+                    let mut product = block.clone();
+                    product.block_type = "Product".into();
+                    product.parameters.insert("Inputs".into(), "**".into());
+                    builder.block(
+                        product,
+                        term.clone(),
+                        format!("{}/term{}", name(0, 0), k + 1),
+                        2,
+                    )?;
+                    builder.wire(source(0, k), &term, 0)?;
+                    builder.wire(source(1, k), &term, 1)?;
+                    builder.wire(&term, id, k)?;
                 }
             }
             _ => {

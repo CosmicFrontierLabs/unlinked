@@ -714,7 +714,7 @@ impl Edit {
                     }
                 }
                 let block = &mut sys.blocks[index];
-                if let Some(descriptor) = native_descriptor(block) {
+                if let Some(descriptor) = dialog_descriptor(block) {
                     let edit = descriptor
                         .check_edit(&block.parameters, name, value)
                         .map_err(EditError::Invalid)?;
@@ -1036,9 +1036,11 @@ fn check_name(name: &str) -> Result<(), EditError> {
     Ok(())
 }
 
-/// The catalog entry for a plain native block, whose ports follow from its
-/// parameters. Masked, linked and subsystem blocks declare their own.
-fn native_descriptor(block: &Block) -> Option<&'static catalog::BlockDescriptor> {
+/// The catalog entry whose dialog describes a block, so its parameter checks
+/// and port rules apply: a native block's type, or the library source of a
+/// registered `Reference` block (Ramp, Chirp Signal, ...). Masked blocks,
+/// subsystems and unknown links declare their own ports and take no checks.
+fn dialog_descriptor(block: &Block) -> Option<&'static catalog::BlockDescriptor> {
     catalog::descriptor_for(block)
 }
 
@@ -1075,11 +1077,11 @@ fn add_block(
             "the ports of a new {block_type} cannot be resolved"
         )));
     };
-    // Library blocks are written as linked `Reference` blocks naming their
-    // source; presets such as Index Vector create their native block type.
+    // Library blocks are `Reference` blocks linked to their source; their
+    // creation parameters are the library mask's values.
     sys.blocks.push(Block {
         id: id.clone(),
-        block_type: descriptor.mdl_block_type.into(),
+        block_type: descriptor.slx_block_type.into(),
         name: name.into(),
         position,
         orientation: Orientation::Right,
@@ -1120,7 +1122,7 @@ fn check_port(sys: &System, ep: &Endpoint, source: bool) -> Result<(), EditError
     };
     // A native block whose count depends on an expression may have stale
     // declared ports; rewiring waits until the count is a literal.
-    let ports = match native_descriptor(block).map(|d| d.resolve_ports(&block.parameters)) {
+    let ports = match dialog_descriptor(block).map(|d| d.resolve_ports(&block.parameters)) {
         Some(PortResolution::Known(ports)) => ports,
         Some(
             PortResolution::Unresolved { parameter } | PortResolution::Invalid { parameter, .. },
@@ -1246,6 +1248,70 @@ mod tests {
             type_defaults: Default::default(),
             charts: Vec::new(),
         }
+    }
+
+    /// Library blocks from the palette are `Reference` blocks; their dialog
+    /// edits take the catalog checks like a native block's, under whichever
+    /// key the block stores the parameter.
+    #[test]
+    fn library_block_dialog_edits_are_checked_like_native_ones() {
+        let add = |id: &str, block_type: &str| Edit::AddBlock {
+            system: vec![],
+            id: id.into(),
+            block_type: block_type.into(),
+            name: block_type.into(),
+            position: Rect::new(0.0, 0.0, 30.0, 30.0),
+        };
+        let set = |id: &str, name: &str, value: &str| Edit::SetParameter {
+            system: vec![],
+            id: id.into(),
+            name: name.into(),
+            value: value.into(),
+        };
+        let invalid = |m: &Model, edit: Edit| {
+            matches!(
+                apply_batch(&mut m.clone(), &[edit]),
+                Err(BatchError {
+                    error: EditError::Invalid(_),
+                    ..
+                })
+            )
+        };
+        let mut m = model();
+        apply_batch(&mut m, &[add("4", "Ramp"), add("5", "ChirpSignal")]).unwrap();
+        let ramp = &m.root.blocks[3];
+        assert_eq!(ramp.block_type, "Reference");
+        assert_eq!(
+            ramp.library_source.as_deref(),
+            Some("simulink/Sources/Ramp")
+        );
+        assert!(invalid(&m, set("4", "slope", "")));
+        assert!(invalid(&m, set("5", "f1", "")));
+        apply_batch(&mut m, &[set("4", "slope", "2"), set("5", "f1", "0.5")]).unwrap();
+        // A Ramp written as the current reference documents it stores the
+        // initial output as `InitialOutput`; the dialog edits that key.
+        let ramp = &mut m.root.blocks[3];
+        ramp.parameters.remove("X0");
+        ramp.parameters.insert("InitialOutput".into(), "1".into());
+        assert_eq!(
+            catalog::find("Ramp")
+                .unwrap()
+                .parameters
+                .iter()
+                .find(|p| p.name == "X0")
+                .unwrap()
+                .key_in(&ramp.parameters),
+            "InitialOutput"
+        );
+        assert!(invalid(&m, set("4", "InitialOutput", "")));
+        apply_batch(&mut m, &[set("4", "InitialOutput", "3")]).unwrap();
+        assert_eq!(m.root.blocks[3].param("InitialOutput"), Some("3"));
+        assert_eq!(m.root.blocks[3].param("X0"), None);
+        // An unregistered link has no dialog and keeps raw edits.
+        let mut other = m.clone();
+        other.root.blocks[3].library_source =
+            Some("simulink/Sources/Band-Limited White Noise".into());
+        apply_batch(&mut other, &[set("4", "slope", "")]).unwrap();
     }
 
     #[test]

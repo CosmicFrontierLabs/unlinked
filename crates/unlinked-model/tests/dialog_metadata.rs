@@ -10,7 +10,7 @@ fn parameter<'a>(block: &'a BlockDescriptor, name: &str) -> &'a ParameterDescrip
 
 #[test]
 fn every_catalog_field_has_consistent_dialog_metadata() {
-    assert_eq!(BLOCKS.len(), 31);
+    assert_eq!(BLOCKS.len(), 44);
     for block in BLOCKS {
         for parameter in block.parameters {
             let dialog = &parameter.dialog;
