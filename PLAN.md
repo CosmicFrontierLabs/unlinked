@@ -167,7 +167,9 @@ CI. Per-model import, render and simulation coverage is tracked in
   scripts retain their recorded version; missing scripts prevent reuse.
 - Solvers: Euler, RK4, adaptive Dormand–Prince 5(4).
 - Blocks: sources (Constant, Clock, Step, Sine), Gain, Bias, Sum, Product,
-  Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
+  Saturation, Dead Zone, Quantizer, Coulomb & Viscous Friction, Wrap To Zero,
+  Saturation Dynamic, Dead Zone Dynamic (the last four as library links),
+  Integrator, UnitDelay, Abs, math/trig, relational and logical
   operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
   matrix signals lowered to scalars. The authoritative list and its limits are

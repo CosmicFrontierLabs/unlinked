@@ -13,6 +13,8 @@ const MAX_NODES: usize = 100_000;
 const MAX_WIRES: usize = 1_000_000;
 const MAX_SHAPE_WORK: usize = 10_000_000;
 type Workspace = BTreeMap<String, Value>;
+/// Array-valued block parameters with their defaults.
+type Params = &'static [(&'static str, &'static str)];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Shape {
@@ -239,6 +241,12 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
             | "ZeroOrderHold"
             | "Saturate"
             | "Saturation"
+            | "DeadZone"
+            | "Quantizer"
+            | "CoulombFriction"
+            | "WrapToZero"
+            | "SaturationDynamic"
+            | "DeadZoneDynamic"
             | "TransferFcn"
             | "DiscreteTransferFcn"
             | "StateSpace"
@@ -263,11 +271,60 @@ pub(crate) fn supported_native_type(kind: &str) -> bool {
     )
 }
 
+/// The internal block type implementing a Simulink library link, by its
+/// `SourceBlock` path with whitespace (including the line breaks Simulink
+/// keeps in library block names) collapsed. Only the stateless
+/// Discontinuities links are lowered; every other link still rejects.
+pub(crate) fn library_block_type(source: &str) -> Option<&'static str> {
+    let path = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    match path.as_str() {
+        "simulink/Discontinuities/Wrap To Zero" => Some("WrapToZero"),
+        "simulink/Discontinuities/Saturation Dynamic" => Some("SaturationDynamic"),
+        "simulink/Discontinuities/Dead Zone Dynamic" => Some("DeadZoneDynamic"),
+        "simulink/Discontinuities/Coulomb & Viscous Friction" => Some("CoulombFriction"),
+        _ => None,
+    }
+}
+/// Whether a block is a `Reference` to a library block the simulator lowers.
+pub(crate) fn supported_library(block: &Block) -> bool {
+    block.block_type == "Reference"
+        && block
+            .library_source
+            .as_deref()
+            .is_some_and(|s| library_block_type(s).is_some())
+}
+/// Turn a supported library link into its native internal block. Mask
+/// parameter values (when the file carries the mask) become ordinary
+/// parameters unless the block already stores a value of that name; the
+/// link path and mask are then dropped so the block compiles like any other.
+fn resolve_library(block: &mut Block) {
+    if !supported_library(block) {
+        return;
+    }
+    let Some(kind) = block.library_source.as_deref().and_then(library_block_type) else {
+        return;
+    };
+    if let Some(mask) = block.mask.take() {
+        for p in mask.parameters {
+            block.parameters.entry(p.name).or_insert(p.value);
+        }
+    }
+    block.block_type = kind.into();
+    block.library_source = None;
+}
+
 fn describe(
     block: &mut Block,
     workspace: &Workspace,
     budget: &mut ArrayBudget,
 ) -> Result<Spec, Error> {
+    resolve_library(block);
+    if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
+        return Err(block_error(
+            &block.id.0,
+            "subsystems, masks and library links require explicit lowering before simulation",
+        ));
+    }
     if !supported_native_type(&block.block_type) {
         return Err(block_error(
             &block.id.0,
@@ -276,12 +333,6 @@ fn describe(
     }
 
     let id = &block.id.0;
-    if block.mask.is_some() || block.library_source.is_some() || block.subsystem.is_some() {
-        return Err(block_error(
-            id,
-            "subsystems, masks and library links require explicit lowering before simulation",
-        ));
-    }
     if [
         block.ports.enable,
         block.ports.trigger,
@@ -302,8 +353,10 @@ fn describe(
     if block.block_type == "Switch" && block.param("Criteria") != Some("u2 ~= 0") {
         return Err(block_error(id, "Switch currently requires Criteria=u2 ~= 0; threshold criteria need datatype propagation"));
     }
-    if matches!(block.block_type.as_str(), "Switch" | "RelationalOperator")
-        && block.param("ZeroCross").is_some_and(|v| v != "off")
+    if matches!(
+        block.block_type.as_str(),
+        "Switch" | "RelationalOperator" | "DeadZone"
+    ) && block.param("ZeroCross").is_some_and(|v| v != "off")
     {
         return Err(block_error(
             id,
@@ -311,10 +364,29 @@ fn describe(
         ));
     }
     let mut values = BTreeMap::new();
-    let (operation, inputs, vector_parameter) = match block.block_type.as_str() {
-        "Constant" => (Operation::Source, 0, Some(("Value", "1"))),
-        "RandomNumber" | "UniformRandomNumber" => (Operation::RandomSource, 0, None),
-        "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" => (Operation::Source, 0, None),
+    // Array-valued parameters: evaluated here, broadcast against the input
+    // shape, and written back as one scalar literal per lowered element.
+    let (operation, inputs, vector_parameters): (_, _, Params) = match block.block_type.as_str() {
+        "Constant" => (Operation::Source, 0, &[("Value", "1")]),
+        "RandomNumber" | "UniformRandomNumber" => (Operation::RandomSource, 0, &[]),
+        "Ground" | "Clock" | "DigitalClock" | "Step" | "Sin" => (Operation::Source, 0, &[]),
+        "DeadZone" => (
+            Operation::Elementwise,
+            1,
+            &[("LowerValue", "-0.5"), ("UpperValue", "0.5")],
+        ),
+        "Quantizer" => (
+            Operation::Elementwise,
+            1,
+            &[("QuantizationInterval", "0.5")],
+        ),
+        "CoulombFriction" => (
+            Operation::Elementwise,
+            1,
+            &[("gain", "1"), ("offset", "[1 3 2 0]")],
+        ),
+        "WrapToZero" => (Operation::Elementwise, 1, &[("Threshold", "255")]),
+        "SaturationDynamic" | "DeadZoneDynamic" => (Operation::Elementwise, 3, &[]),
         "Gain" => {
             let matrix = match block
                 .param("Multiplication")
@@ -329,9 +401,9 @@ fn describe(
                     ))
                 }
             };
-            (Operation::Gain { matrix }, 1, Some(("Gain", "1")))
+            (Operation::Gain { matrix }, 1, &[("Gain", "1")])
         }
-        "Integrator" | "UnitDelay" => (Operation::State, 1, Some(("InitialCondition", "0"))),
+        "Integrator" | "UnitDelay" => (Operation::State, 1, &[("InitialCondition", "0")]),
         "Sum" | "Add" | "Product" => {
             let product = block.block_type == "Product";
             if product
@@ -365,7 +437,7 @@ fn describe(
                     Operation::Elementwise
                 },
                 n,
-                None,
+                &[],
             )
         }
         "Logic" => {
@@ -383,11 +455,11 @@ fn describe(
                     Operation::Elementwise
                 },
                 n,
-                None,
+                &[],
             )
         }
-        "RelationalOperator" => (Operation::Elementwise, 2, None),
-        "Switch" => (Operation::Elementwise, 3, None),
+        "RelationalOperator" => (Operation::Elementwise, 2, &[]),
+        "Switch" => (Operation::Elementwise, 3, &[]),
         "Mux" => {
             let v = eval(
                 block,
@@ -416,7 +488,7 @@ fn describe(
                     .collect::<Result<Vec<_>, _>>()?
             };
             let n = widths.len();
-            (Operation::Mux { widths }, n, None)
+            (Operation::Mux { widths }, n, &[])
         }
         "Demux" => {
             let v = eval(
@@ -448,7 +520,7 @@ fn describe(
                     .collect::<Result<Vec<_>, _>>()?;
                 (widths.len(), Some(widths))
             };
-            (Operation::Demux { widths, ports }, 1, None)
+            (Operation::Demux { widths, ports }, 1, &[])
         }
         "MatlabFunction" => {
             if block.ports.inputs > 256 || block.ports.outputs != 1 {
@@ -466,12 +538,12 @@ fn describe(
                     "missing or oversized MATLAB Function script",
                 ));
             }
-            (Operation::MatlabFunction, block.ports.inputs as usize, None)
+            (Operation::MatlabFunction, block.ports.inputs as usize, &[])
         }
-        "TransferFcn" | "DiscreteTransferFcn" | "StateSpace" => (Operation::Transfer, 1, None),
+        "TransferFcn" | "DiscreteTransferFcn" | "StateSpace" => (Operation::Transfer, 1, &[]),
         "Bias" | "Saturate" | "Saturation" | "Abs" | "Trigonometry" | "Math" | "Scope"
         | "Display" | "Outport" | "Terminator" | "ToWorkspace" | "ZeroOrderHold" => {
-            (Operation::Elementwise, 1, None)
+            (Operation::Elementwise, 1, &[])
         }
         other => return Err(block_error(id, format!("unsupported block type {other}"))),
     };
@@ -481,7 +553,7 @@ fn describe(
             "multiple output ports are supported only for Demux",
         ));
     }
-    if let Some((key, default)) = vector_parameter {
+    for &(key, default) in vector_parameters {
         values.insert(
             key.into(),
             eval(
@@ -701,7 +773,28 @@ fn infer(
             }
         }
         Operation::Reduce => inputs[0].map(|_| Shape::SCALAR),
-        Operation::Elementwise => broadcast(id, inputs.iter().copied())?,
+        Operation::Elementwise => {
+            // Array parameters expand scalar inputs and must otherwise match
+            // the signal, like Simulink's own scalar expansion.
+            let parameters = spec
+                .values
+                .values()
+                .map(|value| Some(Shape::from_value(value, true)));
+            let output = broadcast(id, inputs.iter().copied().chain(parameters))?;
+            // Wrap To Zero documents no expansion of a vector threshold over
+            // a scalar input: "the input signal and Threshold parameter must
+            // have equal size".
+            if block.block_type == "WrapToZero" {
+                let threshold = Shape::from_value(&spec.values["Threshold"], true);
+                if threshold != Shape::SCALAR && inputs[0].is_some_and(|s| s != threshold) {
+                    return Err(block_error(
+                        id,
+                        "Wrap To Zero requires a scalar Threshold or one matching the input size",
+                    ));
+                }
+            }
+            output
+        }
         Operation::Transfer | Operation::MatlabFunction => Some(Shape::SCALAR),
         Operation::Mux { .. } => {
             if inputs.iter().any(Option::is_none) {

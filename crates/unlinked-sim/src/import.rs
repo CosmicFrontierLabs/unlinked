@@ -43,7 +43,7 @@ pub(crate) fn literal_requirements(
             ("SineType", &["Time based"]),
             ("TimeSource", &["Use simulation time"]),
         ],
-        "Switch" | "RelationalOperator" => &[("ZeroCross", &["off"])],
+        "Switch" | "RelationalOperator" | "DeadZone" => &[("ZeroCross", &["off"])],
         _ => &[],
     }
 }
@@ -198,6 +198,8 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                     "Inherit: Inherit via internal rule",
                     "Inherit: Inherit via back propagation",
                     "Inherit: Same as input",
+                    // Saturation Dynamic's inherited type is its `u` input.
+                    "Inherit: Same as second input",
                     "Inherit: auto",
                     "double",
                 ],
@@ -433,6 +435,24 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 lower: p("LowerLimit", "-0.5")?,
                 upper: p("UpperLimit", "0.5")?,
             },
+            "DeadZone" => Kind::DeadZone {
+                lower: p("LowerValue", "-0.5")?,
+                upper: p("UpperValue", "0.5")?,
+            },
+            "Quantizer" => Kind::Quantizer {
+                interval: p("QuantizationInterval", "0.5")?,
+            },
+            // Scalarization has already expanded the library's vector default
+            // `[1 3 2 0]` for `offset` into one literal per element.
+            "CoulombFriction" => Kind::CoulombFriction {
+                gain: p("gain", "1")?,
+                offset: p("offset", "[1 3 2 0]")?,
+            },
+            "WrapToZero" => Kind::WrapToZero {
+                threshold: p("Threshold", "255")?,
+            },
+            "SaturationDynamic" => Kind::SaturationDynamic,
+            "DeadZoneDynamic" => Kind::DeadZoneDynamic,
             "Integrator" => Kind::Integrator {
                 initial: p("InitialCondition", "0")?,
             },

@@ -95,6 +95,39 @@ pub enum Kind {
         lower: f64,
         upper: f64,
     },
+    /// Zero inside `[lower, upper]`; outside, the input minus the exceeded
+    /// edge, so the output is continuous at both edges
+    /// (<https://www.mathworks.com/help/simulink/slref/deadzone.html>).
+    DeadZone {
+        lower: f64,
+        upper: f64,
+    },
+    /// `interval * round(u / interval)` with MATLAB's round-half-away-from-zero
+    /// (<https://www.mathworks.com/help/simulink/slref/quantizer.html>).
+    Quantizer {
+        interval: f64,
+    },
+    /// `sign(u) * (gain * |u| + offset)`; `sign(0)` is zero, so the output is
+    /// zero at rest whatever the offset
+    /// (<https://www.mathworks.com/help/simulink/slref/coulombandviscousfriction.html>).
+    CoulombFriction {
+        gain: f64,
+        offset: f64,
+    },
+    /// Zero when the input is strictly above `threshold`, else the input
+    /// (<https://www.mathworks.com/help/simulink/slref/wraptozero.html>).
+    WrapToZero {
+        threshold: f64,
+    },
+    /// Inputs `up`, `u`, `lo` in port order: `max(lo, min(u, up))`, so a lower
+    /// limit above the upper one wins, as in the library's switch chain
+    /// (<https://www.mathworks.com/help/simulink/slref/saturationdynamic.html>).
+    SaturationDynamic,
+    /// Inputs `up`, `u`, `lo` in port order: `u - max(lo, min(u, up))`, which
+    /// is the documented zero/`u - up`/`u - lo` regions for `lo <= up`; limits
+    /// that cross are a runtime error rather than a guess
+    /// (<https://www.mathworks.com/help/simulink/slref/deadzonedynamic.html>).
+    DeadZoneDynamic,
     Integrator {
         initial: f64,
     },
@@ -159,7 +192,7 @@ impl Kind {
             | Self::DigitalClock { .. }
             | Self::RandomNumber { .. }
             | Self::UniformRandomNumber { .. } => 0,
-            Self::Switch => 3,
+            Self::Switch | Self::SaturationDynamic | Self::DeadZoneDynamic => 3,
             Self::Relational { .. } => 2,
             Self::Logic { inputs, .. } | Self::MatlabFunction { inputs, .. } => *inputs,
             Self::Sum { signs } => signs.len(),
@@ -259,6 +292,27 @@ impl<'a> Compiled<'a> {
                 } => vec![*amplitude, *frequency, *phase, *bias],
                 Kind::Gain { gain } => vec![*gain],
                 Kind::Bias { bias } => vec![*bias],
+                Kind::DeadZone { lower, upper } => {
+                    if lower > upper {
+                        return Err(block_error(
+                            &node.id,
+                            "LowerValue (start of dead zone) exceeds UpperValue (end of dead zone)",
+                        ));
+                    }
+                    vec![*lower, *upper]
+                }
+                Kind::Quantizer { interval } => {
+                    // A NaN interval falls through to the non-finite check.
+                    if *interval <= 0.0 {
+                        return Err(block_error(
+                            &node.id,
+                            "QuantizationInterval must be positive",
+                        ));
+                    }
+                    vec![*interval]
+                }
+                Kind::CoulombFriction { gain, offset } => vec![*gain, *offset],
+                Kind::WrapToZero { threshold } => vec![*threshold],
                 Kind::Sum { signs } => signs.clone(),
                 Kind::Saturation { lower, upper } => {
                     if lower > upper {
@@ -460,6 +514,38 @@ impl<'a> Compiled<'a> {
                         .fold(1.0, |a, (p, d)| if *d { a / x(p) } else { a * x(p) })
                 }
                 Kind::Saturation { lower, upper } => x(0).clamp(*lower, *upper),
+                Kind::DeadZone { lower, upper } => x(0) - x(0).clamp(*lower, *upper),
+                Kind::Quantizer { interval } => interval * (x(0) / interval).round(),
+                Kind::CoulombFriction { gain, offset } => {
+                    let u = x(0);
+                    // MATLAB sign: zero at zero, unlike f64::signum.
+                    let sign = if u > 0.0 {
+                        1.0
+                    } else if u < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    };
+                    sign * (gain * u.abs() + offset)
+                }
+                Kind::WrapToZero { threshold } => {
+                    if x(0) > *threshold {
+                        0.0
+                    } else {
+                        x(0)
+                    }
+                }
+                Kind::SaturationDynamic => x(1).min(x(0)).max(x(2)),
+                Kind::DeadZoneDynamic => {
+                    let (up, u, lo) = (x(0), x(1), x(2));
+                    if lo > up {
+                        return Err(block_error(
+                            &self.graph.nodes[i].id,
+                            format!("Dead Zone Dynamic lower limit {lo} exceeds upper limit {up} at time {t}"),
+                        ));
+                    }
+                    u - u.min(up).max(lo)
+                }
                 Kind::Switch => {
                     if x(1) != 0.0 {
                         x(0)

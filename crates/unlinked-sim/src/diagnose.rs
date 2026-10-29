@@ -236,7 +236,9 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
             remember(&mut ids, block.id.0.clone(), location.clone());
             let flat = format!("{prefix}{}", block.id.0.replace('/', "//"));
             remember(&mut ids, flat.clone(), location.clone());
-            if block.mask.is_some() || block.library_source.is_some() {
+            if crate::vector::supported_library(block) {
+                // A Discontinuities link the simulator lowers natively.
+            } else if block.mask.is_some() || block.library_source.is_some() {
                 report.emit(Severity::Warning, "simulation_link_or_mask", location.clone(),
                     "Masks and library links require supported explicit lowering before simulation.".into());
             } else if block.subsystem.is_none()
@@ -282,7 +284,7 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     }
                 }
             }
-            if let Some(descriptor) = catalog::find(&block.block_type) {
+            if let Some(descriptor) = catalog::descriptor_for(block) {
                 for p in descriptor.parameters {
                     if !matches!(
                         p.kind,

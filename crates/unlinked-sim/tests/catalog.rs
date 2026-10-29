@@ -12,7 +12,7 @@ fn block(id: &str, key: &str) -> Block {
     Block {
         id: id.into(),
         name: id.into(),
-        block_type: descriptor.mdl_block_type.into(),
+        block_type: descriptor.block_type().into(),
         position: Rect::new(
             0.0,
             0.0,
@@ -24,7 +24,7 @@ fn block(id: &str, key: &str) -> Block {
         ports,
         parameters,
         mask: None,
-        library_source: None,
+        library_source: descriptor.source_block.map(str::to_owned),
         subsystem: None,
         style: Default::default(),
         interface: None,
@@ -84,6 +84,12 @@ fn control_palette_defaults_match_analytic_responses() {
         "Clock",
         "Ground",
         "Saturate",
+        "DeadZone",
+        "Quantizer",
+        "CoulombFriction",
+        "WrapToZero",
+        "SaturationDynamic",
+        "DeadZoneDynamic",
         "TransferFcn",
         "StateSpace",
         "Switch",
@@ -112,6 +118,12 @@ fn control_palette_defaults_match_analytic_responses() {
                 "Clock" => t,
                 "Ground" => 0.0,
                 "Saturate" => 0.5,
+                // Constant 2 through each default: 2 - 0.5 past the zone end;
+                // 2 is already a multiple of 0.5; 1 * |2| + 1 with sign(2);
+                // 2 <= 255 passes; the dynamic limits are the input itself.
+                "DeadZone" => 1.5,
+                "CoulombFriction" => 3.0,
+                "DeadZoneDynamic" => 0.0,
                 "TransferFcn" => 2.0 * (1.0 - (-t).exp()),
                 "StateSpace" => 2.0 * t.exp(),
                 "Trigonometry" => 2.0_f64.sin(),

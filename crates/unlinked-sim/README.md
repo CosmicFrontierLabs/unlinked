@@ -7,13 +7,15 @@ filesystem, network, subprocess or native runtime dependency. `compile` resolves
 IDs mapped to scalar sample vectors, and the selected solver.
 
 Implemented: Constant/Ground, Clock, Step, time-based Sine, Gain, Bias, Sum/Add,
-Product/division, Saturation, Integrator, UnitDelay, Abs, scalar trigonometric
+Product/division, Saturation, the stateless Discontinuities (Dead Zone,
+Quantizer, Coulomb & Viscous Friction, Wrap To Zero, Saturation Dynamic, Dead
+Zone Dynamic), Integrator, UnitDelay, Abs, scalar trigonometric
 and math operations, scalar relational comparisons, logical operators, nonzero
 Switch routing, and single-input sinks. Logic and relational outputs use exact
 0/1 scalar values, including declared boolean outputs. Switch currently accepts
 only `Criteria=u2 ~= 0`; threshold criteria require signal datatype propagation
 to reproduce boolean-control behavior and therefore reject. Explicit zero-crossing
-detection on Switch/RelationalOperator rejects; no event root finding is implied. Ordinary virtual subsystems lower
+detection on Switch/RelationalOperator/DeadZone rejects; no event root finding is implied. Ordinary virtual subsystems lower
 to identity boundary nodes with qualified block IDs. Raw block parameters and model
 workspace expressions use the pure `unlinked-matlab::eval_array_expr` evaluator. Workspace dependencies
 resolve iteratively; unresolved/cyclic references fail.
@@ -146,6 +148,39 @@ with initialization, plus the 30-second cooperative deadline and 25,001-sample
 cap. Budget exhaustion is an explicit error, never a partial successful trace.
 Blocks marked `Commented=on` or `Commented=through` are rejected until their
 removal/bypass semantics are implemented, including nested and routing blocks.
+
+### Stateless discontinuities
+
+Native `DeadZone` (`LowerValue`/`UpperValue`, defaults -0.5/0.5) outputs zero
+inside the zone and the input minus the exceeded edge outside it; `LowerValue`
+above `UpperValue` and `ZeroCross=on` reject. `Quantizer` outputs
+`q * round(u / q)` with MATLAB's half-away-from-zero rounding and requires a
+positive `QuantizationInterval` (default 0.5). Coulomb & Viscous Friction
+outputs `sign(u) .* (gain .* |u| + offset)` with `sign(0) = 0`; `gain` defaults
+to 1 and `offset` to the library's `[1 3 2 0]`. It is accepted both as the
+library link `simulink/Discontinuities/Coulomb & Viscous Friction` (how Simulink
+saves it) and as an Unlinked-internal native `CoulombFriction` block type. Zone
+edges, interval, gain and offset may be arrays: they expand a scalar input and
+must otherwise match the signal shape elementwise.
+
+Library links (`Reference` blocks, matched by their `SourceBlock` path with
+line breaks collapsed) are lowered for Wrap To Zero, Saturation Dynamic and
+Dead Zone Dynamic; parameter values are read from the block, falling back to
+mask values when the file keeps the mask. Wrap To Zero outputs zero when the
+input is strictly above `Threshold` (default 255) and the input otherwise; a
+vector threshold must match the input size. Saturation Dynamic takes `up`, `u`,
+`lo` on inputs 1 to 3 and outputs `max(lo, min(u, up))`, so a lower limit above
+the upper one wins as in the library's switch chain. Dead Zone Dynamic takes
+the same inputs and outputs `u - max(lo, min(u, up))`: zero inside the limits,
+`u - up` above and `u - lo` below; limits that cross are a runtime error naming
+the block rather than a guess. None of these blocks registers zero crossings.
+Every other library link, and the stateful Backlash, Rate Limiter, Relay and
+Hit Crossing blocks, still reject. References: [Dead Zone](https://www.mathworks.com/help/simulink/slref/deadzone.html),
+[Quantizer](https://www.mathworks.com/help/simulink/slref/quantizer.html),
+[Coulomb and Viscous Friction](https://www.mathworks.com/help/simulink/slref/coulombandviscousfriction.html),
+[Wrap To Zero](https://www.mathworks.com/help/simulink/slref/wraptozero.html),
+[Saturation Dynamic](https://www.mathworks.com/help/simulink/slref/saturationdynamic.html),
+[Dead Zone Dynamic](https://www.mathworks.com/help/simulink/slref/deadzonedynamic.html).
 
 ### Zero-order hold
 
