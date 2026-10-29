@@ -1,4 +1,6 @@
+use super::selection::{MultiPortConfig, SwitchCriteria};
 use super::*;
+use unlinked_model::catalog::POLYVAL_DEFAULT_COEFS;
 use unlinked_model::{Block, Model, PortKind};
 
 fn parameter(
@@ -43,12 +45,107 @@ pub(crate) fn literal_requirements(
             ("SineType", &["Time based"]),
             ("TimeSource", &["Use simulation time"]),
         ],
+        "DiscretePulseGenerator" => &[
+            ("PulseType", &["Time based"]),
+            ("TimeSource", &["Use simulation time"]),
+        ],
+        "SignalGenerator" => &[
+            ("WaveForm", &["sine", "square", "sawtooth"]),
+            ("Units", &["rad/sec", "Hertz"]),
+            ("TimeSource", &["Use simulation time"]),
+        ],
         // An omitted `ZeroCross` (Simulink's default, `on`, is not written to
-        // files) is accepted without locating crossings, as for Switch; only
-        // an explicit `on` is refused until zero-crossing support lands.
+        // files) is accepted without locating crossings; only an explicit `on`
+        // is refused until zero-crossing support lands.
         "Switch" | "RelationalOperator" | "DeadZone" => &[("ZeroCross", &["off"])],
+        // Trigonometric Function: `cos + jsin` is complex-valued and the
+        // CORDIC/Lookup approximations are not reproduced.
+        "Trigonometry" => &[
+            ("Operator", TRIGONOMETRY_OPERATORS),
+            ("ApproximationMethod", &["None"]),
+            ("OutputSignalType", &["auto", "real"]),
+        ],
+        // Math Function: complex outputs are outside the supported subset;
+        // `reciprocal` uses exact division only.
+        "Math" => &[
+            ("Operator", MATH_OPERATORS),
+            ("OutputSignalType", &["auto", "real"]),
+            ("AlgorithmType", &["Exact"]),
+        ],
+        // Sqrt: `AlgorithmType` named the Method parameter before R2026b split
+        // it into `SqrtAlgorithmType`/`RSqrtAlgorithmType`; all three must be
+        // exact, since Newton-Raphson/Lookup approximations are not reproduced.
+        "Sqrt" => &[
+            ("Operator", &["sqrt", "signedSqrt", "rSqrt"]),
+            ("OutputSignalType", &["auto", "real"]),
+            ("AlgorithmType", &["Exact"]),
+            ("SqrtAlgorithmType", &["Exact"]),
+            ("RSqrtAlgorithmType", &["Exact"]),
+        ],
+        "Rounding" => &[("Operator", &["floor", "ceil", "round", "fix"])],
+        "MinMax" => &[
+            ("Function", &["min", "max"]),
+            ("CollapseMode", &["All dimensions"]),
+        ],
         _ => &[],
     }
+}
+/// Trigonometric Function operators the simulator lowers (`sincos` becomes a
+/// `sin` and a `cos` block during scalarization).
+pub(crate) const TRIGONOMETRY_OPERATORS: &[&str] = &[
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh",
+    "atanh", "sincos",
+];
+/// Math Function operators the simulator lowers.
+pub(crate) const MATH_OPERATORS: &[&str] = &[
+    "exp",
+    "log",
+    "2^u",
+    "10^u",
+    "log10",
+    "magnitude^2",
+    "square",
+    "pow",
+    "conj",
+    "reciprocal",
+    "hypot",
+    "rem",
+    "mod",
+    "transpose",
+    "hermitian",
+];
+/// Operators of a block type that take two input ports.
+pub(crate) fn binary_operator(block_type: &str, operator: &str) -> bool {
+    match block_type {
+        "Trigonometry" => operator == "atan2",
+        "Math" => matches!(operator, "pow" | "hypot" | "rem" | "mod"),
+        _ => false,
+    }
+}
+/// Parse a numeric array parameter against the scalar workspace.
+fn array_parameter(
+    block: &Block,
+    key: &str,
+    default: &str,
+    ws: &BTreeMap<String, f64>,
+) -> Result<unlinked_matlab::array_runtime::Value, Error> {
+    use unlinked_matlab::array_runtime::{Value, ValueKind};
+    let workspace = ws
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::scalar(*value)))
+        .collect();
+    let value = unlinked_matlab::eval_array_expr(block.param(key).unwrap_or(default), &workspace)
+        .map_err(|e| block_error(&block.id.0, format!("{key}: {e}")))?;
+    if value.kind == ValueKind::Character
+        || value.data.is_empty()
+        || value.data.iter().any(|v| !v.is_finite())
+    {
+        return Err(block_error(
+            &block.id.0,
+            format!("{key} requires finite real numeric values"),
+        ));
+    }
+    Ok(value)
 }
 
 fn period_ticks(
@@ -230,7 +327,10 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
         } else {
             1
         };
-        if let Some(sample) = block.param("SampleTime").filter(|_| !discrete) {
+        // A time-based Pulse Generator ignores SampleTime, which belongs to
+        // the Sample based mode rejected below.
+        let pulse = block.block_type == "DiscretePulseGenerator";
+        if let Some(sample) = block.param("SampleTime").filter(|_| !discrete && !pulse) {
             let value = unlinked_matlab::eval_expr(sample, &ws)
                 .map_err(|e| block_error(id, format!("SampleTime: {e}")))?;
             let acceptable = value == -1.0
@@ -339,19 +439,89 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             "DigitalClock" => Kind::DigitalClock {
                 period_ticks: period,
             },
-            "Step" => {
-                let time = p("Time", "1")?;
-                let ticks = (time - options.start) / options.step;
-                if time > options.start && time < options.stop && !on_grid(ticks) {
+            "Step" => Kind::Step {
+                time: p("Time", "1")?,
+                before: p("Before", "0")?,
+                after: p("After", "1")?,
+            },
+            "DiscretePulseGenerator" => {
+                // The file default for this block type is Sample based, so an
+                // absent mode is not assumed to be the supported one.
+                match block.param("PulseType") {
+                    Some("Time based") => {}
+                    Some(other) => {
+                        return Err(block_error(id, format!("Pulse Generator PulseType={other} is unsupported; only Time based pulses are simulated")))
+                    }
+                    None => {
+                        return Err(block_error(id, "Pulse Generator PulseType is unspecified; only an explicit Time based mode is simulated"))
+                    }
+                }
+                let period = p("Period", "10")?;
+                let pulse_width = p("PulseWidth", "5")?;
+                if !(0.0..=100.0).contains(&pulse_width) {
                     return Err(block_error(
                         id,
-                        "Step transition must align with fixed-step grid",
+                        "PulseWidth must be a percentage from 0 to 100",
                     ));
                 }
-                Kind::Step {
-                    time,
-                    before: p("Before", "0")?,
-                    after: p("After", "1")?,
+                Kind::PulseGenerator {
+                    amplitude: p("Amplitude", "1")?,
+                    period,
+                    width: period * pulse_width / 100.0,
+                    phase_delay: p("PhaseDelay", "0")?,
+                }
+            }
+            "SignalGenerator" => {
+                let waveform = block.param("WaveForm").unwrap_or("sine");
+                if !["sine", "square", "sawtooth"].contains(&waveform) {
+                    return Err(block_error(id, format!("Signal Generator WaveForm={waveform} is unsupported; only sine, square and sawtooth are simulated")));
+                }
+                let hertz = match block.param("Units").unwrap_or("rad/sec") {
+                    "rad/sec" => false,
+                    "Hertz" => true,
+                    other => {
+                        return Err(block_error(
+                            id,
+                            format!("Signal Generator Units={other} is unsupported"),
+                        ))
+                    }
+                };
+                let frequency = p("Frequency", "1")?;
+                if waveform != "sine" && frequency <= 0.0 {
+                    return Err(block_error(
+                        id,
+                        "square and sawtooth waveforms require a positive Frequency",
+                    ));
+                }
+                Kind::SignalGenerator {
+                    waveform: waveform.into(),
+                    amplitude: p("Amplitude", "1")?,
+                    frequency,
+                    hertz,
+                }
+            }
+            "Ramp" => Kind::Ramp {
+                slope: p("slope", "1")?,
+                start: p("start", "0")?,
+                initial: p("X0", "0")?,
+            },
+            "ChirpSignal" => Kind::Chirp {
+                initial_frequency: p("f1", "0.1")?,
+                target_time: p("T", "100")?,
+                target_frequency: p("f2", "1")?,
+            },
+            "RepeatingSequence" => {
+                // Scalarization already replaced these expressions by literal
+                // arrays, so no workspace is needed here.
+                let array = |key: &str, default: &str| -> Result<Vec<f64>, Error> {
+                    let source = block.param(key).unwrap_or(default);
+                    let value = unlinked_matlab::eval_array_expr(source, &BTreeMap::new())
+                        .map_err(|e| block_error(id, format!("{key}: {e}")))?;
+                    Ok(value.data)
+                };
+                Kind::RepeatingSequence {
+                    times: array("rep_seq_t", "[0 2]")?,
+                    values: array("rep_seq_y", "[0 2]")?,
                 }
             }
             "Sin" => Kind::Sine {
@@ -469,14 +639,54 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 period_ticks: period,
             },
             "Switch" => {
-                // Nonzero criteria agrees for both numeric and boolean controls.
-                // Threshold criteria need signal datatype propagation: Simulink
-                // treats boolean controls specially, so do not guess here.
-                if block.param("Criteria") != Some("u2 ~= 0") {
-                    return Err(block_error(id, "Switch currently requires Criteria=u2 ~= 0; threshold criteria need datatype propagation"));
+                // Threshold criteria compare doubles. Simulink's special-casing
+                // of boolean controls with improper thresholds waits on signal
+                // datatype propagation (#149); the README records this.
+                match SwitchCriteria::parse(block.param("Criteria"))
+                    .map_err(|e| block_error(id, e))?
+                {
+                    SwitchCriteria::Nonzero => Kind::Switch,
+                    SwitchCriteria::AtLeast => Kind::SwitchThreshold {
+                        threshold: p("Threshold", "0")?,
+                        inclusive: true,
+                    },
+                    SwitchCriteria::Above => Kind::SwitchThreshold {
+                        threshold: p("Threshold", "0")?,
+                        inclusive: false,
+                    },
                 }
-
-                Kind::Switch
+            }
+            "MultiPortSwitch" => {
+                // Scalarization writes the canonical explicit-index form.
+                if block.param("DataPortOrder") != Some("Specify indices") {
+                    return Err(block_error(
+                        id,
+                        "MultiPortSwitch requires dimensional lowering before compilation",
+                    ));
+                }
+                let indices = MultiPortConfig::parse_indices_literal(
+                    block.param("DataPortIndices").unwrap_or(""),
+                )
+                .map_err(|e| block_error(id, format!("DataPortIndices: {e}")))?;
+                let config = MultiPortConfig {
+                    indices,
+                    additional_default_port: block.param("DataPortForDefault")
+                        == Some("Additional data port"),
+                    error_on_default: block.param("DiagnosticForDefault") == Some("Error"),
+                };
+                if block.param("Inputs").and_then(|n| n.parse::<usize>().ok())
+                    != Some(config.indices.len())
+                {
+                    return Err(block_error(
+                        id,
+                        "MultiPortSwitch Inputs does not match its data port indices",
+                    ));
+                }
+                Kind::MultiPortSwitch {
+                    default_port: config.default_port(),
+                    data_ports: config.data_ports(),
+                    indices: config.indices,
+                }
             }
             "RelationalOperator" => Kind::Relational {
                 operation: block.param("Operator").unwrap_or(">=").into(),
@@ -495,12 +705,89 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
                 Kind::Logic { operation, inputs }
             }
             "Abs" => Kind::Abs,
-            "Trigonometry" => Kind::Unary {
-                operation: block.param("Operator").unwrap_or("sin").into(),
+            "Trigonometry" => {
+                let operation = block.param("Operator").unwrap_or("sin");
+                if operation == "sincos" {
+                    return Err(block_error(
+                        id,
+                        "Operator=sincos requires shape lowering into separate sin and cos outputs",
+                    ));
+                }
+                if binary_operator("Trigonometry", operation) {
+                    Kind::Binary {
+                        operation: operation.into(),
+                    }
+                } else {
+                    Kind::Unary {
+                        operation: operation.into(),
+                    }
+                }
+            }
+            "Math" => {
+                let operation = block.param("Operator").unwrap_or("exp");
+                // pow follows the Math Function reference: with Signed power
+                // (default on) and a real output it is sign(u)*|u|^v, and under
+                // the default `auto` output type the expression follows the
+                // compiled complexity, which is always real here. Only Signed
+                // power off (or a complex output, rejected above) gives the
+                // plain u^v, whose complex results for negative bases surface
+                // as non-finite errors.
+                // https://www.mathworks.com/help/simulink/slref/mathfunction.html
+                let signed = operation == "pow"
+                    && block.param("OutputSignalType") != Some("complex")
+                    && block.param("SignedPower") != Some("off");
+                if binary_operator("Math", operation) {
+                    Kind::Binary {
+                        operation: if signed { "signedPow" } else { operation }.into(),
+                    }
+                } else {
+                    Kind::Unary {
+                        operation: operation.into(),
+                    }
+                }
+            }
+            "Sqrt" => Kind::Unary {
+                operation: block.param("Operator").unwrap_or("sqrt").into(),
             },
-            "Math" => Kind::Unary {
-                operation: block.param("Operator").unwrap_or("exp").into(),
+            "Rounding" => Kind::Unary {
+                operation: block.param("Operator").unwrap_or("floor").into(),
             },
+            "Signum" => Kind::Unary {
+                operation: "sign".into(),
+            },
+            "UnaryMinus" => Kind::Unary {
+                operation: "negate".into(),
+            },
+            "Polyval" => {
+                let value = array_parameter(block, "coefs", POLYVAL_DEFAULT_COEFS, &ws)?;
+                if value.rows != 1 && value.cols != 1 {
+                    return Err(block_error(
+                        id,
+                        "coefs must be a vector of coefficients in descending powers",
+                    ));
+                }
+                if value.data.len() > 1024 {
+                    return Err(block_error(id, "coefs accepts at most 1024 coefficients"));
+                }
+                Kind::Polyval {
+                    coefficients: value.data,
+                }
+            }
+            // Vector dot products lower to Product terms and a Sum during
+            // scalarization; only the scalar case reaches this point.
+            "DotProduct" => Kind::Product {
+                divide: vec![false, false],
+            },
+            "MinMax" => {
+                let inputs = p("Inputs", "1")?;
+                if inputs.fract() != 0.0 || !(1.0..=1024.0).contains(&inputs) {
+                    return Err(block_error(id, "invalid MinMax input count"));
+                }
+                Kind::MinMax {
+                    maximum: block.param("Function").unwrap_or("min") == "max",
+                    inputs: inputs as usize,
+                }
+            }
             "Scope" | "Display" | "Outport" | "Terminator" | "ToWorkspace" => {
                 if block.ports.inputs > 1 {
                     return Err(block_error(id, "multi-input sinks unsupported"));
@@ -509,6 +796,7 @@ pub fn compile(model: &Model, options: &Options) -> Result<Graph, Error> {
             }
             other => return Err(block_error(id, format!("unsupported block type {other}"))),
         };
+        super::source_timing(&kind, options).map_err(|message| block_error(id, message))?;
         graph.nodes.push(Node {
             id: id.clone(),
             name: format!("{}/{}", model.name, block.name),

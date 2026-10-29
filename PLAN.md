@@ -166,14 +166,22 @@ CI. Per-model import, render and simulation coverage is tracked in
   next run form, preserving unmatched current root inputs. Initialization
   scripts retain their recorded version; missing scripts prevent reuse.
 - Solvers: Euler, RK4, adaptive Dormand–Prince 5(4).
-- Blocks: sources (Constant, Clock, Step, Sine), Gain, Bias, Sum, Product,
+- Blocks: sources (Constant, Clock, Step, Sine, time-based Pulse Generator,
+  Signal Generator sine/square/sawtooth, and the library Ramp, Chirp Signal
+  and Repeating Sequence), Gain, Bias, Sum, Product,
   Saturation, Dead Zone, Quantizer, Coulomb & Viscous Friction, Wrap To Zero,
   Saturation Dynamic, Dead Zone Dynamic (the last four as library links),
-  Integrator, UnitDelay, Abs, math/trig, relational and logical
-  operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
+  Integrator, UnitDelay, Abs, Math Function and Trigonometric
+  Function (real operators, including two-input and `sincos`), Sqrt, Sign,
+  Rounding, Unary Minus, Polynomial, Dot Product, MinMax, relational and
+  logical operators, Switch (nonzero and threshold criteria), Selector, Multiport
+  Switch and the library Index Vector, Manual Switch, Environment Controller,
+  Mux/Demux, virtual subsystems, proper SISO
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
-  matrix signals lowered to scalars. The authoritative list and its limits are
-  in [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
+  matrix signals lowered to scalars; blocks commented out (grounded) or
+  commented through (wired input to output) at any level. The authoritative
+  list and its limits are in
+  [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).
 - Multirate discrete scheduling on integer sample ticks (held values between
   hits and through solver stages), and local Goto/From routing.
 - Pure scalar MATLAB Function charts execute through a bounded function

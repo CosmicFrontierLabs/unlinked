@@ -13,7 +13,11 @@
 //! Sine/trigonometry arity follows the MathWorks
 //! [Sine Wave](https://www.mathworks.com/help/simulink/slref/sinewave.html) and
 //! [Trigonometric Function](https://www.mathworks.com/help/simulink/slref/trigonometricfunction.html)
-//! references. Discontinuities follow the [Dead Zone](https://www.mathworks.com/help/simulink/slref/deadzone.html),
+//! references. Pulse Generator, Signal Generator, Ramp, Chirp Signal and
+//! Repeating Sequence follow their own references (linked from their
+//! descriptors); the last three are library blocks, created as `Reference`
+//! blocks carrying their `SourceBlock` path and mask parameter values.
+//! Discontinuities follow the [Dead Zone](https://www.mathworks.com/help/simulink/slref/deadzone.html),
 //! [Quantizer](https://www.mathworks.com/help/simulink/slref/quantizer.html),
 //! [Coulomb and Viscous Friction](https://www.mathworks.com/help/simulink/slref/coulombandviscousfriction.html),
 //! [Wrap To Zero](https://www.mathworks.com/help/simulink/slref/wraptozero.html),
@@ -31,6 +35,11 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 pub const MAX_PORTS: u32 = 1024;
+/// Simulink's library default for the Polynomial block's `coefs`
+/// (https://www.mathworks.com/help/simulink/slref/polynomial.html). Files
+/// omit parameters left at their defaults, so an imported block without
+/// `coefs` evaluates this polynomial rather than the identity.
+pub const POLYVAL_DEFAULT_COEFS: &str = "[ +2.081618890e-019, -1.441693666e-014, +4.719686976e-010, -8.536869453e-006, +1.621573104e-001, -8.087801117e+001 ]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ParameterKind {
@@ -94,9 +103,28 @@ pub struct ParameterDescriptor {
     pub implicit_default: Option<&'static str>,
     pub affects_ports: bool,
     pub dialog: ParameterDialog,
+    /// A second key under which files store this parameter (the Ramp's
+    /// initial output is `X0` in most files and `InitialOutput` in the
+    /// current reference). The dialog, its checks and new blocks use `name`
+    /// unless a block carries only the alias; see [`Self::key_in`].
+    pub alias: Option<&'static str>,
 }
 
 impl ParameterDescriptor {
+    /// The key this parameter is stored under in `parameters`: `name`, or
+    /// `alias` when the block carries only the alias. Reading and editing
+    /// through this key never shadows the value the block actually uses.
+    pub fn key_in(&self, parameters: &BTreeMap<String, String>) -> &'static str {
+        match self.alias {
+            Some(alias)
+                if !parameters.contains_key(self.name) && parameters.contains_key(alias) =>
+            {
+                alias
+            }
+            _ => self.name,
+        }
+    }
+
     /// Friendly enum label, or the exact stored token when no label is known.
     pub fn label_for<'a>(&self, value: &'a str) -> &'a str {
         self.dialog
@@ -142,10 +170,17 @@ impl ParameterDescriptor {
 #[derive(Debug, Clone, Copy, Serialize)]
 pub enum PortRule {
     SineWave,
+    /// One output; an input when `TimeSource` is an external signal.
+    TimeSource,
     Trigonometry,
+    /// Math Function: pow, hypot, rem and mod take two inputs.
+    MathFunction,
     Display,
     Integrator,
     Scope,
+    /// Control input, `Inputs` data ports, plus one when the default case has
+    /// its own port.
+    MultiPortSwitch,
     Fixed {
         inputs: u32,
         outputs: u32,
@@ -213,7 +248,7 @@ impl BlockDescriptor {
     /// with its line breaks collapsed, as Simulink writes it.
     pub fn source_type(&self) -> Option<String> {
         self.source_block
-            .map(|s| normalize_path(s.rsplit('/').next().unwrap_or(s)))
+            .map(|s| canonical_source(s.rsplit('/').next().unwrap_or(s)))
     }
     pub fn dialog_sections(&self, parameters: &BTreeMap<String, String>) -> Vec<DialogSection> {
         let mut sections: Vec<DialogSection> = Vec::new();
@@ -312,7 +347,10 @@ impl BlockDescriptor {
         {
             return Err("invalid parameter name or value exceeds 64 KiB".into());
         }
-        let descriptor = self.parameters.iter().find(|p| p.name == name);
+        let descriptor = self
+            .parameters
+            .iter()
+            .find(|p| p.name == name || p.alias == Some(name));
         if let Some(descriptor) = descriptor {
             validate_parameter(descriptor, value)?;
         }
@@ -418,6 +456,12 @@ impl PortRule {
                     1,
                 );
             }
+            Self::TimeSource => {
+                return known(
+                    u32::from(value("TimeSource") == Some("Use external signal")),
+                    1,
+                );
+            }
             Self::Trigonometry => {
                 return known(
                     if value("Operator") == Some("atan2") {
@@ -432,7 +476,37 @@ impl PortRule {
                     },
                 );
             }
+            Self::MathFunction => {
+                return known(
+                    if matches!(value("Operator"), Some("pow" | "hypot" | "rem" | "mod")) {
+                        2
+                    } else {
+                        1
+                    },
+                    1,
+                );
+            }
             Self::Display => return known(u32::from(value("Floating") != Some("on")), 0),
+            Self::MultiPortSwitch => {
+                let Some(raw) = value("Inputs") else {
+                    return PortResolution::Unresolved {
+                        parameter: "Inputs",
+                    };
+                };
+                let Ok(n) = raw.parse::<f64>() else {
+                    return PortResolution::Unresolved {
+                        parameter: "Inputs",
+                    };
+                };
+                if !n.is_finite() || n < 1.0 || n > MAX_PORTS as f64 || n.fract() != 0.0 {
+                    return PortResolution::Invalid {
+                        parameter: "Inputs",
+                        message: format!("expected a data port count from 1 to {MAX_PORTS}"),
+                    };
+                }
+                let extra = u32::from(value("DataPortForDefault") == Some("Additional data port"));
+                return known(1 + n as u32 + extra, 1);
+            }
             Self::Integrator => {
                 for parameter in [
                     "ExternalReset",
@@ -628,6 +702,7 @@ const fn param(
         implicit_default: Some(default),
         affects_ports,
         dialog,
+        alias: None,
     }
 }
 const fn dialog(
@@ -664,11 +739,13 @@ const fn block(
         creatable: true,
     }
 }
-/// A library-linked Discontinuities block: created as a `Reference` whose
-/// `SourceBlock` is `source_block`, and matched on import by that path.
-const fn library(
+/// A block of the standard Simulink library, stored in files as a
+/// `Reference` block whose `SourceBlock` is `source_block`. Its parameters
+/// are the library mask's variables, so `label`s carry the mask prompts.
+const fn library_block(
     type_key: &'static str,
     label: &'static str,
+    category: &'static str,
     source_block: &'static str,
     parameters: &'static [ParameterDescriptor],
     ports: PortRule,
@@ -677,7 +754,7 @@ const fn library(
     BlockDescriptor {
         type_key,
         label,
-        category: "Discontinuities",
+        category,
         slx_block_type: "Reference",
         mdl_block_type: "Reference",
         source_block: Some(source_block),
@@ -687,7 +764,7 @@ const fn library(
         creatable: true,
     }
 }
-use ParameterKind::{Boolean, Enum, Expression as Expr, IntegerExpression as Int};
+use ParameterKind::{Boolean, Enum, Expression as Expr, IntegerExpression as Int, Text};
 const ONE: PortRule = PortRule::Fixed {
     inputs: 1,
     outputs: 1,
@@ -704,6 +781,29 @@ const SINK: PortRule = PortRule::Fixed {
     inputs: 1,
     outputs: 0,
 };
+
+const TIME_SOURCE_LABELS: &[EnumLabel] = &[
+    EnumLabel {
+        value: "Use simulation time",
+        label: "Simulation time",
+    },
+    EnumLabel {
+        value: "Use external signal",
+        label: "External signal",
+    },
+];
+const VECTOR_PARAMS_1D: ParameterDescriptor = param(
+    "VectorParams1D",
+    "Interpret vector parameters as 1-D",
+    Boolean,
+    "on",
+    false,
+    dialog(
+        "Signal",
+        "Treat row or column vector parameters as a 1-D vector output; off keeps their matrix orientation.",
+        None,
+    ),
+);
 
 pub static BLOCKS: &[BlockDescriptor] = &[
     block(
@@ -1342,6 +1442,300 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         [30.0, 30.0],
     ),
     block(
+        "DiscretePulseGenerator",
+        "Pulse Generator",
+        "Sources",
+        &[
+            param(
+                "PulseType",
+                "Pulse type",
+                Enum(&["Time based", "Sample based"]),
+                "Time based",
+                false,
+                dialog(
+                    "Timing",
+                    "Time based pulses follow simulation time; Sample based pulses count sample hits. The simulator runs only Time based pulses.",
+                    None,
+                ),
+            ),
+            param(
+                "TimeSource",
+                "Time (t)",
+                Enum(&["Use simulation time", "Use external signal"]),
+                "Use simulation time",
+                true,
+                dialog(
+                        "Timing",
+                        "Use simulation time or an external signal as the time input; an external source adds an input port (not simulated).",
+                        None,
+                    )
+                    .with_enum_labels(TIME_SOURCE_LABELS)
+                    .when(Visibility::Equals {
+                        parameter: "PulseType",
+                        value: "Time based",
+                    }),
+            ),
+            param(
+                "Amplitude",
+                "Amplitude",
+                Expr,
+                "1",
+                false,
+                dialog("Signal", "Value of the output while the pulse is high; it is 0 otherwise.", None),
+            ),
+            param(
+                "Period",
+                "Period",
+                Expr,
+                "10",
+                false,
+                dialog(
+                    "Timing",
+                    "Pulse period in seconds (Time based) or in samples (Sample based). Fixed-step runs need a whole number of steps.",
+                    Some("s"),
+                ),
+            ),
+            param(
+                "PulseWidth",
+                "Pulse width",
+                Expr,
+                "5",
+                false,
+                dialog(
+                    "Timing",
+                    "Duty cycle as a percentage of the period (Time based) or a number of samples (Sample based); the high time must be a whole number of steps.",
+                    Some("%"),
+                ),
+            ),
+            param(
+                "PhaseDelay",
+                "Phase delay",
+                Expr,
+                "0",
+                false,
+                dialog(
+                    "Timing",
+                    "Delay before the first pulse in seconds (Time based) or samples (Sample based); it must fall on a sample time.",
+                    Some("s"),
+                ),
+            ),
+            param(
+                "SampleTime",
+                "Sample time",
+                Expr,
+                "1",
+                false,
+                dialog(
+                        "Timing",
+                        "Sample period in seconds of a Sample based pulse.",
+                        Some("s"),
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "PulseType",
+                        value: "Sample based",
+                    }),
+            ),
+            VECTOR_PARAMS_1D,
+        ],
+        PortRule::TimeSource,
+        [30.0, 30.0],
+    ),
+    block(
+        "SignalGenerator",
+        "Signal Generator",
+        "Sources",
+        &[
+            param(
+                "WaveForm",
+                "Wave form",
+                Enum(&["sine", "square", "sawtooth", "random"]),
+                "sine",
+                false,
+                dialog(
+                        "Signal",
+                        "Sine, square (low then high over each period), sawtooth (falling from +amplitude to -amplitude) or random; random is not simulated.",
+                        None,
+                    )
+                    .with_enum_labels(&[
+                        EnumLabel {
+                            value: "sine",
+                            label: "Sine",
+                        },
+                        EnumLabel {
+                            value: "square",
+                            label: "Square",
+                        },
+                        EnumLabel {
+                            value: "sawtooth",
+                            label: "Sawtooth",
+                        },
+                        EnumLabel {
+                            value: "random",
+                            label: "Random",
+                        },
+                    ]),
+            ),
+            param(
+                "TimeSource",
+                "Time (t)",
+                Enum(&["Use simulation time", "Use external signal"]),
+                "Use simulation time",
+                true,
+                dialog(
+                        "Timing",
+                        "Use simulation time or an external signal as the time input; an external source adds an input port (not simulated).",
+                        None,
+                    )
+                    .with_enum_labels(TIME_SOURCE_LABELS),
+            ),
+            param(
+                "Amplitude",
+                "Amplitude",
+                Expr,
+                "1",
+                false,
+                dialog("Signal", "Peak value of the waveform; a negative value flips its phase.", None),
+            ),
+            param(
+                "Frequency",
+                "Frequency",
+                Expr,
+                "1",
+                false,
+                dialog(
+                    "Signal",
+                    "Frequency in the chosen units. Square and sawtooth edges must fall on sample times in fixed-step runs.",
+                    None,
+                ),
+            ),
+            param(
+                "Units",
+                "Units",
+                Enum(&["rad/sec", "Hertz"]),
+                "rad/sec",
+                false,
+                dialog("Signal", "Whether the frequency is in radians per second or hertz.", None),
+            ),
+            VECTOR_PARAMS_1D,
+        ],
+        PortRule::TimeSource,
+        [30.0, 30.0],
+    ),
+    library_block(
+        "Ramp",
+        "Ramp",
+        "Sources",
+        "simulink/Sources/Ramp",
+        &[
+            param(
+                "slope",
+                "Slope",
+                Expr,
+                "1",
+                false,
+                dialog("Signal", "Rate of change of the output after the start time.", None),
+            ),
+            param(
+                "start",
+                "Start time",
+                Expr,
+                "0",
+                false,
+                dialog("Timing", "Time at which the output starts to change.", Some("s")),
+            ),
+            // Files written by most releases store the mask's initial
+            // output as `X0`; the current reference documents it as
+            // `InitialOutput`. The dialog edits whichever the block carries.
+            ParameterDescriptor {
+                alias: Some("InitialOutput"),
+                ..param(
+                    "X0",
+                    "Initial output",
+                    Expr,
+                    "0",
+                    false,
+                    dialog("Signal", "Output value until the start time.", None),
+                )
+            },
+            VECTOR_PARAMS_1D,
+        ],
+        SOURCE,
+        [30.0, 30.0],
+    ),
+    library_block(
+        "ChirpSignal",
+        "Chirp Signal",
+        "Sources",
+        "simulink/Sources/Chirp Signal",
+        &[
+            param(
+                "f1",
+                "Initial frequency",
+                Expr,
+                "0.1",
+                false,
+                dialog("Signal", "Frequency of the sine wave at time zero.", Some("Hz")),
+            ),
+            param(
+                "T",
+                "Target time",
+                Expr,
+                "100",
+                false,
+                dialog(
+                    "Timing",
+                    "Time at which the frequency reaches its target; the sweep continues at the same rate afterwards.",
+                    Some("s"),
+                ),
+            ),
+            param(
+                "f2",
+                "Frequency at target time",
+                Expr,
+                "1",
+                false,
+                dialog("Signal", "Frequency of the sine wave at the target time.", Some("Hz")),
+            ),
+            VECTOR_PARAMS_1D,
+        ],
+        SOURCE,
+        [30.0, 30.0],
+    ),
+    library_block(
+        "RepeatingSequence",
+        "Repeating Sequence",
+        "Sources",
+        "simulink/Sources/Repeating\nSequence",
+        &[
+            param(
+                "rep_seq_t",
+                "Time values",
+                Expr,
+                "[0 2]",
+                false,
+                dialog(
+                    "Signal",
+                    "Strictly increasing times starting at 0; the last one is the period of the waveform.",
+                    Some("s"),
+                ),
+            ),
+            param(
+                "rep_seq_y",
+                "Output values",
+                Expr,
+                "[0 2]",
+                false,
+                dialog(
+                    "Signal",
+                    "Output at each time value; the output is interpolated linearly between them.",
+                    None,
+                ),
+            ),
+        ],
+        SOURCE,
+        [30.0, 30.0],
+    ),
+    block(
         "Sin",
         "Sine Wave",
         "Sources",
@@ -1657,9 +2051,10 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         ONE,
         [30.0, 30.0],
     ),
-    library(
+    library_block(
         "CoulombFriction",
         "Coulomb & Viscous Friction",
+        "Discontinuities",
         "simulink/Discontinuities/Coulomb &\nViscous Friction",
         &[
             // The library block ships with `offset = [1 3 2 0]`, which turns a
@@ -1698,9 +2093,10 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         ONE,
         [30.0, 30.0],
     ),
-    library(
+    library_block(
         "WrapToZero",
         "Wrap To Zero",
+        "Discontinuities",
         "simulink/Discontinuities/Wrap To Zero",
         &[param(
             "Threshold",
@@ -1717,17 +2113,19 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         ONE,
         [30.0, 30.0],
     ),
-    library(
+    library_block(
         "SaturationDynamic",
         "Saturation Dynamic",
+        "Discontinuities",
         "simulink/Discontinuities/Saturation\nDynamic",
         &[],
         THREE,
         [30.0, 50.0],
     ),
-    library(
+    library_block(
         "DeadZoneDynamic",
         "Dead Zone Dynamic",
+        "Discontinuities",
         "simulink/Discontinuities/Dead Zone\nDynamic",
         &[],
         THREE,
@@ -1849,6 +2247,9 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         "Routing",
         &[
             ParameterDescriptor {
+                // The built-in default Simulink writes to BlockParameterDefaults
+                // (seen in the corpus). The reference page's `u2 > Threshold`
+                // is the library block's default; its copies store Criteria.
                 implicit_default: Some("u2 >= Threshold"),
                 ..param(
                     "Criteria",
@@ -1917,6 +2318,286 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         },
         [30.0, 50.0],
     ),
+    // Signal Routing selection blocks. Dialog-driven indices only; the
+    // simulator rejects port-driven index options explicitly.
+    // https://www.mathworks.com/help/simulink/slref/selector.html
+    block(
+        "Selector",
+        "Selector",
+        "Routing",
+        &[
+            param(
+                "NumberOfDimensions",
+                "Number of input dimensions",
+                Enum(&["1", "2"]),
+                "1",
+                false,
+                dialog(
+                    "Selection",
+                    "Dimensionality of the input signal; the index settings below hold one entry per dimension.",
+                    None,
+                ),
+            ),
+            param(
+                "IndexMode",
+                "Index mode",
+                Enum(&["One-based", "Zero-based"]),
+                "One-based",
+                false,
+                dialog(
+                    "Selection",
+                    "Whether the first element of each dimension has index 1 or 0.",
+                    None,
+                ),
+            ),
+            param(
+                "IndexOptionArray",
+                "Index options",
+                Text,
+                "{'Index vector (dialog)'}",
+                false,
+                dialog(
+                    "Selection",
+                    "Cell array with one option per dimension: 'Select all', 'Index vector (dialog)' or 'Starting index (dialog)'. Port-driven options are not simulated.",
+                    None,
+                ),
+            ),
+            param(
+                "IndexParamArray",
+                "Indices",
+                Text,
+                "{'[1 3]'}",
+                false,
+                dialog(
+                    "Selection",
+                    "Cell array with one expression per dimension: the elements to select, or the starting index of a contiguous range.",
+                    None,
+                ),
+            ),
+            param(
+                "OutputSizeArray",
+                "Output sizes",
+                Text,
+                "{'1'}",
+                false,
+                dialog(
+                    "Selection",
+                    "Cell array with one output size per dimension, used by starting-index selection.",
+                    None,
+                ),
+            ),
+            ParameterDescriptor {
+                implicit_default: Some("3"),
+                ..param(
+                    "InputPortWidth",
+                    "Input port size",
+                    Expr,
+                    "-1",
+                    false,
+                    dialog(
+                        "Selection",
+                        "Width of a one-dimensional input signal; -1 inherits it from the driving block.",
+                        None,
+                    )
+                    .when(Visibility::Equals {
+                        parameter: "NumberOfDimensions",
+                        value: "1",
+                    }),
+                )
+            },
+        ],
+        ONE,
+        [30.0, 50.0],
+    ),
+    // https://www.mathworks.com/help/simulink/slref/multiportswitch.html
+    block(
+        "MultiPortSwitch",
+        "Multiport Switch",
+        "Routing",
+        &[
+            param(
+                "Inputs",
+                "Number of data ports",
+                Int,
+                "3",
+                true,
+                dialog(
+                    "Ports",
+                    "Data input ports following the control input; a single data port indexes the elements of its vector. Changes the input port count.",
+                    None,
+                ),
+            ),
+            param(
+                "DataPortOrder",
+                "Data port order",
+                Enum(
+                    &[
+                        "Zero-based contiguous",
+                        "One-based contiguous",
+                        "Specify indices",
+                    ],
+                ),
+                "One-based contiguous",
+                false,
+                dialog(
+                    "Selection",
+                    "How control values map to data ports: counting from 0, counting from 1, or the explicit indices below.",
+                    None,
+                ),
+            ),
+            param(
+                "DataPortIndices",
+                "Data port indices",
+                Expr,
+                "{1,2,3}",
+                false,
+                dialog(
+                    "Selection",
+                    "Cell array listing the control values that select each data port, for example {[3 5],0,18}.",
+                    None,
+                )
+                .when(Visibility::Equals {
+                    parameter: "DataPortOrder",
+                    value: "Specify indices",
+                }),
+            ),
+            param(
+                "DataPortForDefault",
+                "Data port for default case",
+                Enum(&["Last data port", "Additional data port"]),
+                "Last data port",
+                true,
+                dialog(
+                    "Ports",
+                    "Which data port answers a control value matching no index; an additional port adds a trailing input.",
+                    None,
+                ),
+            ),
+            param(
+                "DiagnosticForDefault",
+                "Diagnostic for default case",
+                Enum(&["None", "Warning", "Error"]),
+                "Error",
+                false,
+                dialog(
+                    "Selection",
+                    "Whether an unmatched control value stops the simulation or silently uses the default data port.",
+                    None,
+                ),
+            ),
+        ],
+        PortRule::MultiPortSwitch,
+        [30.0, 60.0],
+    ),
+    // https://www.mathworks.com/help/simulink/slref/manualswitch.html
+    block(
+        "ManualSwitch",
+        "Manual Switch",
+        "Routing",
+        &[ParameterDescriptor {
+            // The reference page documents no default; imports must be explicit.
+            // Files store the position as `CurrentSetting`; `sw` is the
+            // programmatic name, which the simulator and glyph also read.
+            implicit_default: None,
+            ..param(
+                "CurrentSetting",
+                "Position",
+                Enum(&["1", "0"]),
+                "1",
+                false,
+                dialog(
+                    "Selection",
+                    "Which input reaches the output: 1 passes the first (upper) input, 0 the second.",
+                    None,
+                )
+                .with_enum_labels(&[
+                    EnumLabel {
+                        value: "1",
+                        label: "First input",
+                    },
+                    EnumLabel {
+                        value: "0",
+                        label: "Second input",
+                    },
+                ]),
+            )
+        }],
+        PortRule::Fixed {
+            inputs: 2,
+            outputs: 1,
+        },
+        [30.0, 30.0],
+    ),
+    // Index Vector is the library's unmasked built-in Multiport Switch with
+    // one zero-based data port. Simulink saves copies as plain MultiPortSwitch
+    // blocks, so the palette creates that preset; the non-creatable entry
+    // after it describes imported library links.
+    // https://www.mathworks.com/help/simulink/slref/indexvector.html
+    BlockDescriptor {
+        type_key: "IndexVector",
+        label: "Index Vector",
+        category: "Routing",
+        slx_block_type: "MultiPortSwitch",
+        mdl_block_type: "MultiPortSwitch",
+        source_block: None,
+        parameters: &[
+            param(
+                "Inputs",
+                "Number of data ports",
+                Int,
+                "1",
+                true,
+                dialog(
+                    "Ports",
+                    "The single data port whose elements the control input indexes.",
+                    None,
+                ),
+            ),
+            param(
+                "DataPortOrder",
+                "Data port order",
+                Enum(&["Zero-based contiguous"]),
+                "Zero-based contiguous",
+                false,
+                dialog("Selection", "Elements are indexed from zero.", None),
+            ),
+        ],
+        ports: PortRule::MultiPortSwitch,
+        default_size: [30.0, 30.0],
+        creatable: true,
+    },
+    BlockDescriptor {
+        type_key: "IndexVectorReference",
+        label: "Index Vector",
+        category: "Routing",
+        slx_block_type: "Reference",
+        mdl_block_type: "Reference",
+        source_block: Some("simulink/Signal Routing/Index Vector"),
+        parameters: &[],
+        ports: PortRule::Fixed {
+            inputs: 2,
+            outputs: 1,
+        },
+        default_size: [30.0, 30.0],
+        creatable: false,
+    },
+    // Environment Controller is a masked library block, saved as a link.
+    // https://www.mathworks.com/help/simulink/slref/environmentcontroller.html
+    BlockDescriptor {
+        type_key: "EnvironmentController",
+        label: "Environment Controller",
+        category: "Routing",
+        slx_block_type: "Reference",
+        mdl_block_type: "Reference",
+        source_block: Some("simulink/Signal Routing/Environment Controller"),
+        parameters: &[],
+        ports: PortRule::Fixed {
+            inputs: 2,
+            outputs: 1,
+        },
+        default_size: [30.0, 40.0],
+        creatable: true,
+    },
     block("Abs", "Absolute Value", "Math", &[], ONE, [30.0, 30.0]),
     block(
         "Trigonometry",
@@ -1956,6 +2637,223 @@ pub static BLOCKS: &[BlockDescriptor] = &[
         ],
         PortRule::Trigonometry,
         [40.0, 30.0],
+    ),
+    block(
+        "Math",
+        "Math Function",
+        "Math",
+        &[
+            param(
+                "Operator",
+                "Function",
+                Enum(
+                    &[
+                        "exp",
+                        "log",
+                        "2^u",
+                        "10^u",
+                        "log10",
+                        "magnitude^2",
+                        "square",
+                        "pow",
+                        "conj",
+                        "reciprocal",
+                        "hypot",
+                        "rem",
+                        "mod",
+                        "transpose",
+                        "hermitian",
+                    ],
+                ),
+                "exp",
+                true,
+                dialog(
+                    "Operation",
+                    "Mathematical function to apply. pow, hypot, rem and mod use two inputs; transpose and hermitian swap matrix dimensions.",
+                    None,
+                ),
+            ),
+            param(
+                "OutputSignalType",
+                "Output signal type",
+                Enum(&["auto", "real", "complex"]),
+                "auto",
+                false,
+                dialog(
+                    "Operation",
+                    "Numeric type of the output; the simulator supports real outputs only.",
+                    None,
+                ),
+            ),
+        ],
+        PortRule::MathFunction,
+        [40.0, 30.0],
+    ),
+    block(
+        "Sqrt",
+        "Sqrt",
+        "Math",
+        &[
+            param(
+                "Operator",
+                "Function",
+                Enum(&["sqrt", "signedSqrt", "rSqrt"]),
+                "sqrt",
+                false,
+                dialog(
+                        "Operation",
+                        "Square root of the input, its sign-preserving form sign(u)*sqrt(|u|), or the reciprocal square root.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "sqrt",
+                                label: "Square root",
+                            },
+                            EnumLabel {
+                                value: "signedSqrt",
+                                label: "Signed square root",
+                            },
+                            EnumLabel {
+                                value: "rSqrt",
+                                label: "Reciprocal square root",
+                            },
+                        ],
+                    ),
+            ),
+            param(
+                "OutputSignalType",
+                "Output signal type",
+                Enum(&["auto", "real", "complex"]),
+                "auto",
+                false,
+                dialog(
+                    "Operation",
+                    "Numeric type of the output; the simulator supports real outputs only.",
+                    None,
+                ),
+            ),
+        ],
+        ONE,
+        [30.0, 30.0],
+    ),
+    block("Signum", "Sign", "Math", &[], ONE, [30.0, 30.0]),
+    block(
+        "Rounding",
+        "Rounding Function",
+        "Math",
+        &[
+            param(
+                "Operator",
+                "Function",
+                Enum(&["floor", "ceil", "round", "fix"]),
+                "floor",
+                false,
+                dialog(
+                        "Operation",
+                        "Rounding direction: toward minus infinity, plus infinity, the nearest integer (halves away from zero), or zero.",
+                        None,
+                    )
+                    .with_enum_labels(
+                        &[
+                            EnumLabel {
+                                value: "floor",
+                                label: "floor (toward -inf)",
+                            },
+                            EnumLabel {
+                                value: "ceil",
+                                label: "ceil (toward +inf)",
+                            },
+                            EnumLabel {
+                                value: "round",
+                                label: "round (nearest)",
+                            },
+                            EnumLabel {
+                                value: "fix",
+                                label: "fix (toward zero)",
+                            },
+                        ],
+                    ),
+            ),
+        ],
+        ONE,
+        [30.0, 30.0],
+    ),
+    block("UnaryMinus", "Unary Minus", "Math", &[], ONE, [30.0, 30.0]),
+    block(
+        "Polyval",
+        "Polynomial",
+        "Math",
+        &[ParameterDescriptor {
+            implicit_default: Some(POLYVAL_DEFAULT_COEFS),
+            ..param(
+                "coefs",
+                "Polynomial coefficients",
+                Expr,
+                "[1 0]",
+                false,
+                dialog(
+                    "Operation",
+                    "Coefficients in descending powers of the input, as for MATLAB polyval; the last value is the constant term. New blocks start as the identity; an imported block without coefficients keeps the Simulink library polynomial.",
+                    None,
+                ),
+            )
+        }],
+        ONE,
+        [40.0, 30.0],
+    ),
+    block(
+        "DotProduct",
+        "Dot Product",
+        "Math",
+        &[],
+        PortRule::Fixed {
+            inputs: 2,
+            outputs: 1,
+        },
+        [30.0, 30.0],
+    ),
+    block(
+        "MinMax",
+        "MinMax",
+        "Math",
+        &[
+            param(
+                "Function",
+                "Function",
+                Enum(&["min", "max"]),
+                "min",
+                false,
+                dialog(
+                    "Operation",
+                    "Minimum or maximum, taken elementwise across the inputs, or over the elements of a single vector input.",
+                    None,
+                ),
+            ),
+            ParameterDescriptor {
+                implicit_default: Some("1"),
+                ..param(
+                    "Inputs",
+                    "Number of input ports",
+                    Int,
+                    "2",
+                    true,
+                    dialog(
+                        "Operation",
+                        "Number of input ports. One port reduces a vector to a scalar. Changes the block interface.",
+                        None,
+                    ),
+                )
+            },
+        ],
+        PortRule::Count {
+            parameter: "Inputs",
+            input: true,
+            widths: false,
+            other: 1,
+        },
+        [30.0, 30.0],
     ),
     block("Terminator", "Terminator", "Sinks", &[], SINK, [20.0, 20.0]),
     block(
@@ -2003,34 +2901,36 @@ pub fn find(type_key: &str) -> Option<&'static BlockDescriptor> {
     BLOCKS.iter().find(|b| b.type_key == type_key)
 }
 
-/// Library paths compared with every run of whitespace (including the line
-/// breaks Simulink keeps in block names) collapsed to one space.
-fn normalize_path(path: &str) -> String {
+/// Canonical form of a `SourceBlock` path: library block names wrap onto
+/// several lines in files (`Repeating\nSequence`), so whitespace runs
+/// compare equal.
+pub fn canonical_source(path: &str) -> String {
     path.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The descriptor of a library-linked block by its `SourceBlock` path.
-pub fn find_library(source_block: &str) -> Option<&'static BlockDescriptor> {
-    let wanted = normalize_path(source_block);
-    BLOCKS
-        .iter()
-        .find(|b| b.source_block.is_some_and(|s| normalize_path(s) == wanted))
+/// The descriptor for a library block with this `SourceBlock` path.
+pub fn find_by_source(source_block: &str) -> Option<&'static BlockDescriptor> {
+    let wanted = canonical_source(source_block);
+    BLOCKS.iter().find(|b| {
+        b.source_block
+            .is_some_and(|s| canonical_source(s) == wanted)
+    })
 }
 
-/// The descriptor governing an existing block: a known library link by its
-/// source path, else an unmasked, unlinked leaf block by its type. Masked
-/// native blocks, unknown links and subsystems declare their own parameters.
+/// The descriptor whose dialog describes `block`: a `Reference` block's
+/// library source (a link may carry the library mask's values), or an
+/// unmasked native block's type. Masked native blocks, subsystems and
+/// unknown links have none and keep showing raw parameters.
 pub fn descriptor_for(block: &Block) -> Option<&'static BlockDescriptor> {
     if block.subsystem.is_some() {
         return None;
     }
-    if let Some(source) = &block.library_source {
-        return find_library(source);
+    match &block.library_source {
+        Some(source) if block.block_type == "Reference" => find_by_source(source),
+        Some(_) => None,
+        None if block.mask.is_some() => None,
+        None => find(&block.block_type).filter(|d| d.source_block.is_none()),
     }
-    if block.mask.is_some() {
-        return None;
-    }
-    find(&block.block_type).filter(|d| d.source_block.is_none())
 }
 
 #[cfg(test)]
@@ -2232,6 +3132,164 @@ mod tests {
         assert!(blocks_in_category("absent").next().is_none());
     }
     #[test]
+    fn library_blocks_are_found_by_source_and_time_sources_add_inputs() {
+        let ramp = find_by_source("simulink/Sources/Ramp").unwrap();
+        assert_eq!(ramp.type_key, "Ramp");
+        assert_eq!(ramp.slx_block_type, "Reference");
+        assert_eq!(
+            find_by_source("simulink/Sources/Repeating\nSequence")
+                .unwrap()
+                .type_key,
+            find_by_source("simulink/Sources/Repeating Sequence")
+                .unwrap()
+                .type_key,
+        );
+        assert!(find_by_source("simulink/Sources/Band-Limited White Noise").is_none());
+        assert_eq!(
+            ports(
+                "DiscretePulseGenerator",
+                "TimeSource",
+                "Use external signal"
+            ),
+            known(1, 1)
+        );
+        assert_eq!(
+            ports("SignalGenerator", "TimeSource", "Use external signal"),
+            known(1, 1)
+        );
+        assert_eq!(ports("SignalGenerator", "WaveForm", "square"), known(0, 1));
+        let mut block = crate::Block {
+            id: "1".into(),
+            block_type: "Reference".into(),
+            name: "r".into(),
+            position: crate::Rect::default(),
+            orientation: crate::Orientation::Right,
+            mirrored: false,
+            ports: PortCounts::default(),
+            parameters: BTreeMap::new(),
+            mask: None,
+            library_source: Some("simulink/Sources/Chirp Signal".into()),
+            subsystem: None,
+            style: Default::default(),
+            interface: None,
+        };
+        assert_eq!(descriptor_for(&block).unwrap().type_key, "ChirpSignal");
+        block.library_source = Some("simulink/Math/Gain".into());
+        assert!(descriptor_for(&block).is_none());
+        block.library_source = None;
+        block.block_type = "Ramp".into();
+        assert!(
+            descriptor_for(&block).is_none(),
+            "Ramp is only a library block"
+        );
+        block.block_type = "Gain".into();
+        assert_eq!(descriptor_for(&block).unwrap().type_key, "Gain");
+    }
+    #[test]
+    fn ramp_initial_output_binds_to_the_key_the_block_carries() {
+        let ramp = find("Ramp").unwrap();
+        let initial = ramp.parameters.iter().find(|p| p.name == "X0").unwrap();
+        let entry = |key: &str, value: &str| (key.to_string(), value.to_string());
+        let x0 = BTreeMap::from([entry("X0", "1")]);
+        let documented = BTreeMap::from([entry("InitialOutput", "1")]);
+        let both = BTreeMap::from([entry("X0", "1"), entry("InitialOutput", "2")]);
+        assert_eq!(initial.key_in(&BTreeMap::new()), "X0");
+        assert_eq!(initial.key_in(&x0), "X0");
+        assert_eq!(initial.key_in(&documented), "InitialOutput");
+        assert_eq!(initial.key_in(&both), "X0", "the simulator prefers X0");
+        assert!(ramp.check_edit(&documented, "InitialOutput", "").is_err());
+        assert!(ramp.check_edit(&documented, "InitialOutput", "3").is_ok());
+        let created = ramp.creation_parameters();
+        assert_eq!(created.get("X0").map(String::as_str), Some("0"));
+        assert!(!created.contains_key("InitialOutput"));
+        // The Chirp Signal reference lists no phase parameter.
+        assert!(find("ChirpSignal")
+            .unwrap()
+            .parameters
+            .iter()
+            .all(|p| p.name != "phi"));
+    }
+    #[test]
+    fn alternate_sine_and_trigonometry_modes_have_correct_arity() {
+        assert_eq!(
+            ports("Sin", "TimeSource", "Use external signal"),
+            known(1, 1)
+        );
+        let sample = BTreeMap::from([
+            ("SineType".into(), "Sample based".into()),
+            ("TimeSource".into(), "Use external signal".into()),
+        ]);
+        assert_eq!(find("Sin").unwrap().resolve_ports(&sample), known(0, 1));
+        assert_eq!(ports("Trigonometry", "Operator", "atan2"), known(2, 1));
+        assert_eq!(ports("Trigonometry", "Operator", "sincos"), known(1, 2));
+        assert_eq!(ports("Trigonometry", "Operator", "cos + jsin"), known(1, 1));
+        for operator in ["pow", "hypot", "rem", "mod"] {
+            assert_eq!(ports("Math", "Operator", operator), known(2, 1));
+        }
+        for operator in ["exp", "transpose", "2^u"] {
+            assert_eq!(ports("Math", "Operator", operator), known(1, 1));
+        }
+        assert_eq!(ports("MinMax", "Inputs", "3"), known(3, 1));
+        assert_eq!(
+            find("MinMax").unwrap().resolve_ports(&BTreeMap::new()),
+            known(1, 1)
+        );
+        assert_eq!(ports("Display", "Floating", "on"), known(0, 0));
+    }
+    #[test]
+    fn multiport_switch_ports_count_the_control_and_default_ports() {
+        assert_eq!(ports("MultiPortSwitch", "Inputs", "3"), known(4, 1));
+        assert_eq!(ports("MultiPortSwitch", "Inputs", "1"), known(2, 1));
+        let extra = BTreeMap::from([
+            ("Inputs".into(), "2".into()),
+            ("DataPortForDefault".into(), "Additional data port".into()),
+        ]);
+        assert_eq!(
+            find("MultiPortSwitch").unwrap().resolve_ports(&extra),
+            known(4, 1)
+        );
+        assert!(matches!(
+            ports("MultiPortSwitch", "Inputs", "n"),
+            PortResolution::Unresolved {
+                parameter: "Inputs"
+            }
+        ));
+        assert!(matches!(
+            ports("MultiPortSwitch", "Inputs", "0"),
+            PortResolution::Invalid { .. }
+        ));
+    }
+    #[test]
+    fn library_blocks_are_described_by_their_source_path() {
+        let mut block = Block {
+            id: crate::BlockId("1".into()),
+            block_type: "Reference".into(),
+            name: "iv".into(),
+            position: crate::Rect::default(),
+            orientation: crate::Orientation::Right,
+            mirrored: false,
+            ports: PortCounts::default(),
+            parameters: BTreeMap::new(),
+            mask: None,
+            library_source: Some("simulink/Signal\nRouting/Index\nVector".into()),
+            subsystem: None,
+            style: Default::default(),
+            interface: None,
+        };
+        assert_eq!(
+            descriptor_for(&block).unwrap().type_key,
+            "IndexVectorReference"
+        );
+        block.library_source = Some("simulink/Signal Routing/Merge".into());
+        assert!(descriptor_for(&block).is_none());
+        block.library_source = None;
+        assert!(descriptor_for(&block).is_none());
+        block.block_type = "ManualSwitch".into();
+        assert_eq!(descriptor_for(&block).unwrap().type_key, "ManualSwitch");
+        block.mask = Some(Default::default());
+        assert!(descriptor_for(&block).is_none());
+    }
+    #[test]
     fn library_links_resolve_by_normalized_source_path() {
         let wrap = find("WrapToZero").unwrap();
         assert_eq!(wrap.block_type(), "Reference");
@@ -2274,21 +3332,5 @@ mod tests {
         assert_eq!(descriptor_for(&block).map(|d| d.type_key), Some("Saturate"));
         block.mask = Some(Default::default());
         assert!(descriptor_for(&block).is_none());
-    }
-    #[test]
-    fn alternate_sine_and_trigonometry_modes_have_correct_arity() {
-        assert_eq!(
-            ports("Sin", "TimeSource", "Use external signal"),
-            known(1, 1)
-        );
-        let sample = BTreeMap::from([
-            ("SineType".into(), "Sample based".into()),
-            ("TimeSource".into(), "Use external signal".into()),
-        ]);
-        assert_eq!(find("Sin").unwrap().resolve_ports(&sample), known(0, 1));
-        assert_eq!(ports("Trigonometry", "Operator", "atan2"), known(2, 1));
-        assert_eq!(ports("Trigonometry", "Operator", "sincos"), known(1, 2));
-        assert_eq!(ports("Trigonometry", "Operator", "cos + jsin"), known(1, 1));
-        assert_eq!(ports("Display", "Floating", "on"), known(0, 0));
     }
 }

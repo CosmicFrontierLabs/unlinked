@@ -181,16 +181,32 @@ pub fn appearance(block: &Block) -> Appearance {
             vec![(0.1, 0.8), (0.35, 0.8)],
         ]),
         "MultiPortSwitch" => text("*"),
-        "ManualSwitch" => Icon::Strokes(vec![
-            vec![(0.1, 0.3), (0.3, 0.3)],
-            vec![(0.1, 0.7), (0.3, 0.7)],
-            vec![(0.3, 0.3), (0.7, 0.5), (0.9, 0.5)],
-        ]),
+        "ManualSwitch" => {
+            // The arm shows the connected input: position 1 the first (upper),
+            // 0 the second. Files store `CurrentSetting`; the programmatic `sw`
+            // wins when present. https://www.mathworks.com/help/simulink/slref/manualswitch.html
+            let sw = p("sw");
+            let position = if sw.is_empty() {
+                p("CurrentSetting")
+            } else {
+                sw
+            };
+            let from = if position == "0" { 0.7 } else { 0.3 };
+            Icon::Strokes(vec![
+                vec![(0.1, 0.3), (0.3, 0.3)],
+                vec![(0.1, 0.7), (0.3, 0.7)],
+                vec![(0.3, from), (0.7, 0.5), (0.9, 0.5)],
+            ])
+        }
         "RelationalOperator" => text(&relop(&non_empty(p("Operator"), ">="))),
         "Logic" => text(&non_empty(p("Operator"), "AND")),
         "Abs" => text("|u|"),
         "Signum" => text("sign"),
-        "Sqrt" => text("√u"),
+        "Sqrt" => text(&sqrt_label(&non_empty(p("Operator"), "sqrt"))),
+        "Rounding" => text(&non_empty(p("Operator"), "floor")),
+        "UnaryMinus" => text("-u"),
+        "Polyval" => text("P(u)"),
+        "DotProduct" => text("u₁·u₂"),
         "Math" => text(&math_label(&non_empty(p("Operator"), "exp"))),
         "Trigonometry" => text(&non_empty(p("Operator"), "sin")),
         "MinMax" => text(&non_empty(p("Function"), "min")),
@@ -269,12 +285,17 @@ fn subsystem_icon(block: &Block) -> Icon {
 }
 
 fn reference_icon(block: &Block) -> Icon {
+    // Unmasked library blocks store an empty SourceType; their library name
+    // is the better label then.
     let source_type = block
         .param("SourceType")
+        .filter(|t| !t.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| block.display_type().replace('\n', " "));
     let p = |k: &str| block.param(k).unwrap_or_default().trim().to_string();
     match source_type.as_str() {
+        "Index Vector" => Icon::Text(vec!["Index".into(), "Vector".into()]),
+        "Environment Controller" => Icon::Text(vec!["Sim".into(), "Coder".into()]),
         "Compare To Zero" => Icon::Text(vec![format!("{} 0", relop(&non_empty(p("relop"), "<=")))]),
         "Compare To Constant" => Icon::Text(vec![format!(
             "{} {}",
@@ -282,6 +303,14 @@ fn reference_icon(block: &Block) -> Icon {
             non_empty(p("const"), "3")
         )]),
         "Ramp" => Icon::Strokes(vec![vec![(0.1, 0.85), (0.9, 0.15)]]),
+        "Chirp Signal" | "chirp" => Icon::Strokes(vec![chirp()]),
+        "Repeating Sequence" | "Repeating table" => Icon::Strokes(vec![vec![
+            (0.1, 0.8),
+            (0.3, 0.2),
+            (0.5, 0.8),
+            (0.7, 0.2),
+            (0.9, 0.8),
+        ]]),
         "DocBlock" => Icon::Text(vec!["DOC".into(), "Text".into()]),
         "PID 1dof" | "PID 2dof" => Icon::Text(vec!["PID(s)".into()]),
         "Discrete PID Controller" => Icon::Text(vec!["PID(z)".into()]),
@@ -406,6 +435,14 @@ fn math_label(op: &str) -> String {
     }
 }
 
+fn sqrt_label(op: &str) -> String {
+    match op {
+        "signedSqrt" => "signed\n√u".into(),
+        "rSqrt" => "1/√u".into(),
+        _ => "√u".into(),
+    }
+}
+
 fn conversion_label(dtype: &str) -> String {
     let t = dtype.trim();
     if t.is_empty() || t.starts_with("Inherit") {
@@ -483,6 +520,17 @@ fn sine() -> Vec<(f64, f64)> {
         .map(|i| {
             let t = i as f64 / 24.0;
             (0.1 + 0.8 * t, 0.5 - 0.3 * (t * std::f64::consts::TAU).sin())
+        })
+        .collect()
+}
+
+/// A sine whose frequency rises across the icon.
+fn chirp() -> Vec<(f64, f64)> {
+    (0..=48)
+        .map(|i| {
+            let t = i as f64 / 48.0;
+            let phase = std::f64::consts::TAU * (0.5 * t + 1.5 * t * t);
+            (0.1 + 0.8 * t, 0.5 - 0.3 * phase.sin())
         })
         .collect()
 }
@@ -695,6 +743,40 @@ pub fn draw_icon(svg: &mut Svg, icon: &Icon, inner: Rect, fg: &str, max_font: f6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_switch_arm_follows_the_stored_position() {
+        let arm = |params: &[(&str, &str)]| {
+            let block = Block {
+                id: "1".into(),
+                block_type: "ManualSwitch".into(),
+                name: "sw".into(),
+                position: Rect::default(),
+                orientation: Orientation::Right,
+                mirrored: false,
+                ports: Default::default(),
+                parameters: params
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                mask: None,
+                library_source: None,
+                subsystem: None,
+                style: Default::default(),
+                interface: None,
+            };
+            match appearance(&block).icon {
+                Icon::Strokes(strokes) => strokes[2][0].1,
+                _ => panic!("the Manual Switch icon is drawn with strokes"),
+            }
+        };
+        // Files store CurrentSetting (0 selects the lower input); the
+        // programmatic sw wins when both are present.
+        assert_eq!(arm(&[("CurrentSetting", "0")]), 0.7);
+        assert_eq!(arm(&[("CurrentSetting", "1")]), 0.3);
+        assert_eq!(arm(&[("sw", "0")]), 0.7);
+        assert_eq!(arm(&[("sw", "1"), ("CurrentSetting", "0")]), 0.3);
+    }
 
     #[test]
     fn long_values_show_placeholders() {

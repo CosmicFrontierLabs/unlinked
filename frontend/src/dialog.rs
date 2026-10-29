@@ -58,8 +58,11 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
         let help_id = format!("{id}-help");
         let issues_id = format!("{id}-issues");
         let described_by = format!("{help_id} {issues_id}");
+        // The key the block stores this parameter under (a Ramp's initial
+        // output may be `X0` or `InitialOutput`); edits go to the same key.
+        let key = p.key_in(&b.parameters);
         let problems: Vec<_> = props.problems.iter().filter(|d| {
-            matches!(&d.target, DiagnosticTarget::Block { parameter: Some(name), .. } if name == p.name)
+            matches!(&d.target, DiagnosticTarget::Block { parameter: Some(name), .. } if name == key)
         }).collect();
         let invalid = problems.iter().any(|d| d.severity == Severity::Error);
         let help_open = *help == Some(p.name);
@@ -69,10 +72,10 @@ pub fn parameter_dialog(props: &DialogProps) -> Html {
                 help.set(if help_open { None } else { Some(p.name) })
             })
         };
-        let stored = b.param(p.name).map(str::to_string);
+        let stored = b.param(key).map(str::to_string);
         // What applies when the block does not store the parameter.
         let shown = stored.clone().or(p.implicit_default.map(str::to_string));
-        let set = set(p.name, stored.clone());
+        let set = set(key, stored.clone());
         // A choice among `values`; a current value outside them is shown as
         // kept rather than as one of them.
         let choice = |values: &[&'static str], set: Box<dyn Fn(String)>| {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use unlinked_model::validation::{validate_structure, Diagnostic, DiagnosticTarget, Severity};
-use unlinked_model::{catalog, Block, BlockId, Model};
+use unlinked_model::{catalog, Block, BlockId, Commented, Model};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CheckMode {
@@ -236,12 +236,39 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
             remember(&mut ids, block.id.0.clone(), location.clone());
             let flat = format!("{prefix}{}", block.id.0.replace('/', "//"));
             remember(&mut ids, flat.clone(), location.clone());
-            if crate::vector::supported_library(block) {
-                // A Discontinuities link the simulator lowers natively.
-            } else if block.mask.is_some() || block.library_source.is_some() {
+            if let Some(reason) = crate::commented::refusal(block) {
+                report.emit(
+                    Severity::Error,
+                    "simulation_commented",
+                    target(&path, block, Some("Commented")),
+                    reason,
+                );
+            }
+            if block.commented().is_ok_and(|c| c != Commented::Off) {
+                // Commented blocks are removed before simulation (Commented=on
+                // grounds their destinations, Commented=through wires input i
+                // to output i), so their own parameters are never evaluated
+                // and their contents never run.
+                continue;
+            }
+            // Registered library sources (Ramp, Chirp Signal, Repeating
+            // Sequence) lower like native blocks and are not flagged as links.
+            // Index Vector and Environment Controller lower natively too.
+            let supported_link = block.mask.is_none()
+                && block.subsystem.is_none()
+                && block.block_type == "Reference"
+                && block
+                    .library_source
+                    .as_deref()
+                    .is_some_and(|src| crate::vector::supported_library_source(src).is_some());
+            // Discontinuities links are catalog library descriptors.
+            let supported_link = supported_link || crate::vector::supported_library(block);
+            let library = crate::library::lowered_type(block).or(supported_link.then_some("link"));
+            if library.is_none() && (block.mask.is_some() || block.library_source.is_some()) {
                 report.emit(Severity::Warning, "simulation_link_or_mask", location.clone(),
                     "Masks and library links require supported explicit lowering before simulation.".into());
-            } else if block.subsystem.is_none()
+            } else if library.is_none()
+                && block.subsystem.is_none()
                 && !crate::vector::supported_native_type(&block.block_type)
             {
                 report.emit(
@@ -265,17 +292,6 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     "Provide an explicit root input binding to compile this model.".into(),
                 );
             }
-            if block
-                .param("Commented")
-                .is_some_and(|v| !matches!(v, "" | "off"))
-            {
-                report.emit(
-                    Severity::Warning,
-                    "simulation_commented",
-                    location.clone(),
-                    "Commented and pass-through blocks are not supported by the simulator.".into(),
-                );
-            }
             if block.mask.is_none() && block.library_source.is_none() {
                 for (key, allowed) in crate::import::literal_requirements(&block.block_type) {
                     if let Some(value) = block.param(key).filter(|v| !allowed.contains(v)) {
@@ -293,7 +309,8 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                     ) {
                         continue;
                     }
-                    let Some(value) = block.param(p.name).map(str::trim) else {
+                    let key = p.key_in(&block.parameters);
+                    let Some(value) = block.param(key).map(str::trim) else {
                         continue;
                     };
                     if identifier(value)
@@ -301,7 +318,7 @@ pub fn diagnose(model: &Model, context: &DiagnosticContext) -> DiagnosticReport 
                         && !model.workspace.contains_key(value)
                         && !context.workspace.contains_key(value)
                     {
-                        report.emit(Severity::Warning, "workspace_binding_missing", target(&path, block, Some(p.name)),
+                        report.emit(Severity::Warning, "workspace_binding_missing", target(&path, block, Some(key)),
                             format!("{value} is not in the supplied workspace. Supply its value or an explicitly evaluated init-script context; diagnostics never run callbacks."));
                     }
                 }

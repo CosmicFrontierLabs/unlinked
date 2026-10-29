@@ -6,15 +6,17 @@ filesystem, network, subprocess or native runtime dependency. `compile` resolves
 `simulate_model` combines both. Trace JSON contains sample times, stable block
 IDs mapped to scalar sample vectors, and the selected solver.
 
-Implemented: Constant/Ground, Clock, Step, time-based Sine, Gain, Bias, Sum/Add,
+Implemented: Constant/Ground, Clock, Step, time-based Sine, time-based Pulse
+Generator, Signal Generator (sine/square/sawtooth), Ramp, Chirp Signal,
+Repeating Sequence, Gain, Bias, Sum/Add,
 Product/division, Saturation, the stateless Discontinuities (Dead Zone,
 Quantizer, Coulomb & Viscous Friction, Wrap To Zero, Saturation Dynamic, Dead
-Zone Dynamic), Integrator, UnitDelay, Abs, scalar trigonometric
-and math operations, scalar relational comparisons, logical operators, nonzero
-Switch routing, and single-input sinks. Logic and relational outputs use exact
-0/1 scalar values, including declared boolean outputs. Switch currently accepts
-only `Criteria=u2 ~= 0`; threshold criteria require signal datatype propagation
-to reproduce boolean-control behavior and therefore reject. Explicit zero-crossing
+Zone Dynamic), Integrator, UnitDelay, Abs, the stateless Math
+Operations blocks listed under "Math operations" below, scalar relational
+comparisons, logical operators, Switch routing, the Signal Routing selection
+blocks (Selector, Multiport Switch and Index Vector, Manual Switch, Environment
+Controller; see below), and single-input sinks. Logic and relational outputs
+use exact 0/1 scalar values, including declared boolean outputs. Explicit zero-crossing
 detection on Switch/RelationalOperator/DeadZone rejects; no event root finding is implied. Ordinary virtual subsystems lower
 to identity boundary nodes with qualified block IDs. Raw block parameters and model
 workspace expressions use the pure `unlinked-matlab::eval_array_expr` evaluator. Workspace dependencies
@@ -146,8 +148,78 @@ limit sooner. Trusted native callers can pass an explicit `ArrayBudget` to
 `simulate_with_observer_and_budget`; server jobs retain the fixed budget, shared
 with initialization, plus the 30-second cooperative deadline and 25,001-sample
 cap. Budget exhaustion is an explicit error, never a partial successful trace.
-Blocks marked `Commented=on` or `Commented=through` are rejected until their
-removal/bypass semantics are implemented, including nested and routing blocks.
+
+### Commented blocks
+
+Blocks marked `Commented=on` are removed before simulation as Simulink's
+[Comment Out](https://www.mathworks.com/help/simulink/ug/comment-out-blocks.html)
+does: the signals into them are terminated and every destination their outputs
+fed reads Ground (0). Blocks marked `Commented=through` are removed and input
+*i* is wired straight to output *i*; an undriven input grounds its outputs.
+Both work at every subsystem level and around Goto/From routing (a
+commented-out Goto grounds its From blocks), and the removed blocks are never
+evaluated or validated: neither their parameters nor anything inside a
+commented subsystem, including its routing blocks and MATLAB Function charts.
+As in Simulink, comment through is refused for blocks whose input and output
+port counts differ or that have control or connection ports (so also for Goto
+and From); Inport, Outport, Goto Tag Visibility and Data Store Memory blocks
+cannot be commented, and any other `Commented` value is rejected. The renderer
+greys commented blocks and their lines, dashes the commented-through path and
+shows the `%` or `%%` badge.
+
+Two known divergences from Simulink: the Ground standing in for a
+commented-out block is recorded in the trace under that block's own ID (so a
+trace equals the edited model's only when the commented block had no connected
+outputs; Simulink logs nothing for it), and that Ground is scalar, so a
+width-sensitive destination such as an equal-width Demux reports its own width
+error where Simulink would back-propagate the destination width.
+
+### Math operations
+
+Elementwise blocks accept scalars, vectors and matrices with scalar expansion
+between two inputs. Results that leave the reals (log or sqrt of a negative,
+`reciprocal` of zero, `rem(x, 0)`, `acosh` below one) are non-finite signal
+errors, never substituted values; complex output types reject.
+
+- **Math Function** (`Operator`): `exp`, `log`, `2^u`, `10^u`, `log10`,
+  `magnitude^2`, `square`, `conj` (identity on reals), `reciprocal` (exact
+  division only), the two-input `pow`, `hypot`, `rem`, `mod`, and
+  `transpose`/`hermitian`. `rem` takes the sign of the dividend and `mod` the
+  sign of the divisor with `mod(x, 0) = x`, and both compensate for
+  floating-point round-off as MATLAB does (`mod(4*pi, 2*pi)` and `rem(1, 0.1)`
+  are exactly 0). `pow` with *Signed power* on (the default) is `sign(u)*|u|^v`
+  for both the `auto` and `real` output types, since every signal here is
+  real, as the
+  [block reference](https://www.mathworks.com/help/simulink/slref/mathfunction.html)
+  specifies; with *Signed power* off it is `u^v`. `transpose` and `hermitian`
+  (equal on reals) swap the rows and columns of a matrix signal; a 1-D vector
+  has no orientation and rejects, so use an oriented `1xN`/`Nx1` Constant
+  (`VectorParams1D=off`). `OutputSignalType=complex` and Newton-Raphson
+  reciprocals reject.
+- **Trigonometric Function** (`Operator`): `sin`, `cos`, `tan`, `asin`, `acos`,
+  `atan`, `atan2` (y on port 1, x on port 2), `sinh`, `cosh`, `tanh`, `asinh`,
+  `acosh`, `atanh`, and `sincos` with separate sine (port 1) and cosine (port 2)
+  outputs traced as `id:out:1` / `id:out:2`. `cos + jsin`, CORDIC/Lookup
+  approximations and complex outputs reject.
+- **Sqrt** (`Operator`): `sqrt`, `signedSqrt` (`sign(u)*sqrt(|u|)`, defined for
+  negatives) and `rSqrt` (`1/sqrt(u)`); exact algorithms only, so the
+  Newton-Raphson and Lookup methods reject under both the pre-R2026b
+  `AlgorithmType` name and `SqrtAlgorithmType`/`RSqrtAlgorithmType`.
+- **Sign**, **Unary Minus**, **Rounding Function** (`floor`, `ceil`, `round`
+  with halves away from zero, `fix` toward zero).
+- **Polynomial** (`coefs` in descending powers, as `polyval`), evaluated
+  elementwise by Horner's rule with up to 1,024 coefficients. A block without
+  `coefs` uses the file's `BlockParameterDefaults`, else Simulink's library
+  default polynomial; palette blocks are created with an explicit `[1 0]`.
+- **Dot Product**: `sum(u1 .* u2)` of two scalars, 1-D vectors or column
+  vectors of equal length, lowered to Product terms `id:$dot:k` and a Sum;
+  other matrices reject. Expanding a scalar against a vector is an Unlinked
+  extension that the block reference does not describe.
+- **MinMax** (`Function`, `Inputs`): one input reduces a scalar or 1-D vector
+  to a scalar; several inputs compare elementwise with scalar expansion.
+  Matrix reduction, `CollapseMode=Specified dimension` and the library
+  *MinMax Running Resettable* block reject. Zero-crossing settings are ignored
+  as for Abs and Saturation: there is no event root finding.
 
 ### Stateless discontinuities
 
@@ -198,6 +270,124 @@ inherited (`-1`) sample times reject until rate inference is supported. Periods
 must be positive integer multiples of the observation step; offsets and continuous
 sample times reject. Sampling is direct-feedthrough at hits, so an algebraic
 feedback loop still rejects. See the [block reference](https://www.mathworks.com/help/simulink/slref/zeroorderhold.html).
+
+### Signal routing selection
+
+Selection is resolved during dimensional lowering on the scalar wires, so no
+block here adds runtime state except the Multiport Switch's per-step index.
+Anything outside the subsets below rejects with a diagnostic naming the block
+and parameter; nothing is approximated.
+
+- **Switch** accepts all three criteria. `u2 ~= 0` passes the first input for a
+  nonzero control; `u2 >= Threshold` and `u2 > Threshold` compare the control
+  and the scalar `Threshold` (default 0; not evaluated for the nonzero
+  criterion) as doubles, so the boundary value passes for `>=` and not for `>`.
+  An imported block without `Criteria` uses `u2 >= Threshold`, the built-in
+  default Simulink writes to `BlockParameterDefaults` (the reference page's
+  `u2 > Threshold` default is the library block's, whose copies store the
+  criterion explicitly). Simulink gives boolean controls special treatment when a
+  threshold is "improper" (ignoring it with a warning); that depends on signal
+  datatype propagation and still follows #149, so a boolean control is compared
+  as its exact 0/1 value. [Reference](https://www.mathworks.com/help/simulink/slref/switch.html).
+- **Selector** supports `NumberOfDimensions` 1 and 2, both `IndexMode`s, and per
+  dimension `Select all`, `Index vector (dialog)` (any order, repeats allowed)
+  and `Starting index (dialog)` with an output size, read from the
+  comma-separated `IndexOptions`/`Indices`/`OutputSizes` that files store or
+  the programmatic `IndexOptionArray`/`IndexParamArray`/`OutputSizeArray` cell
+  arrays (a block carrying both spellings must agree, since merged file
+  defaults cannot be told from the block's own values), plus the legacy
+  `Elements`/`InputPortWidth`/`ElementSrc` spelling. A 1-D selection of one
+  element is a scalar; otherwise a 1-D vector. A 2-D selection requires a
+  matrix input (orientation-less vectors reject) and keeps two dimensions, so
+  one selected row is a 1-by-N matrix. Indices are bounds-checked against the
+  input at compile time; `InputPortWidth` other than -1 must match the input.
+  Every port-driven index option, more than two dimensions and an index port
+  reject. [Reference](https://www.mathworks.com/help/simulink/slref/selector.html).
+- **Multiport Switch** reads `Inputs`, `DataPortOrder` (`Zero-based contiguous`,
+  `One-based contiguous`, `Specify indices` with a `DataPortIndices` cell array;
+  the legacy `zeroidx` flag is honored when `DataPortOrder` is absent),
+  `DataPortForDefault` (`Last data port` or `Additional data port`) and
+  `DiagnosticForDefault`. The control must be scalar and is truncated toward
+  zero before matching, as the reference page states. An unmatched control
+  value stops the run when the diagnostic is `Error` (the documented default)
+  and otherwise selects the default port; `Warning` produces no output
+  difference from `None` and no warning is surfaced. Data ports broadcast
+  scalars against matching shapes. With one data port the block is an index
+  vector: the control selects an element of that scalar or 1-D vector by the
+  contiguous order (`Specify indices` and an additional default port reject
+  there). `AllowDiffInputSizes=on` rejects.
+  [Reference](https://www.mathworks.com/help/simulink/slref/multiportswitch.html).
+- **Index Vector** (`simulink/Signal Routing/Index Vector`, a linked `Reference`)
+  lowers onto the Multiport Switch with the library's one zero-based data port;
+  parameters the link overrides take precedence. Simulink saves copies of this
+  unmasked built-in as plain `MultiPortSwitch` blocks, which is also what the
+  palette creates; the link form is an import convenience.
+  [Reference](https://www.mathworks.com/help/simulink/slref/indexvector.html).
+- **Manual Switch** passes its first input for position 1 and its second for
+  position 0, with scalar expansion between the inputs. Files store the
+  position as `CurrentSetting` (the corpus instance and its file defaults use
+  nothing else); the programmatic `sw` is also read and wins when both are
+  present. The reference page gives no default, so an absent position rejects,
+  as does `varsize=on`.
+  [Reference](https://www.mathworks.com/help/simulink/slref/manualswitch.html).
+- **Environment Controller** (`simulink/Signal Routing/Environment Controller`,
+  a linked `Reference`) passes its Sim input (port 1); both inputs must have
+  identical dimensions. MathWorks has retired the block in favor of Variant
+  Source, which is not implemented.
+  [Reference](https://www.mathworks.com/help/simulink/slref/environmentcontroller.html).
+
+Variant Source/Sink, Vector Concatenate, Signal Conversion and other library
+links remain unsupported and reject.
+
+### Time-based sources
+
+`DiscretePulseGenerator` (Pulse Generator) runs only with `PulseType=Time based`
+and simulation time as its time source: the output is 0 until `PhaseDelay`,
+then `Amplitude` for `Period*PulseWidth/100` seconds of every `Period`, with
+the rising edge taking the high value and the falling edge the low one, as in
+the parameter-effects figure of the
+[block reference](https://www.mathworks.com/help/simulink/slref/pulsegenerator.html).
+`Sample based` pulses, an external time signal, constant configurations
+(a width of 0 % or 100 %, which Simulink also rejects) and negative phase
+delays reject. `SignalGenerator` supports `WaveForm` sine, square and
+sawtooth with `Units` `rad/sec` or `Hertz`, following the default-output
+figures of the
+[block reference](https://www.mathworks.com/help/simulink/slref/signalgenerator.html):
+sine is `A sin(ωt)`, square is `-A` over the first half of each period and
+`+A` over the second, and sawtooth falls linearly from `+A` at the start of
+each period to `-A` at its end. The `random` waveform and an external time
+source reject; square and sawtooth need a positive frequency. Both blocks
+expand scalar parameters against vector or matrix ones (`VectorParams1D`).
+
+Three library blocks are recognised by their `SourceBlock` path on `Reference`
+blocks and lowered from their mask parameters: `simulink/Sources/Ramp`
+(`slope`, `start`, and the initial output as `X0` or, in files following the
+current reference, `InitialOutput`; the catalog dialog edits whichever key the
+block carries; output `X0` until `start`, then `X0 + slope*(t - start)`;
+[reference](https://www.mathworks.com/help/simulink/slref/ramp.html)),
+`simulink/Sources/Chirp Signal` (`f1`, `T`, `f2`; no phase parameter;
+`sin(2π(f1 t + (f2 - f1) t²/(2T)))`, whose instantaneous frequency sweeps
+linearly from `f1` to `f2` at `T` and keeps changing at that rate afterwards;
+the start time must be 0 as the
+[reference](https://www.mathworks.com/help/simulink/slref/chirpsignal.html)
+requires) and `simulink/Sources/Repeating Sequence` (`rep_seq_t`, `rep_seq_y`;
+linear interpolation repeated with the last time value as the period, per the
+[reference](https://www.mathworks.com/help/simulink/slref/repeatingsequence.html);
+times must be strictly increasing from 0, since the published algorithm is
+stated for sequences starting at zero). Ramp and Chirp parameters expand like
+the native sources; a Repeating Sequence is scalar. Any other link or mask
+still rejects.
+
+Like Step transitions, every edge of these sources must fall on the sampling
+grid for fixed-step runs: the Pulse Generator phase delay must be a sample time
+and its period and high time whole numbers of steps (the fixed-step guidance of
+its reference); the square half period and the sawtooth period must be whole
+numbers of steps with time zero on the grid (the default 1 rad/s period of 2π
+therefore rejects for those waveforms; use Hertz or a dividing step); and a
+Repeating Sequence whose first and last output values differ needs its period
+on the grid. Smooth sources (sine, ramp, chirp, a sequence that wraps
+continuously) have no such constraint. At an edge the solver uses the left
+limit when integrating the preceding interval, so pulse integrals are exact.
 
 ### Random sources
 
