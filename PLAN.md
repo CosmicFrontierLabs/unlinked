@@ -167,8 +167,10 @@ CI. Per-model import, render and simulation coverage is tracked in
   scripts retain their recorded version; missing scripts prevent reuse.
 - Solvers: Euler, RK4, adaptive Dormand–Prince 5(4).
 - Blocks: sources (Constant, Clock, Step, Sine), Gain, Bias, Sum, Product,
-  Saturation, Integrator, UnitDelay, Abs, math/trig, relational and logical
-  operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
+  Saturation, Integrator, UnitDelay, Abs, Math Function and Trigonometric
+  Function (real operators, including two-input and `sincos`), Sqrt, Sign,
+  Rounding, Unary Minus, Polynomial, Dot Product, MinMax, relational and
+  logical operators, Switch (`u2 ~= 0`), Mux/Demux, virtual subsystems, proper SISO
   TransferFcn, SISO StateSpace, DiscreteTransferFcn; fixed-size vector and
   matrix signals lowered to scalars. The authoritative list and its limits are
   in [`crates/unlinked-sim/README.md`](crates/unlinked-sim/README.md).

@@ -7,9 +7,9 @@ filesystem, network, subprocess or native runtime dependency. `compile` resolves
 IDs mapped to scalar sample vectors, and the selected solver.
 
 Implemented: Constant/Ground, Clock, Step, time-based Sine, Gain, Bias, Sum/Add,
-Product/division, Saturation, Integrator, UnitDelay, Abs, scalar trigonometric
-and math operations, scalar relational comparisons, logical operators, nonzero
-Switch routing, and single-input sinks. Logic and relational outputs use exact
+Product/division, Saturation, Integrator, UnitDelay, Abs, the stateless Math
+Operations blocks listed under "Math operations" below, scalar relational
+comparisons, logical operators, nonzero Switch routing, and single-input sinks. Logic and relational outputs use exact
 0/1 scalar values, including declared boolean outputs. Switch currently accepts
 only `Criteria=u2 ~= 0`; threshold criteria require signal datatype propagation
 to reproduce boolean-control behavior and therefore reject. Explicit zero-crossing
@@ -146,6 +146,44 @@ with initialization, plus the 30-second cooperative deadline and 25,001-sample
 cap. Budget exhaustion is an explicit error, never a partial successful trace.
 Blocks marked `Commented=on` or `Commented=through` are rejected until their
 removal/bypass semantics are implemented, including nested and routing blocks.
+
+### Math operations
+
+Elementwise blocks accept scalars, vectors and matrices with scalar expansion
+between two inputs. Results that leave the reals (log or sqrt of a negative,
+`reciprocal` of zero, `rem(x, 0)`, `acosh` below one) are non-finite signal
+errors, never substituted values; complex output types reject.
+
+- **Math Function** (`Operator`): `exp`, `log`, `10^u`, `log10`, `magnitude^2`,
+  `square`, `conj` (identity on reals), `reciprocal` (exact division only), the
+  two-input `pow`, `hypot`, `rem`, `mod`, and `transpose`/`hermitian`.
+  `rem` takes the sign of the dividend and `mod` the sign of the divisor with
+  `mod(x, 0) = x`, following MATLAB. `pow` is `u^v`; with
+  `OutputSignalType=real` and *Signed power* on it is `sign(u)*|u|^v` as the
+  [block reference](https://www.mathworks.com/help/simulink/slref/mathfunction.html)
+  specifies. `transpose` and `hermitian` (equal on reals) swap the rows and
+  columns of a matrix signal; a 1-D vector has no orientation and rejects, so
+  use an oriented `1xN`/`Nx1` Constant (`VectorParams1D=off`). `2^u`,
+  `OutputSignalType=complex` and Newton-Raphson reciprocals reject.
+- **Trigonometric Function** (`Operator`): `sin`, `cos`, `tan`, `asin`, `acos`,
+  `atan`, `atan2` (y on port 1, x on port 2), `sinh`, `cosh`, `tanh`, `asinh`,
+  `acosh`, `atanh`, and `sincos` with separate sine (port 1) and cosine (port 2)
+  outputs traced as `id:out:1` / `id:out:2`. `cos + jsin`, CORDIC/Lookup
+  approximations and complex outputs reject.
+- **Sqrt** (`Operator`): `sqrt`, `signedSqrt` (`sign(u)*sqrt(|u|)`, defined for
+  negatives) and `rSqrt` (`1/sqrt(u)`); exact algorithms only.
+- **Sign**, **Unary Minus**, **Rounding Function** (`floor`, `ceil`, `round`
+  with halves away from zero, `fix` toward zero).
+- **Polynomial** (`coefs` in descending powers, as `polyval`), evaluated
+  elementwise by Horner's rule with up to 1,024 coefficients.
+- **Dot Product**: `sum(u1 .* u2)` of two scalars, 1-D vectors or column
+  vectors of equal length (a scalar expands), lowered to Product terms
+  `id:$dot:k` and a Sum; other matrices reject.
+- **MinMax** (`Function`, `Inputs`): one input reduces a scalar or 1-D vector
+  to a scalar; several inputs compare elementwise with scalar expansion.
+  Matrix reduction, `CollapseMode=Specified dimension` and the library
+  *MinMax Running Resettable* block reject. Zero-crossing settings are ignored
+  as for Abs and Saturation: there is no event root finding.
 
 ### Zero-order hold
 
