@@ -62,6 +62,16 @@ pub(super) fn lower_charts(
                     "ambiguous duplicate block name in chart path",
                 ));
             }
+            if matches!(
+                block.commented(),
+                Ok(unlinked_model::Commented::Out | unlinked_model::Commented::Through)
+            ) {
+                // The commented pass drops this block with everything inside
+                // it, so its charts are neither validated nor lowered; they
+                // only count as matched so the path check below still holds.
+                mark_commented(block, &path, depth, charts, seen, work)?;
+                continue;
+            }
             if let Some(chart) = charts.get(path.as_str()) {
                 if !seen.insert(path.clone()) {
                     return Err(block_error(&block.id.0, "ambiguous chart path"));
@@ -216,6 +226,32 @@ pub(super) fn lower_charts(
             } else if let Some(sub) = &mut block.subsystem {
                 walk(sub, &path, depth + 1, charts, seen, work, budget)?;
             }
+        }
+        Ok(())
+    }
+
+    fn mark_commented(
+        block: &unlinked_model::Block,
+        path: &str,
+        depth: usize,
+        charts: &BTreeMap<&str, &unlinked_model::Chart>,
+        seen: &mut BTreeSet<String>,
+        work: &mut usize,
+    ) -> Result<(), Error> {
+        if depth > 64 {
+            return Err(Error::Options(
+                "MATLAB Function chart path exceeds 64 subsystem levels".into(),
+            ));
+        }
+        if charts.contains_key(path) {
+            seen.insert(path.to_string());
+        }
+        for child in block.subsystem.iter().flat_map(|sub| &sub.blocks) {
+            *work = work.checked_sub(1).ok_or_else(|| {
+                Error::Options("MATLAB Function path traversal exceeds 100000 blocks".into())
+            })?;
+            let child_path = format!("{path}/{}", child.name.replace('/', "//"));
+            mark_commented(child, &child_path, depth + 1, charts, seen, work)?;
         }
         Ok(())
     }

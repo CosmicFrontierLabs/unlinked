@@ -236,6 +236,18 @@ fn commented_matlab_function_block_is_removed_as_one_node() {
             );
         }
     }
+    // A commented function block is never validated: an invalid chart that
+    // fails live is simply dropped with the block.
+    let mut broken = m.clone();
+    broken.charts[0].script = None;
+    assert!(compile(&broken, &options()).is_err());
+    for setting in ["on", "through"] {
+        let mut m = broken.clone();
+        m.root.blocks[1]
+            .parameters
+            .insert("Commented".into(), setting.into());
+        assert!(compile(&m, &options()).is_ok(), "{setting}");
+    }
     // Commented content inside the generated backing subsystem is still refused.
     m.root.blocks[1].subsystem.as_mut().unwrap().blocks[1]
         .parameters

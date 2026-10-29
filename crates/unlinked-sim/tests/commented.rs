@@ -314,6 +314,197 @@ fn commented_blocks_around_goto_from_routing() {
 }
 
 #[test]
+fn contents_of_a_commented_subsystem_are_never_routed_or_validated() {
+    // The body would fail routing live: a From with no Goto drives the
+    // Outport and a Goto has scoped visibility. Simulink ignores everything
+    // inside a commented block, so compile and diagnose must agree it is fine.
+    let body = || System {
+        blocks: vec![
+            block("in", "Inport", &[("Port", "1")], 0, 1),
+            block(
+                "goto",
+                "Goto",
+                &[("GotoTag", "S"), ("TagVisibility", "scoped")],
+                1,
+                0,
+            ),
+            block("from", "From", &[("GotoTag", "MISSING")], 0, 1),
+            block("out", "Outport", &[("Port", "1")], 1, 0),
+        ],
+        lines: vec![line("in", 1, "goto", 1), line("from", 1, "out", 1)],
+        ..System::default()
+    };
+    let root = |params: &[(&str, &str)]| {
+        let mut sub = block("sub", "SubSystem", params, 1, 1);
+        sub.subsystem = Some(Box::new(body()));
+        model(
+            vec![
+                block("clock", "Clock", &[], 0, 1),
+                sub,
+                block("two", "Constant", &[("Value", "2")], 0, 1),
+                block("sum", "Sum", &[("Inputs", "++")], 2, 1),
+            ],
+            vec![
+                line("clock", 1, "sub", 1),
+                line("sub", 1, "sum", 1),
+                line("two", 1, "sum", 2),
+            ],
+        )
+    };
+    let e = error(&root(&[]));
+    assert!(e.contains("Goto"), "{e}");
+    for (setting, expected) in [("on", 0.0), ("through", 1.0)] {
+        let m = root(&[("Commented", setting)]);
+        assert_signal(&run(&m), "sum", |t| expected * t + 2.0);
+        let report = diagnose(&m, &DiagnosticContext::default());
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.code.starts_with("simulation_")),
+            "{setting}: {:?}",
+            report.diagnostics
+        );
+    }
+    // Nested deeper, the commented level still shields everything below it.
+    let mut outer = block("outer", "SubSystem", &[("Commented", "on")], 1, 1);
+    let mut inner = block("sub", "SubSystem", &[], 1, 1);
+    inner.subsystem = Some(Box::new(body()));
+    outer.subsystem = Some(Box::new(System {
+        blocks: vec![
+            block("in", "Inport", &[("Port", "1")], 0, 1),
+            inner,
+            block("out", "Outport", &[("Port", "1")], 1, 0),
+        ],
+        lines: vec![line("in", 1, "sub", 1), line("sub", 1, "out", 1)],
+        ..System::default()
+    }));
+    let mut m = root(&[]);
+    m.root.blocks[1] = outer;
+    m.root.lines = vec![
+        line("clock", 1, "outer", 1),
+        line("outer", 1, "sum", 1),
+        line("two", 1, "sum", 2),
+    ];
+    assert_signal(&run(&m), "sum", |_| 2.0);
+}
+
+#[test]
+fn commented_out_routing_blocks_need_no_match_and_are_never_validated() {
+    let routed = |goto_params: &[(&str, &str)], from_params: &[(&str, &str)]| {
+        model(
+            vec![
+                block("clock", "Clock", &[], 0, 1),
+                block("goto", "Goto", goto_params, 1, 0),
+                block("from", "From", from_params, 0, 1),
+                block("two", "Constant", &[("Value", "2")], 0, 1),
+                block("sum", "Sum", &[("Inputs", "++")], 2, 1),
+            ],
+            vec![
+                line("clock", 1, "goto", 1),
+                line("from", 1, "sum", 1),
+                line("two", 1, "sum", 2),
+            ],
+        )
+    };
+    // A commented-out scoped Goto is not refused; its From reads ground.
+    let scoped = [
+        ("GotoTag", "A"),
+        ("TagVisibility", "scoped"),
+        ("Commented", "on"),
+    ];
+    assert!(error(&routed(&scoped[..2], &[("GotoTag", "A")])).contains("visibility"));
+    assert_signal(&run(&routed(&scoped, &[("GotoTag", "A")])), "sum", |_| 2.0);
+    // A commented-out From with no matching Goto is simply gone.
+    let t = run(&routed(
+        &[("GotoTag", "A")],
+        &[("GotoTag", "NOWHERE"), ("Commented", "on")],
+    ));
+    assert_signal(&t, "sum", |_| 2.0);
+    // A live Goto keeps its tag even when a commented-out one shares it.
+    let mut m = routed(&[("GotoTag", "A")], &[("GotoTag", "A")]);
+    m.root.blocks.push(block(
+        "goto2",
+        "Goto",
+        &[("GotoTag", "A"), ("Commented", "on")],
+        1,
+        0,
+    ));
+    m.root.lines.push(line("two", 1, "goto2", 1));
+    assert_signal(&run(&m), "sum", |t| t + 2.0);
+}
+
+#[test]
+fn comment_through_pairs_input_i_with_output_i() {
+    // The subsystem swaps its ports; commented through, the swap is gone and
+    // input i feeds output i as in Simulink.
+    let mut swap = block("swap", "SubSystem", &[("Commented", "through")], 2, 2);
+    swap.subsystem = Some(Box::new(System {
+        blocks: vec![
+            block("in1", "Inport", &[("Port", "1")], 0, 1),
+            block("in2", "Inport", &[("Port", "2")], 0, 1),
+            block("out1", "Outport", &[("Port", "1")], 1, 0),
+            block("out2", "Outport", &[("Port", "2")], 1, 0),
+        ],
+        lines: vec![line("in1", 1, "out2", 1), line("in2", 1, "out1", 1)],
+        ..System::default()
+    }));
+    let m = model(
+        vec![
+            block("clock", "Clock", &[], 0, 1),
+            block("ten", "Constant", &[("Value", "10")], 0, 1),
+            swap,
+            block("a", "Gain", &[("Gain", "1")], 1, 1),
+            block("b", "Gain", &[("Gain", "1")], 1, 1),
+        ],
+        vec![
+            line("clock", 1, "swap", 1),
+            line("ten", 1, "swap", 2),
+            line("swap", 1, "a", 1),
+            line("swap", 2, "b", 1),
+        ],
+    );
+    let t = run(&m);
+    assert_signal(&t, "a", |t| t);
+    assert_signal(&t, "b", |_| 10.0);
+    // Live, the swap is in effect.
+    let mut live = m.clone();
+    live.root.blocks[2].parameters.remove("Commented");
+    let t = run(&live);
+    assert_signal(&t, "a", |_| 10.0);
+    assert_signal(&t, "b", |t| t);
+}
+
+#[test]
+fn conditional_subsystem_without_a_ports_vector_is_refused_comment_through() {
+    // Hand-built blocks may carry no `Ports` vector; the Enable port block
+    // inside still makes this a conditional subsystem.
+    let mut sub = block("sub", "SubSystem", &[("Commented", "through")], 0, 0);
+    sub.subsystem = Some(Box::new(System {
+        blocks: vec![
+            block("in", "Inport", &[("Port", "1")], 0, 1),
+            block("en", "EnablePort", &[], 0, 0),
+            block("out", "Outport", &[("Port", "1")], 1, 0),
+        ],
+        lines: vec![line("in", 1, "out", 1)],
+        ..System::default()
+    }));
+    let m = model(
+        vec![
+            block("one", "Constant", &[("Value", "1")], 0, 1),
+            sub,
+            block("sink", "Scope", &[], 1, 0),
+        ],
+        vec![line("one", 1, "sub", 1), line("sub", 1, "sink", 1)],
+    );
+    let e = error(&m);
+    assert!(
+        e.contains("block sub") && e.contains("control or connection ports"),
+        "{e}"
+    );
+}
+
+#[test]
 fn comment_through_is_refused_when_ports_do_not_pair_up() {
     let m = |sum_params: &[(&str, &str)], sink_params: &[(&str, &str)]| {
         model(

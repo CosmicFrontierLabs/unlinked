@@ -12,7 +12,15 @@
 //!
 //! This pass runs after Goto/From routing and chart lowering, so a commented
 //! Goto grounds its From blocks and a commented MATLAB Function block is
-//! dropped as one node. Removed blocks never have their parameters evaluated.
+//! dropped as one node; those earlier passes skip the contents of commented
+//! subsystems, which Simulink excludes along with the block. Removed blocks
+//! never have their parameters evaluated.
+//!
+//! Known divergences: the Ground standing in for a commented-out block is
+//! recorded in the trace under that block's ID (Simulink logs nothing for
+//! it) and is scalar, so a width-sensitive destination such as an
+//! equal-width Demux reports its own width error instead of inheriting the
+//! destination width as Simulink does.
 use crate::{block_error, Error};
 use std::collections::{BTreeMap, BTreeSet};
 use unlinked_model::{
@@ -87,14 +95,23 @@ pub fn value(setting: Commented) -> &'static str {
 }
 
 /// Port counts as stored. Blocks created without a `Ports` vector fall back
-/// to their boundary ports (subsystems) or the catalog.
+/// to their boundary ports (subsystems, including the control ports an
+/// Enable/Trigger/Action/Reset port block adds) or the catalog.
 fn signal_ports(block: &Block) -> Option<PortCounts> {
     if block.ports != PortCounts::default() {
         return Some(block.ports);
     }
     if let Some(sub) = block.subsystem.as_deref() {
         let count = |kind: &str| sub.blocks.iter().filter(|b| b.block_type == kind).count() as u32;
-        return Some(PortCounts::from_slice(&[count("Inport"), count("Outport")]));
+        return Some(PortCounts {
+            inputs: count("Inport"),
+            outputs: count("Outport"),
+            enable: count("EnablePort"),
+            trigger: count("TriggerPort"),
+            ifaction: count("ActionPort"),
+            reset: count("ResetPort"),
+            ..PortCounts::default()
+        });
     }
     match catalog::find(&block.block_type)?.resolve_ports(&block.parameters) {
         catalog::PortResolution::Known(ports) => Some(ports),
