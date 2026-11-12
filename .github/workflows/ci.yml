@@ -78,7 +78,11 @@ jobs:
 
   test:
     name: Tests
-    runs-on: ubuntu-latest
+    # Pinned: the Octave differential tests were written against Octave 8.4
+    # (ubuntu-24.04). ubuntu-26.04 ships Octave 11, which runs a for loop over
+    # zeros(0,3) three times (MATLAB behaviour) where the evaluator runs it
+    # zero times. Unpin once the evaluator follows the column count.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16-alpine
