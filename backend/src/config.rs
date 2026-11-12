@@ -1,6 +1,8 @@
 use crate::oauth::{OAuthClient, OAuthProviders, Provider};
 use oauth2::{basic::BasicClient, AuthUrl, ClientId, ClientSecret, RedirectUrl, TokenUrl};
 use std::env;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use tower_cookies::Key;
 use url::Url;
 
@@ -33,7 +35,8 @@ impl Config {
     /// Read configuration from the environment, applying defaults and logging
     /// each resolved value.
     ///
-    /// Outside dev mode a `SESSION_SECRET` of at least 64 bytes and at least
+    /// Outside dev mode a session secret of at least 64 bytes (`SESSION_SECRET`
+    /// or the file named by `SESSION_SECRET_FILE`) and at least
     /// one OAuth provider are required; misconfiguration fails at boot rather
     /// than on the first login attempt.
     pub fn from_env(dev_mode: bool) -> anyhow::Result<Self> {
@@ -71,20 +74,11 @@ impl Config {
             );
         }
 
-        let cookie_key = match env::var("SESSION_SECRET") {
-            Ok(secret) => {
-                tracing::info!("Config: SESSION_SECRET=<set>");
-                Key::try_from(secret.as_bytes())
-                    .map_err(|_| anyhow::anyhow!("SESSION_SECRET must be at least 64 bytes long"))?
-            }
-            Err(_) if dev_mode => {
-                tracing::warn!(
-                    "Config: SESSION_SECRET unset; using a random key (sessions end on restart)"
-                );
-                Key::generate()
-            }
-            Err(_) => anyhow::bail!("SESSION_SECRET must be set (at least 64 bytes)"),
-        };
+        let cookie_key = session_key(
+            env::var_os("SESSION_SECRET"),
+            env::var_os("SESSION_SECRET_FILE").map(PathBuf::from),
+            dev_mode,
+        )?;
 
         let oauth = OAuthProviders {
             google: build_provider(Provider::Google)?,
@@ -128,6 +122,68 @@ impl Config {
         };
         self.allowed_email_domains.contains(&domain.to_lowercase())
     }
+}
+
+/// Resolve the cookie key from `SESSION_SECRET` or `SESSION_SECRET_FILE`.
+///
+/// The file holds the same value the variable would; exactly one trailing
+/// newline (`\n` or `\r\n`) is stripped, so both sources yield the same key
+/// and sessions survive switching between them. Setting both is an error, and
+/// so is a file that is missing, unreadable or too short, in every mode:
+/// there is never a fallback to a random key once a file is named. Only an
+/// entirely unset secret in dev mode gets an ephemeral key. Neither the value
+/// nor its length is ever logged or included in an error.
+fn session_key(
+    secret: Option<OsString>,
+    secret_file: Option<PathBuf>,
+    dev_mode: bool,
+) -> anyhow::Result<Key> {
+    match (secret, secret_file) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("SESSION_SECRET and SESSION_SECRET_FILE are both set; set only one")
+        }
+        (Some(secret), None) => {
+            tracing::info!("Config: SESSION_SECRET=<set>");
+            let secret = secret
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("SESSION_SECRET must be valid UTF-8"))?;
+            key_from_secret(secret.as_bytes(), "SESSION_SECRET")
+        }
+        (None, Some(path)) => {
+            tracing::info!("Config: SESSION_SECRET_FILE={}", path.display());
+            let bytes = read_secret_file(&path)?;
+            key_from_secret(&bytes, "SESSION_SECRET_FILE")
+        }
+        (None, None) if dev_mode => {
+            tracing::warn!(
+                "Config: SESSION_SECRET unset; using a random key (sessions end on restart)"
+            );
+            Ok(Key::generate())
+        }
+        (None, None) => {
+            anyhow::bail!("SESSION_SECRET or SESSION_SECRET_FILE must be set (at least 64 bytes)")
+        }
+    }
+}
+
+/// Read a secret file, stripping exactly one trailing `\n` or `\r\n`.
+fn read_secret_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = std::fs::read(path).map_err(|e| {
+        anyhow::anyhow!(
+            "SESSION_SECRET_FILE {} could not be read: {e}",
+            path.display()
+        )
+    })?;
+    if bytes.ends_with(b"\r\n") {
+        bytes.truncate(bytes.len() - 2);
+    } else if bytes.ends_with(b"\n") {
+        bytes.truncate(bytes.len() - 1);
+    }
+    Ok(bytes)
+}
+
+fn key_from_secret(secret: &[u8], source: &str) -> anyhow::Result<Key> {
+    Key::try_from(secret).map_err(|_| anyhow::anyhow!("{source} must be at least 64 bytes long"))
 }
 
 fn parse_domains(raw: &str) -> Vec<String> {
@@ -195,6 +251,129 @@ mod tests {
             vec!["example.com".to_string(), "corp.io".to_string()]
         );
         assert!(parse_domains("").is_empty());
+    }
+
+    const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef-session";
+
+    /// A unique, self-deleting file in the system temp directory.
+    struct TempSecret(PathBuf);
+
+    impl TempSecret {
+        fn new(contents: &[u8]) -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "unlinked-session-secret-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempSecret {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn env_key() -> Key {
+        session_key(Some(SECRET.into()), None, false).unwrap()
+    }
+
+    fn file_key(contents: &[u8], dev_mode: bool) -> anyhow::Result<Key> {
+        let file = TempSecret::new(contents);
+        session_key(None, Some(file.0.clone()), dev_mode)
+    }
+
+    #[test]
+    fn session_secret_file_is_read() {
+        let key = file_key(SECRET.as_bytes(), false).unwrap();
+        assert_eq!(key.master(), env_key().master());
+    }
+
+    #[test]
+    fn session_secret_file_strips_one_trailing_newline() {
+        let read = |contents: &str| {
+            let file = TempSecret::new(contents.as_bytes());
+            read_secret_file(&file.0).unwrap()
+        };
+        assert_eq!(read(&format!("{SECRET}\n")), SECRET.as_bytes());
+        assert_eq!(read(&format!("{SECRET}\r\n")), SECRET.as_bytes());
+        assert_eq!(read(SECRET), SECRET.as_bytes());
+        // Exactly one newline is stripped; anything more is part of the secret.
+        assert_eq!(
+            read(&format!("{SECRET}\n\n")),
+            format!("{SECRET}\n").as_bytes()
+        );
+        assert_eq!(
+            read(&format!("{SECRET}\r\r\n")),
+            format!("{SECRET}\r").as_bytes()
+        );
+        assert_eq!(read("a\nb\n"), b"a\nb");
+
+        // Validation applies after stripping: 63 bytes plus a newline is too short.
+        let short = &SECRET[..63];
+        assert!(file_key(format!("{short}\n").as_bytes(), false).is_err());
+        assert!(file_key(format!("{short}\r\n").as_bytes(), false).is_err());
+        let env = env_key();
+        for contents in [format!("{SECRET}\n"), format!("{SECRET}\r\n")] {
+            let key = file_key(contents.as_bytes(), false).unwrap();
+            assert_eq!(key.master(), env.master(), "{contents:?}");
+        }
+    }
+
+    #[test]
+    fn session_secret_file_matches_env_and_is_deterministic() {
+        let a = file_key(format!("{SECRET}\n").as_bytes(), false).unwrap();
+        let b = file_key(format!("{SECRET}\n").as_bytes(), true).unwrap();
+        assert_eq!(a.master(), b.master());
+        assert_eq!(a.master(), env_key().master());
+        // The env path derives the same key from the same value every time.
+        assert_eq!(env_key().master(), env_key().master());
+    }
+
+    #[test]
+    fn session_secret_and_file_both_set_is_an_error() {
+        let file = TempSecret::new(SECRET.as_bytes());
+        for dev_mode in [false, true] {
+            let err = session_key(Some(SECRET.into()), Some(file.0.clone()), dev_mode)
+                .map(|_| ())
+                .expect_err("both set must fail");
+            assert!(err.to_string().contains("both set"), "{err}");
+        }
+    }
+
+    #[test]
+    fn missing_session_secret_file_is_an_error_in_every_mode() {
+        let path = std::env::temp_dir().join("unlinked-session-secret-does-not-exist");
+        for dev_mode in [false, true] {
+            let err = session_key(None, Some(path.clone()), dev_mode)
+                .map(|_| ())
+                .expect_err("missing file must fail");
+            assert!(err.to_string().contains("could not be read"), "{err}");
+        }
+    }
+
+    #[test]
+    fn short_session_secret_file_is_an_error_in_every_mode() {
+        for dev_mode in [false, true] {
+            for contents in [&b""[..], b"\n", b"too short\n"] {
+                let err = file_key(contents, dev_mode)
+                    .map(|_| ())
+                    .expect_err("short must fail");
+                assert!(err.to_string().contains("at least 64 bytes"), "{err}");
+                assert!(!err.to_string().contains("too short"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn unset_session_secret_requires_dev_mode() {
+        assert!(session_key(None, None, false).is_err());
+        assert!(session_key(None, None, true).is_ok());
+        assert!(session_key(Some("short".into()), None, true).is_err());
     }
 
     #[test]
