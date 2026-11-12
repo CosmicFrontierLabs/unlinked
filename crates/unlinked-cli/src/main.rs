@@ -273,8 +273,15 @@ fn compile_llvm(project: &unlinked_matlab::GeneratedProject, output: &Path) -> R
     } else {
         command.args(["--bin", "generated_matlab"]);
     }
+    // Name the module path explicitly rather than searching the target
+    // directory: Cargo's intermediate layout is not stable (Rust 1.100 moved
+    // it from `release/deps/<crate>-<hash>.ll` to `release/build/.../out/`).
+    let module = temporary.path().join("module.ll");
+    let mut emit = std::ffi::OsString::from("--emit=llvm-ir=");
+    emit.push(&module);
     let compiled = command
-        .args(["--", "--emit=llvm-ir"])
+        .arg("--")
+        .arg(emit)
         .output()
         .context("cannot start cargo; install Rust or emit the project without compiling")?;
     if !compiled.status.success() {
@@ -283,23 +290,10 @@ fn compile_llvm(project: &unlinked_matlab::GeneratedProject, output: &Path) -> R
             String::from_utf8_lossy(&compiled.stderr)
         );
     }
-    let artifacts: Vec<_> = std::fs::read_dir(target.join("release/deps"))?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension().is_some_and(|s| s == "ll")
-                && p.file_stem()
-                    .is_some_and(|s| s.to_string_lossy().starts_with("generated_matlab-"))
-        })
-        .collect();
-    if artifacts.len() != 1 {
-        bail!(
-            "expected one generated LLVM module, found {}",
-            artifacts.len()
-        );
+    if !module.is_file() {
+        bail!("cargo rustc did not produce an LLVM module");
     }
-    std::fs::copy(&artifacts[0], output)
-        .with_context(|| format!("cannot write {}", output.display()))?;
+    std::fs::copy(&module, output).with_context(|| format!("cannot write {}", output.display()))?;
     Ok(())
 }
 
