@@ -276,7 +276,7 @@ fn changed_content(old: &[u8], new: &[u8]) -> Vec<String> {
                 let mut f = a.by_index(i).unwrap();
                 let mut data = Vec::new();
                 std::io::Read::read_to_end(&mut f, &mut data).unwrap();
-                (f.name().to_string(), data)
+                (f.name().unwrap().into_owned(), data)
             })
             .collect::<std::collections::BTreeMap<_, _>>()
     };

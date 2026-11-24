@@ -13,6 +13,7 @@ use std::io::{Cursor, Read};
 
 pub struct SlxPackage {
     archive: zip::ZipArchive<Cursor<Vec<u8>>>,
+    names: Vec<String>,
     read_so_far: u64,
     /// Elements and attributes still allowed across all parsed parts.
     node_budget: usize,
@@ -22,8 +23,14 @@ impl SlxPackage {
     pub fn open(bytes: &[u8]) -> Result<Self, ImportError> {
         let archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec()))
             .map_err(|e| ImportError::Zip(e.to_string()))?;
+        let names = archive
+            .file_names()
+            .map(|name| name.map(|name| name.into_owned()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ImportError::Zip(e.to_string()))?;
         Ok(SlxPackage {
             archive,
+            names,
             read_so_far: 0,
             node_budget: crate::MAX_NODES,
         })
@@ -34,7 +41,7 @@ impl SlxPackage {
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.archive.file_names()
+        self.names.iter().map(String::as_str)
     }
 
     pub fn read_string(&mut self, name: &str) -> Result<String, ImportError> {

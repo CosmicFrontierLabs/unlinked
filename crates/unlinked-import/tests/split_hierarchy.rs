@@ -37,7 +37,7 @@ fn entries(bytes: &[u8]) -> BTreeMap<String, String> {
     (0..z.len())
         .map(|i| {
             let mut f = z.by_index(i).unwrap();
-            let name = f.name().to_string();
+            let name = f.name().unwrap().into_owned();
             let mut text = String::new();
             f.read_to_string(&mut text).unwrap();
             (name, text)
