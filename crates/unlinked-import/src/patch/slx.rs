@@ -1123,7 +1123,7 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
     let mut occupied = std::collections::BTreeSet::new();
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).map_err(zip_err)?;
-        let name = file.name().to_string();
+        let name = file.name().map_err(zip_err)?.into_owned();
         occupied.insert(name.clone());
         let wanted = is_block_part(&name)
             || config_part == Some(name.as_str())
@@ -1196,7 +1196,12 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
 
     let mut out = ZipWriter::new(Cursor::new(Vec::new()));
     for i in 0..archive.len() {
-        let name = archive.by_index_raw(i).map_err(zip_err)?.name().to_string();
+        let name = archive
+            .by_index_raw(i)
+            .map_err(zip_err)?
+            .name()
+            .map_err(zip_err)?
+            .into_owned();
         match parts.iter().find(|(n, _, changed)| *changed && *n == name) {
             Some((_, doc, _)) => {
                 let options =
@@ -1210,7 +1215,11 @@ pub(super) fn apply(bytes: &[u8], edits: &[Resolved]) -> Result<Vec<u8>, ImportE
                 .map_err(zip_err)?,
         }
     }
-    let existing: std::collections::BTreeSet<_> = archive.file_names().map(str::to_owned).collect();
+    let existing: std::collections::BTreeSet<_> = archive
+        .file_names()
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(zip_err)?;
     for (name, doc, _) in &parts {
         if !existing.contains(name) {
             out.start_file(
@@ -1430,10 +1439,10 @@ mod tests {
                 let mut a = ZipArchive::new(Cursor::new(bytes)).unwrap();
                 for i in 0..a.len() {
                     let mut f = a.by_index(i).unwrap();
-                    if !is_block_part(f.name()) {
+                    if !is_block_part(&f.name().unwrap()) {
                         continue;
                     }
-                    let name = f.name().to_string();
+                    let name = f.name().unwrap().into_owned();
                     let mut text = String::new();
                     f.read_to_string(&mut text).unwrap();
                     let doc = dom::parse(&text).unwrap();

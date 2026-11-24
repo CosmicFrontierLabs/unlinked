@@ -29,7 +29,7 @@ unlinked-matlab = { path = "../crates/unlinked-matlab" }
 rizzma = { version = "1.13.0", default-features = false, features = ["wasm"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 
-zip = { version = "8.6.0", default-features = false }
+zip = { version = "9.0.5", default-features = false }
 
 unlinked-sim = { path = "../crates/unlinked-sim" }
 
